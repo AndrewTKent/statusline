@@ -82,6 +82,9 @@ TOOL_SESSION_PATTERN = re.compile(
     r"""session_id["']?\s*:\s*["']?([A-Za-z0-9_-]+)"""
 )
 TOOL_SESSION_VALUE_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+NESTED_WORKDIR_PATTERN = re.compile(
+    r'''(?:\{|,)\s*["']?workdir["']?\s*:\s*(?P<value>"(?:\\.|[^"\\])*")'''
+)
 ROLLOUT_THREAD_ID_PATTERN = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
@@ -188,6 +191,7 @@ class RolloutActivity:
     last_agent_message: str
     active_tool: str
     last_tool: str
+    working_dirs: tuple[str, ...] = ()
 
 
 @dataclass
@@ -211,6 +215,7 @@ class ActivityState:
     last_user_message: str = ""
     last_agent_message: str = ""
     last_tool: str = ""
+    working_dirs: OrderedDict[str, None] = field(default_factory=OrderedDict)
 
 
 @dataclass
@@ -2209,6 +2214,27 @@ def tool_input_session(payload: dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
+def tool_working_dir(payload: dict[str, Any]) -> str:
+    raw_input = tool_arguments(payload)
+    if not raw_input and isinstance(payload.get("command"), str):
+        raw_input = payload["command"]
+    if not raw_input:
+        return ""
+    try:
+        parsed = json.loads(raw_input)
+    except json.JSONDecodeError:
+        matches = list(NESTED_WORKDIR_PATTERN.finditer(raw_input))
+        if not matches:
+            return ""
+        try:
+            value = json.loads(matches[-1].group("value"))
+        except json.JSONDecodeError:
+            return ""
+    else:
+        value = parsed.get("workdir") if isinstance(parsed, dict) else ""
+    return value if isinstance(value, str) and os.path.isabs(value) else ""
+
+
 def tool_result(payload: dict[str, Any]) -> dict[str, Any]:
     output = payload.get("output")
     if isinstance(output, dict):
@@ -2417,6 +2443,9 @@ def update_activity_state(state: RolloutStateEntry, item: dict[str, Any]) -> Non
                 activity.tool_sessions.pop(expired_call_id, None)
         activity.tool_calls += 1
         activity.last_tool = name
+        working_dir = tool_working_dir(payload)
+        if working_dir:
+            retain_recent_turn(activity.working_dirs, working_dir, None, 32)
         session_id = tool_input_session(payload)
         if call_id and session_id:
             activity.tool_sessions[call_id] = session_id
@@ -2775,6 +2804,7 @@ def activity_from_state(
         last_agent_message=state.last_agent_message or "-",
         active_tool=next(reversed(pending_tools.values()), "-"),
         last_tool=state.last_tool or "-",
+        working_dirs=tuple(state.working_dirs),
     )
 
 
@@ -2844,6 +2874,41 @@ PR_REFRESH_PROCESSES: list[subprocess.Popen[Any]] = []
 
 
 @lru_cache(maxsize=128)
+def git_checkout_identity(cwd: str, bucket: int) -> tuple[str, str] | None:
+    del bucket
+    try:
+        output = subprocess.check_output(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-common-dir"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        ).splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(output) != 2:
+        return None
+    root = os.path.realpath(output[0])
+    common = os.path.realpath(os.path.join(cwd, output[1]))
+    return root, common
+
+
+def recent_same_repository_checkout(launch_cwd: str, candidates: list[str]) -> str:
+    bucket = int(time.time() // GIT_INFO_TTL_SECONDS)
+    launch = git_checkout_identity(launch_cwd, bucket)
+    if launch is None:
+        return ""
+    launch_root, launch_common = launch
+    for candidate in reversed(candidates):
+        checkout = git_checkout_identity(candidate, bucket)
+        if checkout is None:
+            continue
+        root, common = checkout
+        if root != launch_root and common == launch_common:
+            return root
+    return ""
+
+
+@lru_cache(maxsize=128)
 def git_info(cwd: str, fallback_branch: str, bucket: int) -> GitInfo:
     path = cwd or os.getcwd()
     try:
@@ -2856,7 +2921,9 @@ def git_info(cwd: str, fallback_branch: str, bucket: int) -> GitInfo:
     except (subprocess.SubprocessError, OSError):
         return GitInfo(Path(path).name or "unknown", fallback_branch or "-", "", "", "")
 
-    repo = Path(root).name
+    checkout = git_checkout_identity(path, bucket)
+    common = Path(checkout[1]) if checkout else None
+    repo = common.parent.name if common and common.name == ".git" else Path(root).name
     try:
         branch_name = subprocess.check_output(
             ["git", "-C", root, "branch", "--show-current"],
@@ -3349,6 +3416,7 @@ def snapshot_for_thread(
     usage = usage_from_rollout(thread)
     tokens.session = usage.session_total
     repo_cwd = thread.cwd if prefer_thread_cwd else (cwd if paths_related(cwd, thread.cwd) else thread.cwd)
+    repo_cwd = recent_same_repository_checkout(repo_cwd, list(activity.working_dirs)) or repo_cwd
     git = git_info(repo_cwd, thread.git_branch, int(now.timestamp() // GIT_INFO_TTL_SECONDS))
     window = usage.context_window or context_window(model)
 
@@ -3392,10 +3460,18 @@ def descendant_activity_summary(
         for thread in descendants
         if int(now.timestamp()) - thread.updated_at <= active_window_seconds
     ]
-    running = [
-        workflow_label(thread)
+    running_threads = [
+        thread
         for thread, activity in recent
         if activity.active_turn_seconds > 0 or activity.active_tools > 0
+    ]
+    running = [workflow_label(thread) for thread in running_threads]
+    running_details = [
+        {
+            "label": workflow_label(thread),
+            "elapsed_seconds": max(0, int(now.timestamp()) - thread.created_at),
+        }
+        for thread in running_threads
     ]
     return {
         "total": len(descendants),
@@ -3403,6 +3479,7 @@ def descendant_activity_summary(
         "active_tools": sum(activity.active_tools for _, activity in recent),
         "active_shells": sum(activity.active_shells for _, activity in recent),
         "running": running,
+        "running_details": running_details,
     }
 
 
@@ -3710,8 +3787,12 @@ def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
                 detail = "     —  unavailable"
             label = short_text(str(account["label"]), 16)
             lines.append(clip_board_line(f"  {marker} {label:<16} {detail}"))
-    for workflow in (data.get("agents") or {}).get("running", []):
-        status = short_text(f"◯ {workflow} 0/1 agents done", width)
+    for workflow in (data.get("agents") or {}).get("running_details", []):
+        status = short_text(
+            f"◯ {workflow['label']} 0/1 agents done · "
+            f"{format_duration(workflow['elapsed_seconds'])}",
+            width,
+        )
         lines.append(f"{p.dim}{status}{p.reset}")
     return "\n".join(lines)
 

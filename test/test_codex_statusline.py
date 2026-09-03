@@ -56,6 +56,65 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertTrue(codex_statusline.paths_related("/tmp/project/src", "/tmp/project"))
         self.assertFalse(codex_statusline.paths_related("/tmp/project-a", "/tmp/project-b"))
 
+    def test_tool_working_dir_reads_direct_and_nested_exec_arguments(self) -> None:
+        direct = {"arguments": json.dumps({"workdir": "/work/direct"})}
+        nested = {
+            "command": 'const r = await tools.exec_command({"cmd":"git status",'
+            '"workdir":"/work/nested"});'
+        }
+
+        self.assertEqual(codex_statusline.tool_working_dir(direct), "/work/direct")
+        self.assertEqual(codex_statusline.tool_working_dir(nested), "/work/nested")
+
+    def test_recent_same_repository_checkout_ignores_launch_checkout_and_other_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            project = tmp / "project"
+            worktree = tmp / "feature"
+            unrelated = tmp / "unrelated"
+            for repo in (project, unrelated):
+                repo.mkdir()
+                subprocess.run(
+                    ["git", "init", "-b", "main"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+                (repo / "README.md").write_text("fixture\n")
+                subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Statusline Test",
+                        "-c",
+                        "user.email=statusline@example.invalid",
+                        "commit",
+                        "-m",
+                        "fixture",
+                    ],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+            subprocess.run(
+                ["git", "worktree", "add", "-b", "feature/actual", str(worktree)],
+                cwd=project,
+                check=True,
+                capture_output=True,
+            )
+
+            selected = codex_statusline.recent_same_repository_checkout(
+                str(project),
+                [str(worktree), str(project), str(unrelated)],
+            )
+            codex_statusline.git_info.cache_clear()
+            git = codex_statusline.git_info(str(worktree), "stale/branch", 1)
+
+        self.assertEqual(selected, str(worktree.resolve()))
+        self.assertEqual(git.repo, "project")
+        self.assertEqual(git.branch_name, "feature/actual")
+
     def test_query_pull_request_resolves_branch(self) -> None:
         payload = json.dumps(
             {
@@ -3072,6 +3131,9 @@ class CodexStatuslineTest(unittest.TestCase):
                 "active_tools": 1,
                 "active_shells": 1,
                 "running": ["release-train solei-local"],
+                "running_details": [
+                    {"label": "release-train solei-local", "elapsed_seconds": 100}
+                ],
             },
         )
 
@@ -3106,6 +3168,9 @@ class CodexStatuslineTest(unittest.TestCase):
                 "active_tools": 2,
                 "active_shells": 2,
                 "running": ["release-train solei-local"],
+                "running_details": [
+                    {"label": "release-train solei-local", "elapsed_seconds": 900}
+                ],
             },
             "sandbox": "disabled",
             "approval_mode": "never",
@@ -3152,7 +3217,10 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertNotIn("resets", account_row)
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
-        self.assertEqual(rendered.splitlines()[-1], "◯ release-train solei-local 0/1 agents done")
+        self.assertEqual(
+            rendered.splitlines()[-1],
+            "◯ release-train solei-local 0/1 agents done · 15m",
+        )
         expected_labels = [
             "model",
             "time",
