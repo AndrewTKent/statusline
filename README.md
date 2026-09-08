@@ -448,9 +448,11 @@ command = "if [ -x \"$HOME/.local/bin/codex-account-session\" ]; then exec \"$HO
 ```
 
 The hook binds each thread to its routed label so the statusline stays correct
-when concurrent sessions use different accounts. At 90% binding usage, the
-supervisor moves a live thread only when another account is at least 15 points
-lower. A hard `codex-accounts set` pin moves it on the next supervisor check.
+when concurrent sessions use different accounts. Automatic handoffs require a
+fresh weekly usage reading strictly above 80% and another account whose binding
+usage is at least 15 points lower. Poll errors, missing or stale weekly readings,
+and short-window usage alone do not trigger a handoff. A hard `codex-accounts set`
+pin moves the thread on the next supervisor check.
 
 Inside Claude Code, prefix these with `!` (for example,
 `!accounts set acme-max`). Set `"respondToBashCommands": false` in
