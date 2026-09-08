@@ -56,6 +56,86 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertTrue(codex_statusline.paths_related("/tmp/project/src", "/tmp/project"))
         self.assertFalse(codex_statusline.paths_related("/tmp/project-a", "/tmp/project-b"))
 
+    def test_snapshot_follows_tool_workdirs_and_returns_to_launch_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            project = root / "project"
+            project.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=project, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "initial"],
+                cwd=project, check=True, capture_output=True,
+            )
+            worktree = root / "feature tree"
+            subprocess.run(
+                ["git", "worktree", "add", "-b", "feature/live", str(worktree)],
+                cwd=project, check=True, capture_output=True,
+            )
+            rollout = root / "session.jsonl"
+            thread = codex_statusline.Thread(
+                id="working-checkout", source="cli", rollout_path=str(rollout),
+                created_at=1, updated_at=2, cwd=str(project), title="", tokens_used=0,
+                model="", reasoning_effort="", sandbox_policy="", approval_mode="",
+                git_branch="main", archived=0,
+            )
+
+            def append(payload: dict) -> None:
+                with rollout.open("a") as stream:
+                    stream.write(json.dumps({"type": "response_item", "payload": payload}) + "\n")
+
+            def snapshot() -> dict:
+                return codex_statusline.snapshot_for_thread(
+                    thread, codex_statusline.TokenSummary(0, 0, 0, 0, 0, 0), {}, str(project),
+                    datetime.now(), include_pull_request=False,
+                )
+
+            append({"type": "function_call", "name": "exec_command", "arguments": json.dumps({
+                "cmd": "git status", "workdir": str(worktree),
+            })})
+            self.assertEqual(snapshot()["branch"], "feature/live")
+            self.assertEqual(snapshot()["repo"], "project")
+            self.assertEqual(Path(snapshot()["cwd"]), worktree)
+            append({"type": "message", "role": "assistant", "content": [{
+                "type": "output_text", "text": f"Next: git -C {project} status",
+            }]})
+            self.assertEqual(snapshot()["branch"], "feature/live")
+            append({"type": "custom_tool_call", "name": "exec", "input":
+                'text(await tools.exec_command({cmd: "git status", workdir: '
+                + json.dumps(str(project)) + '}));'})
+            self.assertEqual(snapshot()["branch"], "main")
+            self.assertEqual(snapshot()["repo"], "project")
+            append({"type": "custom_tool_call", "name": "exec", "input":
+                'text(await tools.exec_command({cmd: '
+                + json.dumps(f'git -C "{worktree}" status') + '}));'})
+            self.assertEqual(snapshot()["branch"], "feature/live")
+            worktree.rename(root / "removed")
+            self.assertEqual(snapshot()["branch"], "main")
+
+    def test_checkout_candidates_ignore_quoted_code_and_keep_shell_paths(self) -> None:
+        source = (
+            'const example = "tools.exec_command({workdir: \'/wrong\'})";\n'
+            '// tools.exec_command({workdir: "/comment"})\n'
+            'await tools.exec_command({cmd: "git status", workdir: "/real path"});\n'
+            'await tools.exec_command({cmd: "git status", workdir: "/prefix" + suffix});\n'
+            'await tools.exec_command({cmd: "printf \'git -C /quoted status\'"});'
+        )
+        payload = {"type": "custom_tool_call", "name": "exec", "input": source}
+        self.assertEqual(codex_statusline.checkout_candidates(payload, "/launch"), ["/real path"])
+        for command, expected in [
+            ('cd "/feature path" && git status', "/feature path"),
+            ("git -C ../feature status", "/feature"),
+            ("printf '%s' 'cd /example'", None),
+            ("printf ';' cd /example", None),
+        ]:
+            with self.subTest(command=command):
+                payload = {"type": "function_call", "name": "exec_command",
+                           "arguments": json.dumps({"cmd": command})}
+                self.assertEqual(
+                    codex_statusline.checkout_candidates(payload, "/launch"),
+                    [expected] if expected else [],
+                )
+
     def test_query_pull_request_resolves_branch(self) -> None:
         payload = json.dumps(
             {
@@ -3130,7 +3210,8 @@ class CodexStatuslineTest(unittest.TestCase):
             rendered = codex_statusline.render_footer(data, 80, codex_statusline.Palette(False))
 
         self.assertIn("model   GPT-5.6 · max", rendered)
-        self.assertIn("account andrew · auto → personal", rendered)
+        self.assertIn("account andrew · auto", rendered)
+        self.assertNotIn("→", rendered)
         self.assertIn("repo    statusline", rendered)
         self.assertIn("branch  feat/codex-top", rendered)
         self.assertIn("  context ●●●●●●○○○○○○○○○ 45%", rendered)
@@ -3180,7 +3261,7 @@ class CodexStatuslineTest(unittest.TestCase):
         )
         self.assertIn(
             f"  {palette.white}{'account':<7}{palette.reset} "
-            f"{palette.orange}andrew · auto → personal{palette.reset}",
+            f"{palette.orange}andrew · auto{palette.reset}",
             colored,
         )
 
