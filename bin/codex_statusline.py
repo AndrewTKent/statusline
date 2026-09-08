@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import codecs
 from collections.abc import Callable
@@ -13,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -86,6 +88,12 @@ ROLLOUT_THREAD_ID_PATTERN = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
 NON_WHITESPACE_PATTERN = re.compile(r"\S")
+JAVASCRIPT_TOKENS = re.compile(
+    r'''//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]'''
+)
+SHELL_COMMAND_BREAKS = re.compile(
+    r'''"(?:\\.|[^"\\])*"|'[^']*'|`(?:\\.|[^`\\])*`|\\.|(?P<separator>[;&|\n]+)'''
+)
 
 
 def terminal_size() -> os.terminal_size:
@@ -2843,20 +2851,147 @@ PR_CACHE_DIR = Path(os.environ.get("CODEX_STATUSLINE_PR_CACHE_DIR", "/tmp/claude
 PR_REFRESH_PROCESSES: list[subprocess.Popen[Any]] = []
 
 
+def shell_tool_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    name = str(payload.get("name", "")).split(".")[-1]
+    if name not in {"exec", "exec_command", "shell_command"}:
+        return []
+    raw = payload.get("arguments", payload.get("input", ""))
+    if not isinstance(raw, str):
+        return []
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        return [value]
+    if name != "exec":
+        return []
+    tokens = [token for token in JAVASCRIPT_TOKENS.findall(raw) if not token.startswith(("//", "/*"))]
+    inputs = []
+    for index in range(len(tokens) - 4):
+        if tokens[index:index + 5] != ["tools", ".", "exec_command", "(", "{"]:
+            continue
+        depth = 1
+        fields = {}
+        for position in range(index + 5, len(tokens)):
+            token = tokens[position]
+            if token == "{":
+                depth += 1
+            elif token == "}":
+                depth -= 1
+                if not depth:
+                    break
+            if depth != 1 or position + 3 >= len(tokens) or tokens[position + 1] != ":":
+                continue
+            if tokens[position + 3] not in {",", "}"}:
+                continue
+            key = token.strip("\"'")
+            literal = tokens[position + 2]
+            if key not in {"cmd", "command", "workdir", "cwd"} or not literal.startswith(('"', "'")):
+                continue
+            try:
+                fields[key] = ast.literal_eval(literal)
+            except (ValueError, SyntaxError):
+                continue
+        inputs.append(fields)
+    return inputs
+
+
+def checkout_candidates(payload: dict[str, Any], launch_cwd: str) -> list[str]:
+    candidates = []
+    for tool_input in shell_tool_inputs(payload):
+        directory = tool_input.get("workdir", tool_input.get("cwd"))
+        base = Path(launch_cwd)
+        if isinstance(directory, str) and directory:
+            base = (base / directory).resolve()
+            candidates.append(str(base))
+        command = tool_input.get("cmd", tool_input.get("command", ""))
+        if not isinstance(command, str):
+            continue
+        start = 0
+        segments = []
+        for match in SHELL_COMMAND_BREAKS.finditer(command):
+            if match.group("separator"):
+                segments.append(command[start:match.start()])
+                start = match.end()
+        segments.append(command[start:])
+        for segment in segments:
+            try:
+                tokens = shlex.split(segment, comments=True)
+            except ValueError:
+                continue
+            path = ""
+            if tokens[:1] == ["cd"] and len(tokens) >= 2:
+                path = tokens[2] if tokens[1] == "--" and len(tokens) > 2 else tokens[1]
+            elif tokens[:2] == ["git", "-C"] and len(tokens) >= 3:
+                path = tokens[2]
+            if path and not path.startswith("-") and "$" not in path:
+                resolved = (base / path).resolve()
+                candidates.append(str(resolved))
+                if tokens[0] == "cd":
+                    base = resolved
+    return candidates
+
+
+@lru_cache(maxsize=128)
+def recent_checkout_candidates(rollout_path: str, launch_cwd: str, version: tuple[int, int, int]) -> tuple[str, ...]:
+    del version
+    try:
+        with open(rollout_path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            offset = max(0, stream.tell() - MAX_BUFFERED_ROLLOUT_LINE_BYTES)
+            stream.seek(offset)
+            if offset:
+                stream.readline()
+            lines = stream.read(MAX_BUFFERED_ROLLOUT_LINE_BYTES).splitlines()
+    except OSError:
+        return ()
+    candidates: OrderedDict[str, None] = OrderedDict()
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            continue
+        if not isinstance(item, dict) or item.get("type") != "response_item":
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        for candidate in checkout_candidates(payload, launch_cwd):
+            candidates[candidate] = None
+            candidates.move_to_end(candidate)
+            if len(candidates) > 32:
+                candidates.popitem(last=False)
+    return tuple(reversed(candidates))
+
+
+def working_directory(thread: Thread, fallback: str, bucket: int) -> str:
+    try:
+        stat = Path(thread.rollout_path).stat()
+    except OSError:
+        return fallback
+    version = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    for candidate in recent_checkout_candidates(thread.rollout_path, thread.cwd, version):
+        if Path(candidate).is_dir() and git_info(candidate, "", bucket).root:
+            return candidate
+    return fallback
+
+
 @lru_cache(maxsize=128)
 def git_info(cwd: str, fallback_branch: str, bucket: int) -> GitInfo:
     path = cwd or os.getcwd()
     try:
-        root = subprocess.check_output(
-            ["git", "-C", path, "rev-parse", "--show-toplevel"],
+        root, common_dir = subprocess.check_output(
+            ["git", "-C", path, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"],
             stderr=subprocess.DEVNULL,
             text=True,
             timeout=0.4,
-        ).strip()
-    except (subprocess.SubprocessError, OSError):
+        ).strip().splitlines()
+    except (subprocess.SubprocessError, OSError, ValueError):
         return GitInfo(Path(path).name or "unknown", fallback_branch or "-", "", "", "")
 
-    repo = Path(root).name
+    common = Path(common_dir)
+    repo = common.parent.name if common.name == ".git" else Path(root).name
     try:
         branch_name = subprocess.check_output(
             ["git", "-C", root, "branch", "--show-current"],
@@ -3349,7 +3484,9 @@ def snapshot_for_thread(
     usage = usage_from_rollout(thread)
     tokens.session = usage.session_total
     repo_cwd = thread.cwd if prefer_thread_cwd else (cwd if paths_related(cwd, thread.cwd) else thread.cwd)
-    git = git_info(repo_cwd, thread.git_branch, int(now.timestamp() // GIT_INFO_TTL_SECONDS))
+    git_bucket = int(now.timestamp() // GIT_INFO_TTL_SECONDS)
+    repo_cwd = working_directory(thread, repo_cwd, git_bucket)
+    git = git_info(repo_cwd, thread.git_branch, git_bucket)
     window = usage.context_window or context_window(model)
 
     return {
@@ -3367,7 +3504,7 @@ def snapshot_for_thread(
             if include_pull_request
             else None
         ),
-        "cwd": thread.cwd,
+        "cwd": repo_cwd,
         "created_at": thread.created_at,
         "updated_at": thread.updated_at,
         "session_age_seconds": int(now.timestamp()) - thread.created_at,
@@ -3623,13 +3760,7 @@ def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
         return f"  {p.white}{label:<7}{p.reset} {styled}"
 
     route_mode = account_board.get("mode", "auto")
-    if route_mode == "set":
-        route_text = f"set → {account_board['selected'] or '?'}"
-    elif account_board.get("selected") and account_board["selected"] != account_board.get("current_label"):
-        route_text = f"auto → {account_board['selected']}"
-    else:
-        route_text = "auto"
-    account_text = f"{account_board.get('current_label') or data['account']} · {route_text}"
+    account_text = f"{account_board.get('current_label') or data['account']} · {route_mode}"
 
     lines = [
         row("model", f"{data['model_display']}{effort}", model_style),
