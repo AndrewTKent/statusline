@@ -3648,6 +3648,32 @@ class CodexStatuslineTest(unittest.TestCase):
 
         run.assert_not_called()
 
+    def test_owned_footer_grows_for_workflows_and_shrinks_afterward(self) -> None:
+        args = codex_statusline.parse_args(["--footer", "--watch", "1"])
+        args.footer_min_height = 14
+        long_body = "model\n" + "\n".join(f"workflow {i}" for i in range(17))
+        short_body = "model\nmode"
+        output = io.StringIO()
+        sizes = [os.terminal_size((80, 14)), os.terminal_size((80, 18))]
+        with (
+            mock.patch.dict(os.environ, {"TMUX_PANE": "%42"}),
+            mock.patch.object(codex_statusline, "terminal_size", side_effect=sizes),
+            mock.patch.object(codex_statusline, "snapshot", return_value={}),
+            mock.patch.object(codex_statusline, "render", side_effect=[long_body, short_body]),
+            mock.patch.object(codex_statusline.subprocess, "run") as run,
+            mock.patch.object(codex_statusline.sys, "stdout", output),
+            mock.patch.object(codex_statusline.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            self.assertEqual(codex_statusline.watch_loop(args, codex_statusline.Palette(False)), 0)
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(["tmux", "resize-pane", "-t", "%42", "-y", "18"], check=True, capture_output=True, timeout=2),
+                mock.call(["tmux", "resize-pane", "-t", "%42", "-y", "14"], check=True, capture_output=True, timeout=2),
+            ],
+        )
+
     def test_footer_render_does_not_scroll_past_mode(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1"])
         output = io.StringIO()
@@ -3996,6 +4022,7 @@ class CodexStatuslineTest(unittest.TestCase):
             split_window = next(line for line in captured if line.startswith("split-window "))
             self.assertIn("-l 14", split_window)
             self.assertIn("--watch 3", split_window)
+            self.assertIn("--footer-min-height 14", split_window)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", captured)
             self.assertIn("set-option mouse on", captured)
             self.assertIn("set-option -w history-limit 100000", captured)
