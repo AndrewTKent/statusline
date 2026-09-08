@@ -125,7 +125,7 @@ BIND_ARGS=()
 if [[ -n "$RESUME_THREAD_ID" ]]; then
     BIND_ARGS+=(--thread-id "$RESUME_THREAD_ID")
 fi
-FOOTER_COMMAND="$(shell_join python3 "$SCRIPT_DIR/codex_statusline.py" --footer --watch "$REFRESH_INTERVAL" --cwd "$CODEX_WORKING_DIR" --owner-pid-file "$OWNER_PID_FILE" ${BIND_ARGS[@]+"${BIND_ARGS[@]}"})"
+FOOTER_COMMAND="$(shell_join python3 "$SCRIPT_DIR/codex_statusline.py" --footer --footer-min-height "$FOOTER_HEIGHT" --watch "$REFRESH_INTERVAL" --cwd "$CODEX_WORKING_DIR" --owner-pid-file "$OWNER_PID_FILE" ${BIND_ARGS[@]+"${BIND_ARGS[@]}"})"
 
 if [[ -n "${TMUX:-}" ]]; then
     footer_pane=""

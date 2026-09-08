@@ -4132,8 +4132,9 @@ def watch_loop(args: argparse.Namespace, p: Palette) -> int:
                     return 0
                 if not owner_alive(args.owner_pid_file):
                     return 0
+            size = terminal_size()
             if args.dynamic_width:
-                args.width = terminal_size().columns
+                args.width = size.columns
             data = all_sessions_snapshot(args) if args.all or args.top else snapshot(args)
             latest_activity_ms = snapshot_activity_ms(data, bool(args.all or args.top))
             if (
@@ -4145,6 +4146,14 @@ def watch_loop(args: argparse.Namespace, p: Palette) -> int:
             ):
                 args.thread_id = data["thread_id"]
             body = render(data, args, p)
+            pane = os.environ.get("TMUX_PANE")
+            if args.footer and args.footer_min_height > 0 and pane:
+                height = max(args.footer_min_height, len(body.splitlines()))
+                if height != size.lines:
+                    subprocess.run(
+                        ["tmux", "resize-pane", "-t", pane, "-y", str(height)],
+                        check=True, capture_output=True, timeout=2,
+                    )
             timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %I:%M:%S %p %Z")
             print("\033[2J\033[H", end="")
             print(body, end="" if args.footer else "\n")
@@ -4199,6 +4208,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--all", action="store_true", help="show a single dashboard for all recent Codex sessions")
     parser.add_argument("--top", action="store_true", help="show a btop/nvitop-style all-session monitor")
     parser.add_argument("--footer", action="store_true", help="show the compact dashboard used by the codex-statusline launcher")
+    parser.add_argument("--footer-min-height", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--sessions", type=int, default=30, help="number of sessions to load with --all/--top")
     parser.add_argument("--include-archived", action="store_true", help="include archived sessions in --all")
     parser.add_argument("--details", action="store_true", help="include last prompt and command under each session in --all")
