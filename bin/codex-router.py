@@ -62,7 +62,7 @@ GLOBAL_VALUE_OPTIONS = {
 }
 POLL_INTERVAL_S = 60.0
 SUPERVISOR_INTERVAL_S = 2.0
-HANDOFF_THRESHOLD = 90.0
+HANDOFF_THRESHOLD = 80.0
 HANDOFF_MARGIN = 15.0
 PASSTHROUGH_FLAGS = {"-h", "--help", "-V", "--version"}
 AUTH_STORE_OVERRIDE = 'cli_auth_credentials_store="file"'
@@ -190,10 +190,21 @@ def handoff_target(current: str) -> str | None:
     if mode.get("mode") == "set":
         return selected if selected != current else None
     current_row = usage.get(current, {})
-    current_usage = codex_accounts.binding_usage(current_row)
     if current_row.get("error"):
-        current_usage = 101.0
-    if current_usage < float(os.environ.get("CODEX_ACCOUNTS_HANDOFF_THRESHOLD", HANDOFF_THRESHOLD)):
+        return None
+    if time.time() - float(current_row.get("fetched_at", 0)) > codex_accounts.USAGE_MAX_AGE_S:
+        return None
+    limits = current_row.get("rate_limits") or {}
+    weekly = None
+    for key in ("primary", "secondary"):
+        limit = limits.get(key)
+        if isinstance(limit, dict) and limit.get("window_duration_mins") == 10080:
+            weekly = limit
+            break
+    if weekly is None or weekly.get("used_percent") is None:
+        return None
+    current_usage = float(weekly["used_percent"])
+    if current_usage <= HANDOFF_THRESHOLD:
         return None
     alternative = codex_accounts.pick_account(accounts, usage, mode, avoid={current})
     if not alternative:
