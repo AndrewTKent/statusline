@@ -136,8 +136,22 @@ def ensure_profile(profile: Path, source: Path | None = None) -> None:
         if target.is_symlink() and target.resolve(strict=False) == item.resolve(strict=False):
             continue
         if target.exists() or target.is_symlink():
-            raise AccountsError(f"profile entry blocks shared state: {target}")
+            fold_into_shared(target, item)
         target.symlink_to(item)
+
+
+def fold_into_shared(entry: Path, shared: Path) -> None:
+    # Codex creates a directory in whichever home it runs from, so a profile can hold a real
+    # one before the shared home gains the same name; its files move across when none collide.
+    if entry.is_symlink() or not entry.is_dir() or not shared.is_dir():
+        raise AccountsError(f"profile entry blocks shared state: {entry}")
+    children = list(entry.iterdir())
+    for child in children:
+        if (shared / child.name).exists():
+            raise AccountsError(f"profile entry blocks shared state: {entry} ({child.name} exists in both)")
+    for child in children:
+        shutil.move(str(child), str(shared / child.name))
+    entry.rmdir()
 
 
 def load_registry() -> dict[str, dict[str, str]]:

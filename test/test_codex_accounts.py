@@ -63,6 +63,40 @@ class CodexAccountsTest(unittest.TestCase):
             self.assertEqual((profile / "state_5.sqlite").resolve(), (shared / "state_5.sqlite").resolve())
             self.assertFalse((profile / "auth.json").exists())
 
+    def test_profile_directory_created_before_shared_is_folded_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared = root / ".codex"
+            profile = root / "profiles" / "personal"
+            (profile / "mcp-oauth-locks").mkdir(parents=True)
+            (profile / "mcp-oauth-locks" / "file-store.lock").write_text("")
+            (shared / "mcp-oauth-locks").mkdir(parents=True)
+            (shared / "mcp-oauth-locks" / "abc.lock").write_text("")
+
+            codex_accounts.ensure_profile(profile, shared)
+
+            self.assertTrue((profile / "mcp-oauth-locks").is_symlink())
+            self.assertEqual((profile / "mcp-oauth-locks").resolve(), (shared / "mcp-oauth-locks").resolve())
+            self.assertEqual(
+                sorted(p.name for p in (shared / "mcp-oauth-locks").iterdir()), ["abc.lock", "file-store.lock"]
+            )
+
+    def test_profile_entry_colliding_with_shared_still_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared = root / ".codex"
+            profile = root / "profiles" / "personal"
+            (profile / "locks").mkdir(parents=True)
+            (profile / "locks" / "same.lock").write_text("mine")
+            (shared / "locks").mkdir(parents=True)
+            (shared / "locks" / "same.lock").write_text("theirs")
+
+            with self.assertRaises(codex_accounts.AccountsError):
+                codex_accounts.ensure_profile(profile, shared)
+
+            self.assertEqual((shared / "locks" / "same.lock").read_text(), "theirs")
+            self.assertEqual((profile / "locks" / "same.lock").read_text(), "mine")
+
     def test_pick_account_uses_lowest_binding_usage(self) -> None:
         now = time.time()
         accounts = {
