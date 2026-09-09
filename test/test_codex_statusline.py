@@ -3198,6 +3198,7 @@ class CodexStatuslineTest(unittest.TestCase):
                 {
                     "label": "andrew",
                     "weekly": {"used_percent": 67.0, "resets_at": 1_900_000_000},
+                    "reset_credits": [1_900_000_000, 1_902_000_000],
                 },
                 {
                     "label": "personal",
@@ -3231,6 +3232,11 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(account_header.index("week") + 4, account_row.index("67%") + 3)
         self.assertEqual(account_header.index("reset"), account_row.index(reset_value))
         self.assertNotIn("resets", account_row)
+        banked_text = codex_statusline.reset_credit_text(board["rows"][0]["reset_credits"])
+        self.assertTrue(banked_text.startswith("2 exp "))
+        self.assertEqual(account_header.index("banked"), account_row.index(banked_text))
+        personal_row = next(line for line in lines if line.startswith("  · personal"))
+        self.assertEqual(account_header.index("banked"), personal_row.index("—"))
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
         self.assertEqual(rendered.splitlines()[-1], "◯ release-train solei-local 0/1 agents done")
@@ -3405,6 +3411,7 @@ class CodexStatuslineTest(unittest.TestCase):
                             "rate_limits": {
                                 "primary": {"used_percent": 40, "window_duration_mins": 10_080}
                             },
+                            "reset_credits": {"count": 2, "expires_at": [1_600_000_000, 1_900_000_000]},
                         },
                         "personal": {
                             "fetched_at": time.time(),
@@ -3424,6 +3431,8 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(board["selected"], "personal")
         self.assertEqual(board["rows"][0]["label"], "work")
         self.assertEqual(board["rows"][0]["weekly"]["used_percent"], 40)
+        self.assertEqual(board["rows"][0]["reset_credits"], [1_900_000_000])
+        self.assertEqual(board["rows"][1]["reset_credits"], [])
 
     def test_credit_balance_text_handles_unlimited_and_invalid_balances(self) -> None:
         self.assertEqual(
