@@ -3420,6 +3420,24 @@ def account_binding_usage(rate_limits: dict[str, Any]) -> float:
     return max(values, default=101.0)
 
 
+def unexpired_reset_credits(account_usage: dict[str, Any], now: datetime | None = None) -> list[int]:
+    credits = account_usage.get("reset_credits")
+    expires_at = credits.get("expires_at") if isinstance(credits, dict) else None
+    cutoff = (now or datetime.now(timezone.utc)).timestamp()
+    return sorted(
+        int(value)
+        for value in (expires_at if isinstance(expires_at, list) else [])
+        if isinstance(value, (int, float)) and value > cutoff
+    )
+
+
+def reset_credit_text(expires_at: list[int]) -> str:
+    if not expires_at:
+        return "—"
+    soonest = datetime.fromtimestamp(expires_at[0]).astimezone()
+    return f"{len(expires_at)} exp {soonest.strftime('%b').lower()} {soonest.day}"
+
+
 def codex_account_board(current_account: str) -> dict[str, Any]:
     root = Path(os.environ.get("CODEX_ACCOUNTS_HOME", Path.home() / ".codex-accounts"))
     registry = read_json(root / "accounts.json")
@@ -3444,6 +3462,7 @@ def codex_account_board(current_account: str) -> dict[str, Any]:
             {
                 "label": label,
                 "weekly": weekly_rate_limit(rate_limits),
+                "reset_credits": unexpired_reset_credits(account_usage),
                 "binding_usage": account_binding_usage(rate_limits),
                 "error": str(account_usage.get("error") or ""),
             }
@@ -3828,7 +3847,7 @@ def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
             return value if len(value) <= width else f"{value[: width - 1]}…"
 
         lines.append(
-            clip_board_line(f"    {'acct':<16} {'week':>6}  reset")
+            clip_board_line(f"    {'acct':<16} {'week':>6}  {'reset':<18} banked")
         )
         for account in board_rows:
             marker = "*" if account["label"] == account_board.get("current_label") else "·"
@@ -3836,11 +3855,12 @@ def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
             if weekly:
                 used, reset = limit_display(weekly)
                 reset_value = "now" if reset == "reset" else reset.removeprefix("resets ").removeprefix("reset ")
-                detail = f"{format_pct(used):>6}  {reset_value}"
+                detail = f"{format_pct(used):>6}  {reset_value:<18}"
             else:
-                detail = "     —  unavailable"
+                detail = f"{'—':>6}  {'unavailable':<18}"
+            banked = reset_credit_text(account.get("reset_credits") or [])
             label = short_text(str(account["label"]), 16)
-            lines.append(clip_board_line(f"  {marker} {label:<16} {detail}"))
+            lines.append(clip_board_line(f"  {marker} {label:<16} {detail} {banked}"))
     for workflow in (data.get("agents") or {}).get("running", []):
         status = short_text(f"◯ {workflow} 0/1 agents done", width)
         lines.append(f"{p.dim}{status}{p.reset}")

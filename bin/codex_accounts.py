@@ -295,9 +295,25 @@ def poll_account(label: str, account: dict[str, str], binary: str) -> dict[str, 
         limits = result.get("rateLimits") or result.get("rate_limits") or result
         if not isinstance(limits, dict):
             raise AccountsError("Codex app-server returned malformed rate limits")
-        return {"fetched_at": time.time(), "rate_limits": normalize_keys(limits)}
+        return {
+            "fetched_at": time.time(),
+            "rate_limits": normalize_keys(limits),
+            "reset_credits": banked_reset_credits(result.get("rateLimitResetCredits")),
+        }
     except (AccountsError, OSError, subprocess.SubprocessError) as exc:
         return {"fetched_at": time.time(), "error": str(exc)}
+
+
+def banked_reset_credits(value: Any) -> dict[str, Any]:
+    credits = value.get("credits") if isinstance(value, dict) else None
+    expires_at = sorted(
+        int(credit["expiresAt"])
+        for credit in (credits if isinstance(credits, list) else [])
+        if isinstance(credit, dict)
+        and credit.get("status") == "available"
+        and isinstance(credit.get("expiresAt"), (int, float))
+    )
+    return {"count": len(expires_at), "expires_at": expires_at}
 
 
 def poll_all(accounts: dict[str, dict[str, str]], binary: str | None = None) -> dict[str, dict[str, Any]]:
@@ -443,6 +459,14 @@ def format_reset(epoch: Any) -> str:
     return value.strftime("%a %-I:%M%p %Z")
 
 
+def format_date(epoch: Any) -> str:
+    try:
+        value = datetime.fromtimestamp(float(epoch)).astimezone()
+    except (TypeError, ValueError, OSError):
+        return "—"
+    return value.strftime("%b %-d")
+
+
 def cmd_status(_args: argparse.Namespace) -> None:
     accounts = load_registry()
     usage = load_usage()
@@ -466,6 +490,9 @@ def cmd_status(_args: argparse.Namespace) -> None:
                         f"{key} {float(limit['used_percent']):.0f}% reset {format_reset(limit.get('resets_at'))}"
                     )
             detail = " · ".join(parts) or "no quota windows"
+            banked = row.get("reset_credits") if isinstance(row.get("reset_credits"), dict) else {}
+            if banked.get("expires_at"):
+                detail += f" · ↺{len(banked['expires_at'])} exp {format_date(banked['expires_at'][0])}"
         marker = "*" if label == selected else " "
         print(f" {marker} {label:<12} {detail}")
 

@@ -148,7 +148,15 @@ class CodexAccountsTest(unittest.TestCase):
             "rateLimits": {
                 "planType": "pro",
                 "primary": {"usedPercent": 41, "resetsAt": 2_000_000_000},
-            }
+            },
+            "rateLimitResetCredits": {
+                "availableCount": 2,
+                "credits": [
+                    {"status": "available", "expiresAt": 2_100_000_000},
+                    {"status": "redeemed", "expiresAt": 2_050_000_000},
+                    {"status": "available", "expiresAt": 2_090_000_000},
+                ],
+            },
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -158,6 +166,7 @@ class CodexAccountsTest(unittest.TestCase):
 
         self.assertEqual(row["rate_limits"]["plan_type"], "pro")
         self.assertEqual(row["rate_limits"]["primary"]["used_percent"], 41)
+        self.assertEqual(row["reset_credits"], {"count": 2, "expires_at": [2_090_000_000, 2_100_000_000]})
         self.assertNotIn("home", row)
 
     def test_session_hook_binds_thread_to_routed_label(self) -> None:
