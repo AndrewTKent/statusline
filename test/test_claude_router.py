@@ -2712,11 +2712,12 @@ def test_live_pane_pin_handoffs_only_this_supervisor_and_resumes_session(monkeyp
     assert launches[1][-2:] == ["--session-id", session_id]
 
 
-def test_global_generation_change_restarts_same_account_session(monkeypatch):
+def test_global_generation_change_on_the_current_account_keeps_the_child_running(monkeypatch):
     session_id = str(uuid.uuid4())
     first = {"profile": "/p/first", "label": "first", "email": "first@x", "org_uuid": "o1"}
     calls = []
     launches = []
+    scopes = []
     snapshots = iter(
         [
             ({"mode": "set", "label": "first", "global_generation": 1, "policy_scope": "pane"}, (1, (2, 3))),
@@ -2744,13 +2745,68 @@ def test_global_generation_change_restarts_same_account_session(monkeypatch):
     )
     monkeypatch.setattr(claude_router, "read_router_state", lambda _path: {"session_id": session_id})
     monkeypatch.setattr(claude_router, "stop_for_handoff", lambda _child: None)
+    monkeypatch.setattr(
+        claude_router, "write_policy_scope", lambda _path, scope: scopes.append(scope)
+    )
     selections = []
     _pin_test_harness(monkeypatch, session_id, selections)
     monkeypatch.setattr(claude_router.accounts, "select_profile", lambda **kwargs: first)
 
     assert claude_router.run_supervised("/real/claude", []) == 0
-    assert len(launches) == 2
-    assert launches[1][-2:] == ["--session-id", session_id]
+    assert len(launches) == 1
+    # the child never relaunched; its footer learns the new scope from the sidecar
+    assert scopes == ["pane", "global"]
+
+
+def test_reissued_fable_mode_on_the_current_fable_account_keeps_the_child_running(monkeypatch):
+    session_id = str(uuid.uuid4())
+    first = {"profile": "/p/first", "label": "first", "email": "first@x", "org_uuid": "o1"}
+    calls = []
+    launches = []
+    snapshots = iter(
+        [
+            ({"mode": "fable", "label": None, "global_generation": 1, "policy_scope": "global"}, (1, None)),
+            ({"mode": "fable", "label": None, "global_generation": 2, "policy_scope": "global"}, (2, None)),
+        ]
+    )
+
+    class Child:
+        def __init__(self, running):
+            self.running = running
+
+        def poll(self):
+            calls.append(True)
+            return None if self.running and len(calls) == 1 else 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(claude_router.accounts, "load_mode_snapshot", lambda: next(snapshots))
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda command, **_kwargs: launches.append(command)
+        or Child(len(launches) == 1),
+    )
+    monkeypatch.setattr(claude_router, "read_router_state", lambda _path: {"session_id": session_id})
+    monkeypatch.setattr(claude_router, "stop_for_handoff", lambda _child: None)
+    monkeypatch.setattr(claude_router, "write_policy_scope", lambda _path, _scope: None)
+    _pin_test_harness(monkeypatch, session_id, [])
+    monkeypatch.setattr(claude_router.accounts, "select_profile", lambda **kwargs: first)
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+    assert len(launches) == 1
+    assert claude_router.option_value(launches[0], "--model") == "fable"
+
+
+def test_policy_scope_sidecar_sits_beside_the_router_state(tmp_path):
+    state_path = tmp_path / "account-router-123.json"
+
+    claude_router.write_policy_scope(state_path, "pane")
+
+    sidecar = tmp_path / "account-router-123.policy"
+    assert claude_router.policy_scope_path(state_path) == sidecar
+    assert sidecar.read_text() == "pane\n"
 
 
 def test_global_auto_change_applies_the_global_selection(monkeypatch):

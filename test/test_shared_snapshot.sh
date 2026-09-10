@@ -166,6 +166,11 @@ pane_output=$(run_statusline work pane)
 [[ "$pane_output" == *"pane pinned"* ]] || { printf 'pane policy scope not shown\n' >&2; exit 1; }
 router_state="$TEST_TMP/account-router-parent-$$/state.json"
 rm -rf "$(dirname "$router_state")"
+mkdir -p "$(dirname "$router_state")"
+printf 'global\n' > "${router_state%.json}.policy"
+sidecar_output=$(ACCOUNTS_ROUTER_STATE="$router_state" run_statusline work pane)
+[[ "$sidecar_output" != *"pane pinned"* ]] || { printf 'router policy sidecar did not override the launch-time scope\n' >&2; exit 1; }
+rm -rf "$(dirname "$router_state")"
 jq '.session_id = "session-test"' "$SANDBOX/input.json" > "$SANDBOX/router-input.json"
 HOME="$TEST_HOME" PATH="$STUBS:$PATH" SHARED_TEST_VIOLATIONS="$VIOLATIONS" \
     ACCOUNTS_ROUTED_LABEL=work ACCOUNTS_POLICY_SCOPE=global \
