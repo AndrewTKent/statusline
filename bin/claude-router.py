@@ -462,6 +462,33 @@ def set_synchronized_output(enabled: bool) -> bool:
     return True
 
 
+def policy_scope_path(state_path: Path) -> Path:
+    return state_path.with_suffix(".policy")
+
+
+def write_policy_scope(state_path: Path, policy_scope: str) -> None:
+    # The child's statusline reads this over its launch-time ACCOUNTS_POLICY_SCOPE,
+    # so a pin that lands on the account already in use needs no restart.
+    path = policy_scope_path(state_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(policy_scope + "\n")
+
+
+def route_unchanged(
+    selected: dict,
+    next_profile: dict,
+    current_model: str | None,
+    next_model: str | None,
+    model_override: str | None,
+    next_override: str | None,
+) -> bool:
+    return (
+        next_profile["label"] == selected["label"]
+        and next_model == current_model
+        and next_override == model_override
+    )
+
+
 def stop_for_handoff(child: subprocess.Popen) -> None:
     synchronized = set_synchronized_output(True)
     try:
@@ -568,6 +595,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     try:
         while True:
             state_path.unlink(missing_ok=True)
+            write_policy_scope(state_path, mode.get("policy_scope", "global"))
             env = routed_environment(
                 selected,
                 state_path,
@@ -711,6 +739,19 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             next_override = None
                         if next_profile is None:
                             continue
+                        if route_unchanged(
+                            selected,
+                            next_profile,
+                            current_model,
+                            next_model,
+                            model_override,
+                            next_override,
+                        ):
+                            applied_mode_generation = mode_generation
+                            write_policy_scope(
+                                state_path, mode.get("policy_scope", "global")
+                            )
+                            continue
                     elif mode_changed and mode.get("mode") in ("auto", "set"):
                         next_model = model_override or current_model
                         next_override = model_override
@@ -730,6 +771,19 @@ def run_supervised(binary: str, args: list[str]) -> int:
                                 lease_pid=router_pid,
                             )
                         if next_profile is None:
+                            continue
+                        if route_unchanged(
+                            selected,
+                            next_profile,
+                            current_model,
+                            next_model,
+                            model_override,
+                            next_override,
+                        ):
+                            applied_mode_generation = mode_generation
+                            write_policy_scope(
+                                state_path, mode.get("policy_scope", "global")
+                            )
                             continue
                     elif (
                         mode.get("mode") == "fable"
@@ -908,6 +962,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     finally:
         accounts.remove_session_lease(router_pid)
         state_path.unlink(missing_ok=True)
+        policy_scope_path(state_path).unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
