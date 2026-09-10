@@ -2067,11 +2067,25 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(replayed.activity.compactions, 0)
         self.assertIsNot(applied, replayed)
 
-    def test_format_reset_same_day(self) -> None:
-        now = datetime.fromtimestamp(1777428000).astimezone()
-        rendered = codex_statusline.format_reset(1777433774, now)
-        self.assertTrue(rendered.startswith("resets "))
-        self.assertNotIn("apr", rendered.lower())
+    def test_format_reset_countdown(self) -> None:
+        now_ts = 1_777_428_000
+        now = datetime.fromtimestamp(now_ts).astimezone()
+        cases = (
+            (30, "0m"),
+            (59 * 60, "59m"),
+            (3600, "1h0m"),
+            (12 * 3600 + 30 * 60, "12h30m"),
+            (86_399, "23h59m"),
+            (86_400, "1d"),
+            (172_799, "1d"),
+            (172_800, "2d"),
+        )
+        for seconds, expected in cases:
+            with self.subTest(seconds=seconds):
+                self.assertEqual(
+                    codex_statusline.format_reset(now_ts + seconds, now),
+                    f"resets {expected}",
+                )
 
     @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone support")
     def test_local_usage_boundaries_follow_daylight_saving_transitions(self) -> None:

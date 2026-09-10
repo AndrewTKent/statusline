@@ -3258,11 +3258,12 @@ def format_reset(timestamp: Any, now: datetime | None = None) -> str:
         return "reset n/a"
 
     local_now = (now or datetime.now(timezone.utc)).astimezone()
-    if reset_at.date() == local_now.date():
-        return f"resets {format_clock(reset_at)}"
-    if reset_at.year == local_now.year:
-        return f"resets {reset_at.strftime('%b').lower()} {reset_at.day} {format_clock(reset_at)}"
-    return f"resets {reset_at.strftime('%b').lower()} {reset_at.day} {reset_at.year}"
+    seconds = max(0, int(reset_at.timestamp() - local_now.timestamp()))
+    if seconds >= 86_400:
+        return f"resets {seconds // 86_400}d"
+    if seconds >= 3600:
+        return f"resets {seconds // 3600}h{seconds % 3600 // 60}m"
+    return f"resets {seconds // 60}m"
 
 
 def limit_display(limit: dict[str, Any], now: datetime | None = None) -> tuple[float, str]:
