@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import fcntl
 import importlib.util
 import io
 import json
 import os
 import re
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 from datetime import datetime
@@ -3253,7 +3256,7 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(account_header.index("banked"), personal_row.index("—"))
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
-        self.assertEqual(rendered.splitlines()[-1], "◯ release-train solei-local 0/1 agents done")
+        self.assertIn("◯ release-train solei-local 0/1 agents done", rendered)
         expected_labels = [
             "model",
             "time",
@@ -3270,6 +3273,15 @@ class CodexStatuslineTest(unittest.TestCase):
             expected_labels,
         )
         self.assertTrue(all(len(line) <= 80 for line in rendered.splitlines()))
+
+        crowded = {**data, "agents": {"running": ["build", "review", "verify"]}}
+        with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
+            compact = codex_statusline.render_footer(crowded, 49, codex_statusline.Palette(False), max_rows=14)
+        self.assertEqual(len(compact.splitlines()), 14)
+        for name in ("build", "review", "verify"):
+            self.assertIn(f"◯ {name} 0/1 agents done", compact)
+        self.assertIn("* andrew", compact)
+        self.assertIn("· personal", compact)
 
         palette = codex_statusline.Palette(True)
         with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
@@ -3637,6 +3649,17 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertIn("codex 7d: 44%", result.stdout)
         self.assertNotIn("codex 5h: 99%", result.stdout)
 
+    def test_terminal_size_follows_the_pane_after_resize_with_exported_dimensions(self) -> None:
+        master, slave = os.openpty()
+        try:
+            with os.fdopen(slave, "w") as terminal, mock.patch.object(sys, "__stdout__", terminal):
+                with mock.patch.dict(os.environ, {"COLUMNS": "80", "LINES": "14"}):
+                    for columns, rows in ((80, 14), (49, 8)):
+                        fcntl.ioctl(terminal, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                        self.assertEqual(codex_statusline.terminal_size(), os.terminal_size((columns, rows)))
+        finally:
+            os.close(master)
+
     def test_watch_refreshes_footer_width_from_terminal(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1"])
         widths = []
@@ -3671,31 +3694,28 @@ class CodexStatuslineTest(unittest.TestCase):
 
         run.assert_not_called()
 
-    def test_owned_footer_grows_for_workflows_and_shrinks_afterward(self) -> None:
+    def test_owned_footer_keeps_the_conversation_size_when_workflows_change(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1"])
         args.footer_min_height = 14
         long_body = "model\n" + "\n".join(f"workflow {i}" for i in range(17))
-        short_body = "model\nmode"
         output = io.StringIO()
-        sizes = [os.terminal_size((80, 14)), os.terminal_size((80, 18))]
         with (
             mock.patch.dict(os.environ, {"TMUX_PANE": "%42"}),
-            mock.patch.object(codex_statusline, "terminal_size", side_effect=sizes),
+            mock.patch.object(codex_statusline, "terminal_size", return_value=os.terminal_size((80, 14))),
             mock.patch.object(codex_statusline, "snapshot", return_value={}),
-            mock.patch.object(codex_statusline, "render", side_effect=[long_body, short_body]),
+            mock.patch.object(codex_statusline, "render", side_effect=[long_body, "model\nmode"]),
             mock.patch.object(codex_statusline.subprocess, "run") as run,
             mock.patch.object(codex_statusline.sys, "stdout", output),
             mock.patch.object(codex_statusline.time, "sleep", side_effect=[None, KeyboardInterrupt]),
         ):
             self.assertEqual(codex_statusline.watch_loop(args, codex_statusline.Palette(False)), 0)
 
-        self.assertEqual(
-            run.call_args_list,
-            [
-                mock.call(["tmux", "resize-pane", "-t", "%42", "-y", "18"], check=True, capture_output=True, timeout=2),
-                mock.call(["tmux", "resize-pane", "-t", "%42", "-y", "14"], check=True, capture_output=True, timeout=2),
-            ],
-        )
+        run.assert_not_called()
+        frames = output.getvalue().split("\033[2J\033[H")[1:]
+        self.assertEqual(len(frames), 2)
+        self.assertTrue(all(len(frame.splitlines()) <= 14 for frame in frames))
+        self.assertIn("more", frames[0])
+        self.assertEqual(frames[1].splitlines(), ["model", "mode"])
 
     def test_footer_render_does_not_scroll_past_mode(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1"])
