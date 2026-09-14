@@ -3256,7 +3256,7 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(account_header.index("banked"), personal_row.index("—"))
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
-        self.assertIn("◯ release-train solei-local 0/1 agents done", rendered)
+        self.assertEqual(lines[-1], "◯ release-train solei-local 0/1 agents done")
         expected_labels = [
             "model",
             "time",
@@ -3278,8 +3278,10 @@ class CodexStatuslineTest(unittest.TestCase):
         with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
             compact = codex_statusline.render_footer(crowded, 49, codex_statusline.Palette(False), max_rows=14)
         self.assertEqual(len(compact.splitlines()), 14)
-        for name in ("build", "review", "verify"):
-            self.assertIn(f"◯ {name} 0/1 agents done", compact)
+        self.assertEqual(
+            compact.splitlines()[-3:],
+            [f"◯ {name} 0/1 agents done" for name in ("build", "review", "verify")],
+        )
         self.assertIn("* andrew", compact)
         self.assertIn("· personal", compact)
 
