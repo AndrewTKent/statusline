@@ -372,7 +372,7 @@ Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated vers
 - `SHOW_ACCOUNT_RESETS=1` — adds a per-account board (5h%, reset, week%, fable%, reset, work-unit cap) below the main rows
 - `SHARED_ACCOUNT_SNAPSHOT=1` — read account/routing/quota rows only from the private accounts snapshot; use `accounts watch --interval 60` to refresh it explicitly
 - `SHARED_ACCOUNT_SNAPSHOT_FILE` / `SHARED_ACCOUNT_SNAPSHOT_MAX_AGE` — override the snapshot path or stale threshold
-- `ACCOUNTS_HARD_SESSION_LIMIT=1` — opt in to stopping routed Claude sessions at 100% five-hour utilization; account pins are bypassed only at that boundary
+- `ACCOUNTS_HARD_SESSION_LIMIT=0` — opt out of stopping routed Claude sessions at a plan wall (100% five-hour, 100% weekly, or 100% Fable for a Fable session); account pins are bypassed only at those boundaries
 
 **Token classifier** (feeds the `tokens` row's work/personal split — see `bin/scan-tokens.py`)
 - `WORK_PATHS` / `PERSONAL_PATHS` — comma-separated cwd/file-path substrings
@@ -415,9 +415,13 @@ native Claude binaries under `~/.local/share/claude/versions`, installs both
 router toolsets under `~/.local/bin`, and prepends supervised launchers from
 `~/.accounts/bin` and `~/.codex-accounts/bin` in new zsh sessions.
 
-`ACCOUNTS_HARD_SESSION_LIMIT=1` is an opt-in overage guard. A supervised
-session resumes on another safe account on the next supervisor check after
-100% five-hour utilization is observed, or terminates when none is available.
+The overage guard is on by default. A supervised session resumes on another
+safe account on the next supervisor check after its account reaches 100% of
+the five-hour or weekly window, or terminates when none is available. A Fable
+session is also moved at 100% Fable utilization, falling back to Opus on the
+same account when its general windows still have headroom. Past any of those
+walls the plan stops paying and extra usage starts, which is what the guard
+prevents. `ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
 
 | Command | What it does |
 |---------|---------------|

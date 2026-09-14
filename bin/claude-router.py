@@ -451,6 +451,17 @@ def session_limit_route(
     return next_profile, fallback_model
 
 
+def hard_limit_kind_for(label: str, current_family: str) -> str | None:
+    """Which plan wall the active account has hit. A rate wall (5h or 7d) stops
+    any session; the Fable wall stops only a Fable session, since a general one
+    never bills it."""
+    if accounts.profile_session_limit_reached(label):
+        return "session"
+    if current_family == "fable" and accounts.profile_fable_limit_reached(label):
+        return "fable"
+    return None
+
+
 def set_synchronized_output(enabled: bool) -> bool:
     if not sys.stdout.isatty():
         return False
@@ -682,15 +693,17 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if detected_limit is not None and limit_rejected is None:
                         limit_rejected = detected_limit
                         mark_detected_limit(selected, detected_limit)
-                hard_limit_reached = bool(
-                    hard_session_limit
-                    and accounts.profile_session_limit_reached(selected["label"])
+                hard_limit_kind = (
+                    hard_limit_kind_for(selected["label"], current_family)
+                    if hard_session_limit
+                    else None
                 )
+                hard_limit_reached = hard_limit_kind is not None
                 if hard_limit_reached:
                     limit_route = session_limit_route(
                         selected,
                         current_family,
-                        "session",
+                        hard_limit_kind,
                         router_pid,
                     )
                 elif limit_rejected:
@@ -712,7 +725,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 if hard_limit_reached and (not session_id or limit_route is None):
                     stop_for_handoff(child)
                     print(
-                        "accounts: hard session limit reached; no safe account is available",
+                        f"accounts: hard {hard_limit_kind} limit reached; no safe account is available",
                         file=sys.stderr,
                     )
                     return 1

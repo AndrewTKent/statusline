@@ -27,6 +27,38 @@ def disable_host_hard_session_limit(monkeypatch):
     monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
 
 
+@pytest.mark.parametrize(
+    ("session_wall", "fable_wall", "family", "kind"),
+    [
+        (False, False, "general", None),
+        (False, False, "fable", None),
+        (True, False, "general", "session"),
+        (True, True, "fable", "session"),
+        (False, True, "fable", "fable"),
+        (False, True, "general", None),
+    ],
+)
+def test_hard_limit_kind_stops_rate_walls_always_and_fable_walls_only_for_fable(
+    session_wall,
+    fable_wall,
+    family,
+    kind,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "profile_session_limit_reached",
+        lambda label: session_wall,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "profile_fable_limit_reached",
+        lambda label: fable_wall,
+    )
+
+    assert claude_router.hard_limit_kind_for("work", family) == kind
+
+
 def read_exact(fd, size):
     data = bytearray()
     deadline = time.monotonic() + 1
