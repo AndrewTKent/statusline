@@ -44,6 +44,8 @@ SESSION_LIMIT_TEXT = "You've hit your session limit"
 FABLE_LIMIT_TEXT = "You've reached your Fable 5 limit."
 SYNC_OUTPUT_ON = b"\x1b[?2026h"
 SYNC_OUTPUT_OFF = b"\x1b[?2026l"
+# Erase the screen and the scrollback, then home: the relaunch starts on a blank terminal.
+CLEAR_SCREEN = b"\x1b[2J\x1b[3J\x1b[H"
 
 
 def _usable_claude(path: Path) -> bool:
@@ -488,6 +490,15 @@ def route_unchanged(
         and next_override == model_override
     )
 
+def clear_screen() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    try:
+        os.write(sys.stdout.fileno(), CLEAR_SCREEN)
+    except OSError:
+        return False
+    return True
+
 
 def stop_for_handoff(child: subprocess.Popen) -> None:
     synchronized = set_synchronized_output(True)
@@ -498,6 +509,7 @@ def stop_for_handoff(child: subprocess.Popen) -> None:
         except subprocess.TimeoutExpired:
             child.kill()
             child.wait()
+        clear_screen()
     finally:
         if synchronized:
             set_synchronized_output(False)

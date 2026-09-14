@@ -1055,10 +1055,11 @@ def test_handoff_finishes_synchronized_output_before_returning(monkeypatch):
         "set_synchronized_output",
         lambda enabled: events.append("sync-on" if enabled else "sync-off") or True,
     )
+    monkeypatch.setattr(claude_router, "clear_screen", lambda: events.append("clear") or True)
 
     claude_router.stop_for_handoff(Child())
 
-    assert events == ["sync-on", "terminate", ("wait", 5), "sync-off"]
+    assert events == ["sync-on", "terminate", ("wait", 5), "clear", "sync-off"]
 
 
 def test_synchronized_output_emits_dec_control_bytes_on_a_pty(monkeypatch):
@@ -1102,6 +1103,7 @@ def test_handoff_brackets_timeout_kill_cleanup_on_a_pty(monkeypatch):
         expected = (
             claude_router.SYNC_OUTPUT_ON
             + b"terminatewaitkillwait"
+            + claude_router.CLEAR_SCREEN
             + claude_router.SYNC_OUTPUT_OFF
         )
         assert read_exact(master_fd, len(expected)) == expected
