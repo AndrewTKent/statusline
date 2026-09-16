@@ -3107,9 +3107,13 @@ class CodexStatuslineTest(unittest.TestCase):
             conn.execute("insert into thread_spawn_edges values ('grandchild', 'root', 'open')")
 
             descendants = codex_statusline.select_descendant_threads(conn, "root")
+            self.assertEqual({thread.id for thread in descendants}, {"child", "grandchild"})
+
+            conn.execute("update threads set archived = 1 where id = 'child'")
+            remaining = codex_statusline.select_descendant_threads(conn, "root")
             conn.close()
 
-        self.assertEqual({thread.id for thread in descendants}, {"child", "grandchild"})
+        self.assertEqual({thread.id for thread in remaining}, {"grandchild"})
 
     def test_descendant_activity_summary_skips_stale_rollouts_but_keeps_total(self) -> None:
         base = codex_statusline.Thread(

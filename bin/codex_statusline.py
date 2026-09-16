@@ -1812,7 +1812,7 @@ def select_descendant_threads(conn: sqlite3.Connection, parent_thread_id: str) -
                 select edge.child_thread_id from thread_spawn_edges edge
                 join descendants parent on edge.parent_thread_id = parent.id
             )
-            select {THREAD_COLUMNS} from threads where id in (select id from descendants) and id != ?
+            select {THREAD_COLUMNS} from threads where id in (select id from descendants) and id != ? and archived = 0
             """,
             (parent_thread_id, parent_thread_id),
         ).fetchall()
