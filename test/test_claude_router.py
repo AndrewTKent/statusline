@@ -27,6 +27,38 @@ def disable_host_hard_session_limit(monkeypatch):
     monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
 
 
+@pytest.mark.parametrize(
+    ("session_wall", "fable_wall", "family", "kind"),
+    [
+        (False, False, "general", None),
+        (False, False, "fable", None),
+        (True, False, "general", "session"),
+        (True, True, "fable", "session"),
+        (False, True, "fable", "fable"),
+        (False, True, "general", None),
+    ],
+)
+def test_hard_limit_kind_stops_rate_walls_always_and_fable_walls_only_for_fable(
+    session_wall,
+    fable_wall,
+    family,
+    kind,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "profile_session_limit_reached",
+        lambda label: session_wall,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "profile_fable_limit_reached",
+        lambda label: fable_wall,
+    )
+
+    assert claude_router.hard_limit_kind_for("work", family) == kind
+
+
 def read_exact(fd, size):
     data = bytearray()
     deadline = time.monotonic() + 1
@@ -1055,10 +1087,11 @@ def test_handoff_finishes_synchronized_output_before_returning(monkeypatch):
         "set_synchronized_output",
         lambda enabled: events.append("sync-on" if enabled else "sync-off") or True,
     )
+    monkeypatch.setattr(claude_router, "clear_screen", lambda: events.append("clear") or True)
 
     claude_router.stop_for_handoff(Child())
 
-    assert events == ["sync-on", "terminate", ("wait", 5), "sync-off"]
+    assert events == ["sync-on", "terminate", ("wait", 5), "clear", "sync-off"]
 
 
 def test_synchronized_output_emits_dec_control_bytes_on_a_pty(monkeypatch):
@@ -1102,6 +1135,7 @@ def test_handoff_brackets_timeout_kill_cleanup_on_a_pty(monkeypatch):
         expected = (
             claude_router.SYNC_OUTPUT_ON
             + b"terminatewaitkillwait"
+            + claude_router.CLEAR_SCREEN
             + claude_router.SYNC_OUTPUT_OFF
         )
         assert read_exact(master_fd, len(expected)) == expected
@@ -1665,11 +1699,19 @@ def test_fable_print_falls_back_to_opus(monkeypatch):
     assert calls[2][2]["env"]["CLAUDE_CONFIG_DIR"] == "/profiles/general"
 
 
-def test_passthrough_fails_closed_without_a_safe_profile(monkeypatch, capsys):
+def test_passthrough_fails_closed_without_an_authenticated_profile(
+    monkeypatch, capsys
+):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
     monkeypatch.setattr(
         claude_router.accounts,
         "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
         lambda **_kwargs: None,
     )
     monkeypatch.setattr(
@@ -1679,7 +1721,156 @@ def test_passthrough_fails_closed_without_a_safe_profile(monkeypatch, capsys):
     )
 
     assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 1
-    assert "no account has enough quota" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no account has enough quota, and no account is authenticated" in err
+
+
+def test_passthrough_opens_on_an_authenticated_account_when_quota_is_gone(
+    monkeypatch, capsys
+):
+    general = {
+        "profile": "/profiles/general",
+        "label": "general",
+        "email": "general@example.com",
+        "org_uuid": "org-general",
+    }
+    calls = []
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: general,
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "call",
+        lambda command, **kwargs: calls.append((command, kwargs)) or 0,
+    )
+
+    assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 0
+    assert len(calls) == 1
+    assert calls[0][1]["env"]["CLAUDE_CONFIG_DIR"] == "/profiles/general"
+    err = capsys.readouterr().err
+    assert "no account has enough quota" in err
+    assert "opening on general anyway" in err
+
+
+def test_strict_quota_refuses_instead_of_opening_degraded(monkeypatch, capsys):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("ACCOUNTS_STRICT_QUOTA", "1")
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: pytest.fail("strict mode consulted the auth fallback"),
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "call",
+        lambda *_args, **_kwargs: pytest.fail("used ambient credentials"),
+    )
+
+    assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 1
+    err = capsys.readouterr().err
+    assert "accounts: no account has enough quota\n" in err
+    assert "opening on" not in err
+
+
+def test_supervised_opens_on_an_authenticated_account_when_quota_is_gone(
+    monkeypatch, capsys
+):
+    general = {
+        "profile": "/profiles/general",
+        "label": "general",
+        "email": "general@example.com",
+        "org_uuid": "org-general",
+    }
+    launches = []
+
+    class Child:
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        lambda: ({"mode": "auto", "label": None}, (1, 1)),
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: general,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "upsert_session_lease",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "remove_session_lease",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda command, **kwargs: launches.append((command, kwargs)) or Child(),
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+    assert len(launches) == 1
+    assert launches[0][1]["env"]["CLAUDE_CONFIG_DIR"] == "/profiles/general"
+    assert launches[0][1]["env"]["ACCOUNTS_ROUTED_LABEL"] == "general"
+    err = capsys.readouterr().err
+    assert "no account has enough quota for this model" in err
+    assert "opening on general anyway" in err
+
+
+def test_supervised_refuses_without_an_authenticated_profile(monkeypatch, capsys):
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        lambda: ({"mode": "auto", "label": None}, (1, 1)),
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("used ambient credentials"),
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 1
+    err = capsys.readouterr().err
+    assert "no account has enough quota for this model, and no account is authenticated" in err
 
 
 @pytest.mark.parametrize(
@@ -1909,6 +2100,7 @@ def test_statusline_tracks_effort_transitions_in_router_state(tmp_path, monkeypa
 def test_statusline_says_when_a_forced_target_is_pending(tmp_path):
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "statusline.conf").write_text("MAX_COLS=200\n")
     (home / ".accounts").mkdir()
     (home / ".accounts" / "mode.json").write_text(
         '{"mode":"set","label":"preferred"}'
@@ -1946,6 +2138,7 @@ def test_statusline_says_when_a_forced_target_is_pending(tmp_path):
 def test_statusline_says_when_an_env_pin_is_bypassed(tmp_path):
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "statusline.conf").write_text("MAX_COLS=200\n")
     profile = home / ".accounts" / "profiles" / "safe"
     profile.mkdir(parents=True)
     project = tmp_path / "project"
@@ -2710,11 +2903,12 @@ def test_live_pane_pin_handoffs_only_this_supervisor_and_resumes_session(monkeyp
     assert launches[1][-2:] == ["--session-id", session_id]
 
 
-def test_global_generation_change_restarts_same_account_session(monkeypatch):
+def test_global_generation_change_on_the_current_account_keeps_the_child_running(monkeypatch):
     session_id = str(uuid.uuid4())
     first = {"profile": "/p/first", "label": "first", "email": "first@x", "org_uuid": "o1"}
     calls = []
     launches = []
+    scopes = []
     snapshots = iter(
         [
             ({"mode": "set", "label": "first", "global_generation": 1, "policy_scope": "pane"}, (1, (2, 3))),
@@ -2742,13 +2936,68 @@ def test_global_generation_change_restarts_same_account_session(monkeypatch):
     )
     monkeypatch.setattr(claude_router, "read_router_state", lambda _path: {"session_id": session_id})
     monkeypatch.setattr(claude_router, "stop_for_handoff", lambda _child: None)
+    monkeypatch.setattr(
+        claude_router, "write_policy_scope", lambda _path, scope: scopes.append(scope)
+    )
     selections = []
     _pin_test_harness(monkeypatch, session_id, selections)
     monkeypatch.setattr(claude_router.accounts, "select_profile", lambda **kwargs: first)
 
     assert claude_router.run_supervised("/real/claude", []) == 0
-    assert len(launches) == 2
-    assert launches[1][-2:] == ["--session-id", session_id]
+    assert len(launches) == 1
+    # the child never relaunched; its footer learns the new scope from the sidecar
+    assert scopes == ["pane", "global"]
+
+
+def test_reissued_fable_mode_on_the_current_fable_account_keeps_the_child_running(monkeypatch):
+    session_id = str(uuid.uuid4())
+    first = {"profile": "/p/first", "label": "first", "email": "first@x", "org_uuid": "o1"}
+    calls = []
+    launches = []
+    snapshots = iter(
+        [
+            ({"mode": "fable", "label": None, "global_generation": 1, "policy_scope": "global"}, (1, None)),
+            ({"mode": "fable", "label": None, "global_generation": 2, "policy_scope": "global"}, (2, None)),
+        ]
+    )
+
+    class Child:
+        def __init__(self, running):
+            self.running = running
+
+        def poll(self):
+            calls.append(True)
+            return None if self.running and len(calls) == 1 else 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(claude_router.accounts, "load_mode_snapshot", lambda: next(snapshots))
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda command, **_kwargs: launches.append(command)
+        or Child(len(launches) == 1),
+    )
+    monkeypatch.setattr(claude_router, "read_router_state", lambda _path: {"session_id": session_id})
+    monkeypatch.setattr(claude_router, "stop_for_handoff", lambda _child: None)
+    monkeypatch.setattr(claude_router, "write_policy_scope", lambda _path, _scope: None)
+    _pin_test_harness(monkeypatch, session_id, [])
+    monkeypatch.setattr(claude_router.accounts, "select_profile", lambda **kwargs: first)
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+    assert len(launches) == 1
+    assert claude_router.option_value(launches[0], "--model") == "fable"
+
+
+def test_policy_scope_sidecar_sits_beside_the_router_state(tmp_path):
+    state_path = tmp_path / "account-router-123.json"
+
+    claude_router.write_policy_scope(state_path, "pane")
+
+    sidecar = tmp_path / "account-router-123.policy"
+    assert claude_router.policy_scope_path(state_path) == sidecar
+    assert sidecar.read_text() == "pane\n"
 
 
 def test_global_auto_change_applies_the_global_selection(monkeypatch):

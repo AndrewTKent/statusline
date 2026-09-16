@@ -846,6 +846,10 @@ render_shared_account_snapshot() {
     account_identity="$current_label"
 
     local route_suffix="" policy_scope="${ACCOUNTS_POLICY_SCOPE:-global}"
+    # The router rewrites this file on a pin that lands on the current account, without a relaunch.
+    if [ -n "${ACCOUNTS_ROUTER_STATE:-}" ] && [ -s "${ACCOUNTS_ROUTER_STATE%.json}.policy" ]; then
+        read -r policy_scope < "${ACCOUNTS_ROUTER_STATE%.json}.policy"
+    fi
     if [ "$current_exists" = "true" ]; then
         [ "$account_identity" != "$current_label" ] && route_suffix=" · ${current_label}"
         if [ "$policy_scope" = "pane" ]; then

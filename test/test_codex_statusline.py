@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import fcntl
 import importlib.util
 import io
 import json
 import os
 import re
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 from datetime import datetime
@@ -56,74 +59,85 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertTrue(codex_statusline.paths_related("/tmp/project/src", "/tmp/project"))
         self.assertFalse(codex_statusline.paths_related("/tmp/project-a", "/tmp/project-b"))
 
-    def test_tool_working_dir_reads_direct_and_nested_exec_arguments(self) -> None:
-        direct = {"arguments": json.dumps({"workdir": "/work/direct"})}
-        nested = {
-            "command": 'const r = await tools.exec_command({"cmd":"git status",'
-            '"workdir":"/work/nested"});'
-        }
-
-        self.assertEqual(codex_statusline.tool_working_dir(direct), "/work/direct")
-        self.assertEqual(codex_statusline.tool_working_dir(nested), "/work/nested")
-
-    def test_recent_active_checkout_ignores_launch_checkout_and_follows_other_repo(self) -> None:
+    def test_snapshot_follows_tool_workdirs_and_returns_to_launch_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            project = tmp / "project"
-            worktree = tmp / "feature"
-            unrelated = tmp / "unrelated"
-            for repo in (project, unrelated):
-                repo.mkdir()
-                subprocess.run(
-                    ["git", "init", "-b", "main"],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                )
-                (repo / "README.md").write_text("fixture\n")
-                subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-                subprocess.run(
-                    [
-                        "git",
-                        "-c",
-                        "user.name=Statusline Test",
-                        "-c",
-                        "user.email=statusline@example.invalid",
-                        "commit",
-                        "-m",
-                        "fixture",
-                    ],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                )
+            root = Path(tmpdir).resolve()
+            project = root / "project"
+            project.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=project, check=True, capture_output=True)
             subprocess.run(
-                ["git", "worktree", "add", "-b", "feature/actual", str(worktree)],
-                cwd=project,
-                check=True,
-                capture_output=True,
+                ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "initial"],
+                cwd=project, check=True, capture_output=True,
+            )
+            worktree = root / "feature tree"
+            subprocess.run(
+                ["git", "worktree", "add", "-b", "feature/live", str(worktree)],
+                cwd=project, check=True, capture_output=True,
+            )
+            rollout = root / "session.jsonl"
+            thread = codex_statusline.Thread(
+                id="working-checkout", source="cli", rollout_path=str(rollout),
+                created_at=1, updated_at=2, cwd=str(project), title="", tokens_used=0,
+                model="", reasoning_effort="", sandbox_policy="", approval_mode="",
+                git_branch="main", archived=0,
             )
 
-            selected_other_repo = codex_statusline.recent_active_checkout(
-                str(project),
-                [str(worktree), str(project), str(unrelated)],
-            )
-            selected_after_launch = codex_statusline.recent_active_checkout(
-                str(project),
-                [str(worktree), str(unrelated), str(project)],
-            )
-            selected_launch_only = codex_statusline.recent_active_checkout(
-                str(project),
-                [str(project)],
-            )
-            codex_statusline.git_info.cache_clear()
-            git = codex_statusline.git_info(selected_other_repo, "stale/branch", 1)
+            def append(payload: dict) -> None:
+                with rollout.open("a") as stream:
+                    stream.write(json.dumps({"type": "response_item", "payload": payload}) + "\n")
 
-        self.assertEqual(selected_other_repo, str(unrelated.resolve()))
-        self.assertEqual(selected_after_launch, str(unrelated.resolve()))
-        self.assertEqual(selected_launch_only, str(project.resolve()))
-        self.assertEqual(git.repo, "unrelated")
-        self.assertEqual(git.branch_name, "main")
+            def snapshot() -> dict:
+                return codex_statusline.snapshot_for_thread(
+                    thread, codex_statusline.TokenSummary(0, 0, 0, 0, 0, 0), {}, str(project),
+                    datetime.now(), include_pull_request=False,
+                )
+
+            append({"type": "function_call", "name": "exec_command", "arguments": json.dumps({
+                "cmd": "git status", "workdir": str(worktree),
+            })})
+            self.assertEqual(snapshot()["branch"], "feature/live")
+            self.assertEqual(snapshot()["repo"], "project")
+            self.assertEqual(Path(snapshot()["cwd"]), worktree)
+            append({"type": "message", "role": "assistant", "content": [{
+                "type": "output_text", "text": f"Next: git -C {project} status",
+            }]})
+            self.assertEqual(snapshot()["branch"], "feature/live")
+            append({"type": "custom_tool_call", "name": "exec", "input":
+                'text(await tools.exec_command({cmd: "git status", workdir: '
+                + json.dumps(str(project)) + '}));'})
+            self.assertEqual(snapshot()["branch"], "main")
+            self.assertEqual(snapshot()["repo"], "project")
+            append({"type": "custom_tool_call", "name": "exec", "input":
+                'text(await tools.exec_command({cmd: '
+                + json.dumps(f'git -C "{worktree}" status') + '}));'})
+            self.assertEqual(snapshot()["branch"], "feature/live")
+            worktree.rename(root / "removed")
+            self.assertEqual(snapshot()["branch"], "main")
+
+    def test_checkout_candidates_ignore_quoted_code_and_keep_shell_paths(self) -> None:
+        source = (
+            'const example = "tools.exec_command({workdir: \'/wrong\'})";\n'
+            '// tools.exec_command({workdir: "/comment"})\n'
+            'await tools.exec_command({cmd: "git status", workdir: "/real path"});\n'
+            'await tools.exec_command({cmd: "git status", workdir: "/prefix" + suffix});\n'
+            'await tools.exec_command({cmd: "printf \'git -C /quoted status\'"});'
+        )
+        payload = {"type": "custom_tool_call", "name": "exec", "input": source}
+        self.assertEqual(codex_statusline.checkout_candidates(payload, "/launch"), ["/real path"])
+        for command, expected in [
+            ('cd "/feature path" && git status', "/feature path"),
+            ("git -C ../feature status", "/feature"),
+            ("printf '%s' 'cd /example'", None),
+            ("printf ';' cd /example", None),
+        ]:
+            with self.subTest(command=command):
+                payload = {"type": "function_call", "name": "exec_command",
+                           "arguments": json.dumps({"cmd": command})}
+                self.assertEqual(
+                    codex_statusline.checkout_candidates(payload, "/launch"),
+                    [expected] if expected else [],
+                )
 
     def test_query_pull_request_resolves_branch(self) -> None:
         payload = json.dumps(
@@ -2056,11 +2070,25 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(replayed.activity.compactions, 0)
         self.assertIsNot(applied, replayed)
 
-    def test_format_reset_same_day(self) -> None:
-        now = datetime.fromtimestamp(1777428000).astimezone()
-        rendered = codex_statusline.format_reset(1777433774, now)
-        self.assertTrue(rendered.startswith("resets "))
-        self.assertNotIn("apr", rendered.lower())
+    def test_format_reset_countdown(self) -> None:
+        now_ts = 1_777_428_000
+        now = datetime.fromtimestamp(now_ts).astimezone()
+        cases = (
+            (30, "0m"),
+            (59 * 60, "59m"),
+            (3600, "1h0m"),
+            (12 * 3600 + 30 * 60, "12h30m"),
+            (86_399, "23h59m"),
+            (86_400, "1d"),
+            (172_799, "1d"),
+            (172_800, "2d"),
+        )
+        for seconds, expected in cases:
+            with self.subTest(seconds=seconds):
+                self.assertEqual(
+                    codex_statusline.format_reset(now_ts + seconds, now),
+                    f"resets {expected}",
+                )
 
     @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone support")
     def test_local_usage_boundaries_follow_daylight_saving_transitions(self) -> None:
@@ -3079,9 +3107,13 @@ class CodexStatuslineTest(unittest.TestCase):
             conn.execute("insert into thread_spawn_edges values ('grandchild', 'root', 'open')")
 
             descendants = codex_statusline.select_descendant_threads(conn, "root")
+            self.assertEqual({thread.id for thread in descendants}, {"child", "grandchild"})
+
+            conn.execute("update threads set archived = 1 where id = 'child'")
+            remaining = codex_statusline.select_descendant_threads(conn, "root")
             conn.close()
 
-        self.assertEqual({thread.id for thread in descendants}, {"child", "grandchild"})
+        self.assertEqual({thread.id for thread in remaining}, {"grandchild"})
 
     def test_descendant_activity_summary_skips_stale_rollouts_but_keeps_total(self) -> None:
         base = codex_statusline.Thread(
@@ -3193,6 +3225,7 @@ class CodexStatuslineTest(unittest.TestCase):
                 {
                     "label": "andrew",
                     "weekly": {"used_percent": 67.0, "resets_at": 1_900_000_000},
+                    "reset_credits": [1_900_000_000, 1_902_000_000],
                 },
                 {
                     "label": "personal",
@@ -3205,7 +3238,8 @@ class CodexStatuslineTest(unittest.TestCase):
             rendered = codex_statusline.render_footer(data, 80, codex_statusline.Palette(False))
 
         self.assertIn("model   GPT-5.6 · max", rendered)
-        self.assertIn("account andrew · auto → personal", rendered)
+        self.assertIn("account andrew · auto", rendered)
+        self.assertNotIn("→", rendered)
         self.assertIn("repo    statusline", rendered)
         self.assertIn("branch  feat/codex-top", rendered)
         self.assertIn("  context ●●●●●●○○○○○○○○○ 45%", rendered)
@@ -3225,12 +3259,14 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(account_header.index("week") + 4, account_row.index("67%") + 3)
         self.assertEqual(account_header.index("reset"), account_row.index(reset_value))
         self.assertNotIn("resets", account_row)
+        banked_text = codex_statusline.reset_credit_text(board["rows"][0]["reset_credits"])
+        self.assertTrue(banked_text.startswith("2 exp "))
+        self.assertEqual(account_header.index("banked"), account_row.index(banked_text))
+        personal_row = next(line for line in lines if line.startswith("  · personal"))
+        self.assertEqual(account_header.index("banked"), personal_row.index("—"))
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
-        self.assertEqual(
-            rendered.splitlines()[-1],
-            "◯ release-train solei-local 0/1 agents done · 15m",
-        )
+        self.assertEqual(lines[-1], "◯ release-train solei-local 0/1 agents done · 15m")
         expected_labels = [
             "model",
             "time",
@@ -3248,6 +3284,24 @@ class CodexStatuslineTest(unittest.TestCase):
         )
         self.assertTrue(all(len(line) <= 80 for line in rendered.splitlines()))
 
+        crowded = {
+            **data,
+            "agents": {
+                "running_details": [
+                    {"label": name, "elapsed_seconds": 65} for name in ("build", "review", "verify")
+                ]
+            },
+        }
+        with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
+            compact = codex_statusline.render_footer(crowded, 49, codex_statusline.Palette(False), max_rows=14)
+        self.assertEqual(len(compact.splitlines()), 14)
+        self.assertEqual(
+            compact.splitlines()[-3:],
+            [f"◯ {name} 0/1 agents done · 1m" for name in ("build", "review", "verify")],
+        )
+        self.assertIn("* andrew", compact)
+        self.assertIn("· personal", compact)
+
         palette = codex_statusline.Palette(True)
         with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
             colored = codex_statusline.render_footer(data, 80, palette)
@@ -3258,7 +3312,7 @@ class CodexStatuslineTest(unittest.TestCase):
         )
         self.assertIn(
             f"  {palette.white}{'account':<7}{palette.reset} "
-            f"{palette.orange}andrew · auto → personal{palette.reset}",
+            f"{palette.orange}andrew · auto{palette.reset}",
             colored,
         )
 
@@ -3402,6 +3456,7 @@ class CodexStatuslineTest(unittest.TestCase):
                             "rate_limits": {
                                 "primary": {"used_percent": 40, "window_duration_mins": 10_080}
                             },
+                            "reset_credits": {"count": 2, "expires_at": [1_600_000_000, 1_900_000_000]},
                         },
                         "personal": {
                             "fetched_at": time.time(),
@@ -3421,6 +3476,8 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(board["selected"], "personal")
         self.assertEqual(board["rows"][0]["label"], "work")
         self.assertEqual(board["rows"][0]["weekly"]["used_percent"], 40)
+        self.assertEqual(board["rows"][0]["reset_credits"], [1_900_000_000])
+        self.assertEqual(board["rows"][1]["reset_credits"], [])
 
     def test_credit_balance_text_handles_unlimited_and_invalid_balances(self) -> None:
         self.assertEqual(
@@ -3611,6 +3668,17 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertIn("codex 7d: 44%", result.stdout)
         self.assertNotIn("codex 5h: 99%", result.stdout)
 
+    def test_terminal_size_follows_the_pane_after_resize_with_exported_dimensions(self) -> None:
+        master, slave = os.openpty()
+        try:
+            with os.fdopen(slave, "w") as terminal, mock.patch.object(sys, "__stdout__", terminal):
+                with mock.patch.dict(os.environ, {"COLUMNS": "80", "LINES": "14"}):
+                    for columns, rows in ((80, 14), (49, 8)):
+                        fcntl.ioctl(terminal, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                        self.assertEqual(codex_statusline.terminal_size(), os.terminal_size((columns, rows)))
+        finally:
+            os.close(master)
+
     def test_watch_refreshes_footer_width_from_terminal(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1"])
         widths = []
@@ -3644,6 +3712,29 @@ class CodexStatuslineTest(unittest.TestCase):
             codex_statusline.watch_loop(args, codex_statusline.Palette(False))
 
         run.assert_not_called()
+
+    def test_owned_footer_keeps_the_conversation_size_when_workflows_change(self) -> None:
+        args = codex_statusline.parse_args(["--footer", "--watch", "1"])
+        args.footer_min_height = 14
+        long_body = "model\n" + "\n".join(f"workflow {i}" for i in range(17))
+        output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"TMUX_PANE": "%42"}),
+            mock.patch.object(codex_statusline, "terminal_size", return_value=os.terminal_size((80, 14))),
+            mock.patch.object(codex_statusline, "snapshot", return_value={}),
+            mock.patch.object(codex_statusline, "render", side_effect=[long_body, "model\nmode"]),
+            mock.patch.object(codex_statusline.subprocess, "run") as run,
+            mock.patch.object(codex_statusline.sys, "stdout", output),
+            mock.patch.object(codex_statusline.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            self.assertEqual(codex_statusline.watch_loop(args, codex_statusline.Palette(False)), 0)
+
+        run.assert_not_called()
+        frames = output.getvalue().split("\033[2J\033[H")[1:]
+        self.assertEqual(len(frames), 2)
+        self.assertTrue(all(len(frame.splitlines()) <= 14 for frame in frames))
+        self.assertIn("more", frames[0])
+        self.assertEqual(frames[1].splitlines(), ["model", "mode"])
 
     def test_footer_render_does_not_scroll_past_mode(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1"])
@@ -3859,19 +3950,35 @@ class CodexStatuslineTest(unittest.TestCase):
             subprocess.run([str(launcher)], check=True, env=env)
             self.assertEqual(
                 capture.read_text().splitlines(),
-                ["--no-alt-screen", "-c", "tui.status_line=[]", "--dangerously-bypass-approvals-and-sandbox"],
+                [
+                    "--no-alt-screen",
+                    "-c",
+                    "tui.status_line=[]",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                ],
             )
 
             subprocess.run([str(launcher), "--sandbox", "read-only"], check=True, env=env)
             self.assertEqual(
                 capture.read_text().splitlines(),
-                ["--no-alt-screen", "-c", "tui.status_line=[]", "--sandbox", "read-only"],
+                [
+                    "--no-alt-screen",
+                    "-c",
+                    "tui.status_line=[]",
+                    "--sandbox",
+                    "read-only",
+                ],
             )
 
             subprocess.run([str(launcher), "--yolo"], check=True, env=env)
             self.assertEqual(
                 capture.read_text().splitlines(),
-                ["--no-alt-screen", "-c", "tui.status_line=[]", "--yolo"],
+                [
+                    "--no-alt-screen",
+                    "-c",
+                    "tui.status_line=[]",
+                    "--yolo",
+                ],
             )
 
             for permissions in (("-sread-only",), ("-s=read-only",), ("-anever",), ("-a=never",)):
@@ -3977,8 +4084,9 @@ class CodexStatuslineTest(unittest.TestCase):
             split_window = next(line for line in captured if line.startswith("split-window "))
             self.assertIn("-l 14", split_window)
             self.assertIn("--watch 3", split_window)
+            self.assertIn("--footer-min-height 14", split_window)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", captured)
-            self.assertIn("set-option mouse off", captured)
+            self.assertIn("set-option mouse on", captured)
             self.assertIn("set-option -w history-limit 100000", captured)
 
             subprocess.run(
@@ -4184,7 +4292,7 @@ class CodexStatuslineTest(unittest.TestCase):
                 },
             )
             self.assertTrue(all("resize-pane -t '%1' -y 14" in line for line in resize_hooks))
-            self.assertIn("mouse off", "\n".join(capture.read_text().splitlines()))
+            self.assertIn("mouse on", "\n".join(capture.read_text().splitlines()))
             self.assertIn("history-limit 100000", "\n".join(capture.read_text().splitlines()))
 
     def launcher_detached_session_env(self, tmp: Path, capture: Path) -> dict[str, str]:

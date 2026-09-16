@@ -84,20 +84,50 @@ class CodexRouterTest(unittest.TestCase):
         self.assertEqual(env["CODEX_ACCOUNT_ROUTER_STATE"], "/tmp/state.json")
         self.assertNotIn("dev@example.invalid", env.values())
 
-    def test_auto_handoff_requires_threshold_and_margin(self) -> None:
-        usage = {
-            "work": {"fetched_at": 1, "rate_limits": {"primary": {"used_percent": 92}}},
-            "personal": {"fetched_at": 1, "rate_limits": {"primary": {"used_percent": 40}}},
-        }
+    def test_auto_handoff_requires_fresh_weekly_usage_above_80(self) -> None:
+        cases = [
+            ("below threshold", 79, 20, 10080, False, 1, None),
+            ("at threshold", 80, 20, 10080, False, 1, None),
+            ("above threshold", 80.1, 20, 10080, False, 1, "personal"),
+            ("short window exhausted", 40, 100, 10080, False, 1, None),
+            ("poll error", 40, 20, 10080, True, 1, None),
+            ("poll error above threshold", 95, 20, 10080, True, 1, None),
+            ("no weekly window", 95, 20, 300, False, 1, None),
+            ("stale weekly reading", 95, 20, 10080, False, -301, None),
+        ]
+        for name, weekly, short, duration, error, fetched, expected in cases:
+            for weekly_slot, short_slot in [("primary", "secondary"), ("secondary", "primary")]:
+                with self.subTest(case=name, weekly_slot=weekly_slot):
+                    usage = {
+                        "work": {
+                            "fetched_at": fetched,
+                            "rate_limits": {
+                                weekly_slot: {"used_percent": weekly, "window_duration_mins": duration},
+                                short_slot: {"used_percent": short, "window_duration_mins": 300},
+                            },
+                        },
+                        "personal": {
+                            "fetched_at": 1,
+                            "rate_limits": {"primary": {"used_percent": 20, "window_duration_mins": 10080}},
+                        },
+                    }
+                    if error:
+                        usage["work"]["error"] = "Codex app-server did not return rate limits"
+                    with (
+                        mock.patch.object(codex_router.codex_accounts, "load_registry", return_value={"work": {}, "personal": {}}),
+                        mock.patch.object(codex_router.codex_accounts, "load_mode", return_value={"mode": "auto"}),
+                        mock.patch.object(codex_router.codex_accounts, "load_usage", return_value=usage),
+                        mock.patch.object(codex_router.codex_accounts.time, "time", return_value=1),
+                    ):
+                        self.assertEqual(codex_router.handoff_target("work"), expected)
+
+    def test_explicit_account_selection_still_hands_off(self) -> None:
         with (
             mock.patch.object(codex_router.codex_accounts, "load_registry", return_value={"work": {}, "personal": {}}),
-            mock.patch.object(codex_router.codex_accounts, "load_mode", return_value={"mode": "auto"}),
-            mock.patch.object(codex_router.codex_accounts, "load_usage", return_value=usage),
-            mock.patch.object(codex_router.codex_accounts.time, "time", return_value=1),
+            mock.patch.object(codex_router.codex_accounts, "load_mode", return_value={"mode": "set", "label": "personal"}),
+            mock.patch.object(codex_router.codex_accounts, "load_usage", return_value={}),
         ):
             self.assertEqual(codex_router.handoff_target("work"), "personal")
-            usage["work"]["rate_limits"]["primary"]["used_percent"] = 89
-            self.assertIsNone(codex_router.handoff_target("work"))
 
 
 if __name__ == "__main__":

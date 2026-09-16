@@ -399,10 +399,11 @@ def _conf_var(name: str) -> str:
 
 
 def hard_session_limit_enabled() -> bool:
+    """On unless set to 0: a session past a plan wall bills extra usage."""
     value = os.environ.get("ACCOUNTS_HARD_SESSION_LIMIT") or _conf_var(
         "ACCOUNTS_HARD_SESSION_LIMIT"
     )
-    return value == "1"
+    return value != "0"
 
 
 def load_label_pairs() -> list[tuple[str, str, str | None]]:
@@ -1796,7 +1797,8 @@ def poll_blobs_usage(blobs: dict) -> int:
     """Query each stored account's remaining limits with its OWN access token
     and write them to the board (account-resets.json). Pure reads. Skips blobs
     whose access token has expired (would 401) — those show the reset-aware
-    estimate until the account is next active and its blob refreshes."""
+    estimate until the account is next active and its blob refreshes. One dead
+    account only ages its own row; the poll fails only when nothing answered."""
     now = int(time.time())
     fresh: dict[str, dict] = {}
     failed = 0
@@ -1819,8 +1821,10 @@ def poll_blobs_usage(blobs: dict) -> int:
             e.get("email"), e.get("org_uuid"), usage, now
         )
     merge_reset_rows(fresh)
-    if failed:
+    if failed and not fresh:
         raise AccountsError(f"usage poll failed for {failed} account(s)")
+    if failed:
+        print(f"accounts: usage poll failed for {failed} account(s)", file=sys.stderr)
     return len(fresh)
 
 
@@ -2483,6 +2487,37 @@ def confirm_stale_candidate(
         return False
 
 
+def any_authenticated_profile(
+    *,
+    avoid_labels: set[str] | None = None,
+) -> dict | None:
+    """The best-ranked profile whose credential still works, ignoring quota
+    entirely. Quota decides which account to route to; it must not decide
+    whether the app opens, because reading and resuming a session costs none."""
+    blobs = load_blobs()
+    accounts_map = blobs.get("accounts") or {}
+    avoid = set(avoid_labels or ()) | excluded_labels()
+    now = time.time()
+    ranked = [
+        row["label"]
+        for row in route_rows(blobs, None, now)
+        if row["label"] not in avoid
+    ]
+    for label in ranked:
+        candidate = accounts_map.get(label)
+        if candidate is None:
+            continue
+        if verify_entry_auth(label, candidate, now) not in ("ok", "ok_rotated"):
+            continue
+        return {
+            "profile": str(ensure_native_profile(label, candidate)),
+            "label": label,
+            "email": candidate.get("email") or "",
+            "org_uuid": candidate.get("org_uuid") or "",
+        }
+    return None
+
+
 def select_profile(
     *,
     avoid_labels: set[str] | None = None,
@@ -2688,14 +2723,24 @@ def profile_session_limit_reached(label: str) -> bool:
             (candidate for candidate in rows if candidate["label"] == label),
             None,
         )
-        # Last-observed 100% stays unsafe until a post-reset poll proves headroom.
-        return bool(
-            row
-            and row["five_hour"] is not None
-            and row["five_hour"] >= SESSION_HARD_LIMIT_PCT
-        )
+        # Last-observed 100% on either rate window stays unsafe until a post-reset poll proves headroom.
+        return bool(row and _at_hard_limit(row["five_hour"], row["seven_day"]))
     except Exception:
         return False
+
+
+def profile_fable_limit_reached(label: str) -> bool:
+    """The Fable window is spent; a Fable session kept here bills extra usage."""
+    try:
+        rows = route_rows(load_blobs(), label, time.time())
+        row = next((candidate for candidate in rows if candidate["label"] == label), None)
+        return bool(row and _at_hard_limit(row["fable"]))
+    except Exception:
+        return False
+
+
+def _at_hard_limit(*pcts: float | None) -> bool:
+    return any(pct is not None and pct >= SESSION_HARD_LIMIT_PCT for pct in pcts)
 
 
 def profile_near_wall(label: str) -> bool:

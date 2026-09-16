@@ -56,9 +56,15 @@
 # AGENT_METRICS_DB="$HOME/Library/Application Support/statusline/agent-metrics/metrics.sqlite3"
 
 # Stop routed Claude sessions when the active account's fresh or last-known
-# 5-hour utilization reaches 100%. Overrides account pins and routes to another
-# safe account when possible. Off by default.
-# ACCOUNTS_HARD_SESSION_LIMIT=1
+# 5-hour, weekly, or (for a Fable session) Fable utilization reaches 100%, so
+# nothing bills extra usage past the plan. Overrides account pins and routes to
+# another safe account when possible. On by default; set 0 to turn it off.
+# ACCOUNTS_HARD_SESSION_LIMIT=0
+
+# When no account has quota, the router warns and opens on the best
+# authenticated account anyway (reading and resuming cost nothing). Set 1 to
+# refuse instead, for unattended runs where a doomed session is worse than a stop.
+# ACCOUNTS_STRICT_QUOTA=1
 
 # ─── Token classifier (optional; for scan-tokens.py) ───────────────────────
 # Classify each token request as work / personal / unknown. Independent of

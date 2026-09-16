@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import codecs
 from collections.abc import Callable
@@ -13,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -82,17 +84,23 @@ TOOL_SESSION_PATTERN = re.compile(
     r"""session_id["']?\s*:\s*["']?([A-Za-z0-9_-]+)"""
 )
 TOOL_SESSION_VALUE_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
-NESTED_WORKDIR_PATTERN = re.compile(
-    r'''(?:\{|,)\s*["']?workdir["']?\s*:\s*(?P<value>"(?:\\.|[^"\\])*")'''
-)
 ROLLOUT_THREAD_ID_PATTERN = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
 NON_WHITESPACE_PATTERN = re.compile(r"\S")
+JAVASCRIPT_TOKENS = re.compile(
+    r'''//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]'''
+)
+SHELL_COMMAND_BREAKS = re.compile(
+    r'''"(?:\\.|[^"\\])*"|'[^']*'|`(?:\\.|[^`\\])*`|\\.|(?P<separator>[;&|\n]+)'''
+)
 
 
 def terminal_size() -> os.terminal_size:
-    return shutil.get_terminal_size((120, 40))
+    try:
+        return os.get_terminal_size(sys.__stdout__.fileno())
+    except (AttributeError, OSError, ValueError):
+        return shutil.get_terminal_size((120, 40))
 
 
 def default_width() -> int:
@@ -191,7 +199,6 @@ class RolloutActivity:
     last_agent_message: str
     active_tool: str
     last_tool: str
-    working_dirs: tuple[str, ...] = ()
 
 
 @dataclass
@@ -215,7 +222,6 @@ class ActivityState:
     last_user_message: str = ""
     last_agent_message: str = ""
     last_tool: str = ""
-    working_dirs: OrderedDict[str, None] = field(default_factory=OrderedDict)
 
 
 @dataclass
@@ -1806,7 +1812,7 @@ def select_descendant_threads(conn: sqlite3.Connection, parent_thread_id: str) -
                 select edge.child_thread_id from thread_spawn_edges edge
                 join descendants parent on edge.parent_thread_id = parent.id
             )
-            select {THREAD_COLUMNS} from threads where id in (select id from descendants) and id != ?
+            select {THREAD_COLUMNS} from threads where id in (select id from descendants) and id != ? and archived = 0
             """,
             (parent_thread_id, parent_thread_id),
         ).fetchall()
@@ -2214,27 +2220,6 @@ def tool_input_session(payload: dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
-def tool_working_dir(payload: dict[str, Any]) -> str:
-    raw_input = tool_arguments(payload)
-    if not raw_input and isinstance(payload.get("command"), str):
-        raw_input = payload["command"]
-    if not raw_input:
-        return ""
-    try:
-        parsed = json.loads(raw_input)
-    except json.JSONDecodeError:
-        matches = list(NESTED_WORKDIR_PATTERN.finditer(raw_input))
-        if not matches:
-            return ""
-        try:
-            value = json.loads(matches[-1].group("value"))
-        except json.JSONDecodeError:
-            return ""
-    else:
-        value = parsed.get("workdir") if isinstance(parsed, dict) else ""
-    return value if isinstance(value, str) and os.path.isabs(value) else ""
-
-
 def tool_result(payload: dict[str, Any]) -> dict[str, Any]:
     output = payload.get("output")
     if isinstance(output, dict):
@@ -2443,9 +2428,6 @@ def update_activity_state(state: RolloutStateEntry, item: dict[str, Any]) -> Non
                 activity.tool_sessions.pop(expired_call_id, None)
         activity.tool_calls += 1
         activity.last_tool = name
-        working_dir = tool_working_dir(payload)
-        if working_dir:
-            retain_recent_turn(activity.working_dirs, working_dir, None, 32)
         session_id = tool_input_session(payload)
         if call_id and session_id:
             activity.tool_sessions[call_id] = session_id
@@ -2804,7 +2786,6 @@ def activity_from_state(
         last_agent_message=state.last_agent_message or "-",
         active_tool=next(reversed(pending_tools.values()), "-"),
         last_tool=state.last_tool or "-",
-        working_dirs=tuple(state.working_dirs),
     )
 
 
@@ -2873,54 +2854,147 @@ PR_CACHE_DIR = Path(os.environ.get("CODEX_STATUSLINE_PR_CACHE_DIR", "/tmp/claude
 PR_REFRESH_PROCESSES: list[subprocess.Popen[Any]] = []
 
 
-@lru_cache(maxsize=128)
-def git_checkout_identity(cwd: str, bucket: int) -> tuple[str, str] | None:
-    del bucket
+def shell_tool_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    name = str(payload.get("name", "")).split(".")[-1]
+    if name not in {"exec", "exec_command", "shell_command"}:
+        return []
+    raw = payload.get("arguments", payload.get("input", ""))
+    if not isinstance(raw, str):
+        return []
     try:
-        output = subprocess.check_output(
-            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-common-dir"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=1,
-        ).splitlines()
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if len(output) != 2:
-        return None
-    root = os.path.realpath(output[0])
-    common = os.path.realpath(os.path.join(cwd, output[1]))
-    return root, common
+        value = json.loads(raw)
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        return [value]
+    if name != "exec":
+        return []
+    tokens = [token for token in JAVASCRIPT_TOKENS.findall(raw) if not token.startswith(("//", "/*"))]
+    inputs = []
+    for index in range(len(tokens) - 4):
+        if tokens[index:index + 5] != ["tools", ".", "exec_command", "(", "{"]:
+            continue
+        depth = 1
+        fields = {}
+        for position in range(index + 5, len(tokens)):
+            token = tokens[position]
+            if token == "{":
+                depth += 1
+            elif token == "}":
+                depth -= 1
+                if not depth:
+                    break
+            if depth != 1 or position + 3 >= len(tokens) or tokens[position + 1] != ":":
+                continue
+            if tokens[position + 3] not in {",", "}"}:
+                continue
+            key = token.strip("\"'")
+            literal = tokens[position + 2]
+            if key not in {"cmd", "command", "workdir", "cwd"} or not literal.startswith(('"', "'")):
+                continue
+            try:
+                fields[key] = ast.literal_eval(literal)
+            except (ValueError, SyntaxError):
+                continue
+        inputs.append(fields)
+    return inputs
 
 
-def recent_active_checkout(launch_cwd: str, candidates: list[str]) -> str:
-    bucket = int(time.time() // GIT_INFO_TTL_SECONDS)
-    launch = git_checkout_identity(launch_cwd, bucket)
-    if launch is None:
-        return ""
-    launch_root = launch[0]
-    for candidate in reversed(candidates):
-        checkout = git_checkout_identity(candidate, bucket)
-        if checkout is not None and checkout[0] != launch_root:
-            return checkout[0]
-    return launch_root
+def checkout_candidates(payload: dict[str, Any], launch_cwd: str) -> list[str]:
+    candidates = []
+    for tool_input in shell_tool_inputs(payload):
+        directory = tool_input.get("workdir", tool_input.get("cwd"))
+        base = Path(launch_cwd)
+        if isinstance(directory, str) and directory:
+            base = (base / directory).resolve()
+            candidates.append(str(base))
+        command = tool_input.get("cmd", tool_input.get("command", ""))
+        if not isinstance(command, str):
+            continue
+        start = 0
+        segments = []
+        for match in SHELL_COMMAND_BREAKS.finditer(command):
+            if match.group("separator"):
+                segments.append(command[start:match.start()])
+                start = match.end()
+        segments.append(command[start:])
+        for segment in segments:
+            try:
+                tokens = shlex.split(segment, comments=True)
+            except ValueError:
+                continue
+            path = ""
+            if tokens[:1] == ["cd"] and len(tokens) >= 2:
+                path = tokens[2] if tokens[1] == "--" and len(tokens) > 2 else tokens[1]
+            elif tokens[:2] == ["git", "-C"] and len(tokens) >= 3:
+                path = tokens[2]
+            if path and not path.startswith("-") and "$" not in path:
+                resolved = (base / path).resolve()
+                candidates.append(str(resolved))
+                if tokens[0] == "cd":
+                    base = resolved
+    return candidates
+
+
+@lru_cache(maxsize=128)
+def recent_checkout_candidates(rollout_path: str, launch_cwd: str, version: tuple[int, int, int]) -> tuple[str, ...]:
+    del version
+    try:
+        with open(rollout_path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            offset = max(0, stream.tell() - MAX_BUFFERED_ROLLOUT_LINE_BYTES)
+            stream.seek(offset)
+            if offset:
+                stream.readline()
+            lines = stream.read(MAX_BUFFERED_ROLLOUT_LINE_BYTES).splitlines()
+    except OSError:
+        return ()
+    candidates: OrderedDict[str, None] = OrderedDict()
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            continue
+        if not isinstance(item, dict) or item.get("type") != "response_item":
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        for candidate in checkout_candidates(payload, launch_cwd):
+            candidates[candidate] = None
+            candidates.move_to_end(candidate)
+            if len(candidates) > 32:
+                candidates.popitem(last=False)
+    return tuple(reversed(candidates))
+
+
+def working_directory(thread: Thread, fallback: str, bucket: int) -> str:
+    try:
+        stat = Path(thread.rollout_path).stat()
+    except OSError:
+        return fallback
+    version = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    for candidate in recent_checkout_candidates(thread.rollout_path, thread.cwd, version):
+        if Path(candidate).is_dir() and git_info(candidate, "", bucket).root:
+            return candidate
+    return fallback
 
 
 @lru_cache(maxsize=128)
 def git_info(cwd: str, fallback_branch: str, bucket: int) -> GitInfo:
     path = cwd or os.getcwd()
     try:
-        root = subprocess.check_output(
-            ["git", "-C", path, "rev-parse", "--show-toplevel"],
+        root, common_dir = subprocess.check_output(
+            ["git", "-C", path, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"],
             stderr=subprocess.DEVNULL,
             text=True,
             timeout=0.4,
-        ).strip()
-    except (subprocess.SubprocessError, OSError):
+        ).strip().splitlines()
+    except (subprocess.SubprocessError, OSError, ValueError):
         return GitInfo(Path(path).name or "unknown", fallback_branch or "-", "", "", "")
 
-    checkout = git_checkout_identity(path, bucket)
-    common = Path(checkout[1]) if checkout else None
-    repo = common.parent.name if common and common.name == ".git" else Path(root).name
+    common = Path(common_dir)
+    repo = common.parent.name if common.name == ".git" else Path(root).name
     try:
         branch_name = subprocess.check_output(
             ["git", "-C", root, "branch", "--show-current"],
@@ -3187,11 +3261,12 @@ def format_reset(timestamp: Any, now: datetime | None = None) -> str:
         return "reset n/a"
 
     local_now = (now or datetime.now(timezone.utc)).astimezone()
-    if reset_at.date() == local_now.date():
-        return f"resets {format_clock(reset_at)}"
-    if reset_at.year == local_now.year:
-        return f"resets {reset_at.strftime('%b').lower()} {reset_at.day} {format_clock(reset_at)}"
-    return f"resets {reset_at.strftime('%b').lower()} {reset_at.day} {reset_at.year}"
+    seconds = max(0, int(reset_at.timestamp() - local_now.timestamp()))
+    if seconds >= 86_400:
+        return f"resets {seconds // 86_400}d"
+    if seconds >= 3600:
+        return f"resets {seconds // 3600}h{seconds % 3600 // 60}m"
+    return f"resets {seconds // 60}m"
 
 
 def limit_display(limit: dict[str, Any], now: datetime | None = None) -> tuple[float, str]:
@@ -3349,6 +3424,24 @@ def account_binding_usage(rate_limits: dict[str, Any]) -> float:
     return max(values, default=101.0)
 
 
+def unexpired_reset_credits(account_usage: dict[str, Any], now: datetime | None = None) -> list[int]:
+    credits = account_usage.get("reset_credits")
+    expires_at = credits.get("expires_at") if isinstance(credits, dict) else None
+    cutoff = (now or datetime.now(timezone.utc)).timestamp()
+    return sorted(
+        int(value)
+        for value in (expires_at if isinstance(expires_at, list) else [])
+        if isinstance(value, (int, float)) and value > cutoff
+    )
+
+
+def reset_credit_text(expires_at: list[int]) -> str:
+    if not expires_at:
+        return "—"
+    soonest = datetime.fromtimestamp(expires_at[0]).astimezone()
+    return f"{len(expires_at)} exp {soonest.strftime('%b').lower()} {soonest.day}"
+
+
 def codex_account_board(current_account: str) -> dict[str, Any]:
     root = Path(os.environ.get("CODEX_ACCOUNTS_HOME", Path.home() / ".codex-accounts"))
     registry = read_json(root / "accounts.json")
@@ -3373,6 +3466,7 @@ def codex_account_board(current_account: str) -> dict[str, Any]:
             {
                 "label": label,
                 "weekly": weekly_rate_limit(rate_limits),
+                "reset_credits": unexpired_reset_credits(account_usage),
                 "binding_usage": account_binding_usage(rate_limits),
                 "error": str(account_usage.get("error") or ""),
             }
@@ -3413,8 +3507,9 @@ def snapshot_for_thread(
     usage = usage_from_rollout(thread)
     tokens.session = usage.session_total
     repo_cwd = thread.cwd if prefer_thread_cwd else (cwd if paths_related(cwd, thread.cwd) else thread.cwd)
-    repo_cwd = recent_active_checkout(repo_cwd, list(activity.working_dirs)) or repo_cwd
-    git = git_info(repo_cwd, thread.git_branch, int(now.timestamp() // GIT_INFO_TTL_SECONDS))
+    git_bucket = int(now.timestamp() // GIT_INFO_TTL_SECONDS)
+    repo_cwd = working_directory(thread, repo_cwd, git_bucket)
+    git = git_info(repo_cwd, thread.git_branch, git_bucket)
     window = usage.context_window or context_window(model)
 
     return {
@@ -3432,7 +3527,7 @@ def snapshot_for_thread(
             if include_pull_request
             else None
         ),
-        "cwd": thread.cwd,
+        "cwd": repo_cwd,
         "created_at": thread.created_at,
         "updated_at": thread.updated_at,
         "session_age_seconds": int(now.timestamp()) - thread.created_at,
@@ -3466,7 +3561,7 @@ def descendant_activity_summary(
     running_details = [
         {
             "label": workflow_label(thread),
-            "elapsed_seconds": max(0, int(now.timestamp()) - thread.created_at),
+            "elapsed_seconds": int(now.timestamp()) - thread.created_at,
         }
         for thread in running_threads
     ]
@@ -3658,7 +3753,7 @@ def render_sigil(data: dict[str, Any], p: Palette) -> str:
     )
 
 
-def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
+def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | None = None) -> str:
     usage = data["usage"]
     tokens = data["tokens"]
     rate_limits = usage.get("rate_limits") or {}
@@ -3697,13 +3792,7 @@ def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
         return f"  {p.white}{label:<7}{p.reset} {styled}"
 
     route_mode = account_board.get("mode", "auto")
-    if route_mode == "set":
-        route_text = f"set → {account_board['selected'] or '?'}"
-    elif account_board.get("selected") and account_board["selected"] != account_board.get("current_label"):
-        route_text = f"auto → {account_board['selected']}"
-    else:
-        route_text = "auto"
-    account_text = f"{account_board.get('current_label') or data['account']} · {route_text}"
+    account_text = f"{account_board.get('current_label') or data['account']} · {route_mode}"
 
     lines = [
         row("model", f"{data['model_display']}{effort}", model_style),
@@ -3765,29 +3854,29 @@ def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
     )
     lines.append(row("mode", permissions, solid(p.dim)))
 
+    workflows = (data.get("agents") or {}).get("running_details", [])
     board_rows = account_board.get("rows") or []
     if board_rows and width >= 40:
         def clip_board_line(value: str) -> str:
             return value if len(value) <= width else f"{value[: width - 1]}…"
 
-        lines.append(
-            clip_board_line(f"    {'acct':<16} {'week':>6}  reset")
-        )
+        if max_rows is None or len(lines) + len(board_rows) + len(workflows) < max_rows:
+            lines.append(clip_board_line(f"    {'acct':<16} {'week':>6}  {'reset':<18} banked"))
         for account in board_rows:
             marker = "*" if account["label"] == account_board.get("current_label") else "·"
             weekly = account.get("weekly")
             if weekly:
                 used, reset = limit_display(weekly)
                 reset_value = "now" if reset == "reset" else reset.removeprefix("resets ").removeprefix("reset ")
-                detail = f"{format_pct(used):>6}  {reset_value}"
+                detail = f"{format_pct(used):>6}  {reset_value:<18}"
             else:
-                detail = "     —  unavailable"
+                detail = f"{'—':>6}  {'unavailable':<18}"
+            banked = reset_credit_text(account.get("reset_credits") or [])
             label = short_text(str(account["label"]), 16)
-            lines.append(clip_board_line(f"  {marker} {label:<16} {detail}"))
-    for workflow in (data.get("agents") or {}).get("running_details", []):
+            lines.append(clip_board_line(f"  {marker} {label:<16} {detail} {banked}"))
+    for workflow in workflows:
         status = short_text(
-            f"◯ {workflow['label']} 0/1 agents done · "
-            f"{format_duration(workflow['elapsed_seconds'])}",
+            f"◯ {workflow['label']} 0/1 agents done · {format_duration(workflow['elapsed_seconds'])}",
             width,
         )
         lines.append(f"{p.dim}{status}{p.reset}")
@@ -4046,7 +4135,7 @@ def render(data: dict[str, Any], args: argparse.Namespace, p: Palette) -> str:
     if args.all:
         return render_all_sessions(data, args.width, p, args.details)
     if args.footer:
-        return render_footer(data, args.width, p)
+        return render_footer(data, args.width, p, getattr(args, "footer_rows", None))
     fmt = args.format
     if fmt == "sigil":
         return render_sigil(data, p)
@@ -4079,8 +4168,11 @@ def watch_loop(args: argparse.Namespace, p: Palette) -> int:
                     return 0
                 if not owner_alive(args.owner_pid_file):
                     return 0
+            size = terminal_size()
             if args.dynamic_width:
-                args.width = terminal_size().columns
+                args.width = size.columns
+            if args.footer:
+                args.footer_rows = size.lines
             data = all_sessions_snapshot(args) if args.all or args.top else snapshot(args)
             latest_activity_ms = snapshot_activity_ms(data, bool(args.all or args.top))
             if (
@@ -4092,6 +4184,12 @@ def watch_loop(args: argparse.Namespace, p: Palette) -> int:
             ):
                 args.thread_id = data["thread_id"]
             body = render(data, args, p)
+            if args.footer:
+                rows = body.splitlines()
+                if len(rows) > size.lines:
+                    hidden = len(rows) - size.lines + 1
+                    more = short_text(f"… {hidden} more rows · codex-statusline --footer", args.width)
+                    body = "\n".join(rows[:size.lines - 1] + [more])
             timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %I:%M:%S %p %Z")
             print("\033[2J\033[H", end="")
             print(body, end="" if args.footer else "\n")
@@ -4146,6 +4244,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--all", action="store_true", help="show a single dashboard for all recent Codex sessions")
     parser.add_argument("--top", action="store_true", help="show a btop/nvitop-style all-session monitor")
     parser.add_argument("--footer", action="store_true", help="show the compact dashboard used by the codex-statusline launcher")
+    parser.add_argument("--footer-min-height", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--sessions", type=int, default=30, help="number of sessions to load with --all/--top")
     parser.add_argument("--include-archived", action="store_true", help="include archived sessions in --all")
     parser.add_argument("--details", action="store_true", help="include last prompt and command under each session in --all")

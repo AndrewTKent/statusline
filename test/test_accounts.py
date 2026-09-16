@@ -121,18 +121,14 @@ class TestEffectivePcts:
         assert accounts.effective_pcts(row, now)["fable"] == 0.0
 
 
-def test_hard_session_limit_setting_is_opt_in(tmp_path, monkeypatch):
+def test_hard_session_limit_is_on_unless_disabled(tmp_path, monkeypatch):
     config = tmp_path / "statusline.conf"
     monkeypatch.setattr(accounts, "CONF_PATH", config)
     monkeypatch.delenv("ACCOUNTS_HARD_SESSION_LIMIT", raising=False)
 
-    assert accounts.hard_session_limit_enabled() is False
-
-    config.write_text("ACCOUNTS_HARD_SESSION_LIMIT=1\n")
-
     assert accounts.hard_session_limit_enabled() is True
 
-    monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
+    config.write_text("ACCOUNTS_HARD_SESSION_LIMIT=0\n")
 
     assert accounts.hard_session_limit_enabled() is False
 
@@ -140,10 +136,24 @@ def test_hard_session_limit_setting_is_opt_in(tmp_path, monkeypatch):
 
     assert accounts.hard_session_limit_enabled() is True
 
+    monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
 
-@pytest.mark.parametrize(("usage", "reached"), [(99.9, False), (100.0, True)])
-def test_profile_session_limit_uses_the_five_hour_boundary(
-    usage,
+    assert accounts.hard_session_limit_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("five_hour", "seven_day", "reached"),
+    [
+        (99.9, 0.0, False),
+        (100.0, 0.0, True),
+        (0.0, 99.9, False),
+        (0.0, 100.0, True),
+        (None, 100.0, True),
+    ],
+)
+def test_profile_session_limit_uses_either_rate_window_boundary(
+    five_hour,
+    seven_day,
     reached,
     monkeypatch,
 ):
@@ -151,10 +161,26 @@ def test_profile_session_limit_uses_the_five_hour_boundary(
     monkeypatch.setattr(
         accounts,
         "route_rows",
-        lambda *_args: [{"label": "work", "five_hour": usage}],
+        lambda *_args: [
+            {"label": "work", "five_hour": five_hour, "seven_day": seven_day}
+        ],
     )
 
     assert accounts.profile_session_limit_reached("work") is reached
+
+
+@pytest.mark.parametrize(("fable", "reached"), [(99.9, False), (100.0, True), (None, False)])
+def test_profile_fable_limit_uses_the_fable_boundary(fable, reached, monkeypatch):
+    monkeypatch.setattr(accounts, "load_blobs", lambda: {})
+    monkeypatch.setattr(
+        accounts,
+        "route_rows",
+        lambda *_args: [
+            {"label": "work", "five_hour": 0.0, "seven_day": 0.0, "fable": fable}
+        ],
+    )
+
+    assert accounts.profile_fable_limit_reached("work") is reached
 
 
 def test_hard_session_limit_bypasses_a_forced_exhausted_pin(monkeypatch):
@@ -1988,6 +2014,43 @@ class TestPollBlobsUsage:
 
         assert accounts.poll_blobs_usage(blobs) == 0
         assert merged == {}
+
+    def test_one_dead_account_does_not_fail_the_poll(self, monkeypatch, capsys):
+        blobs = {
+            "accounts": {
+                "work": {"blob": _live_blob("work"), "email": "work@example.com", "org_uuid": "org-work"},
+                "dead": {"blob": _live_blob("dead"), "email": "dead@example.com", "org_uuid": "org-dead"},
+            }
+        }
+        monkeypatch.setattr(accounts.time, "time", lambda: 2_000.0)
+        monkeypatch.setattr(accounts, "profile_live_blob", lambda _label: None)
+        monkeypatch.setattr(
+            accounts,
+            "fetch_usage",
+            lambda token: {"five_hour": {"utilization": 12}} if token == "work" else None,
+        )
+        monkeypatch.setattr(accounts, "usage_to_reset_row", lambda *_args: {"five_hour_pct": 12})
+        merged = {}
+        monkeypatch.setattr(accounts, "merge_reset_rows", merged.update)
+
+        assert accounts.poll_blobs_usage(blobs) == 1
+
+        assert merged == {"work@example.com|org-work": {"five_hour_pct": 12}}
+        assert "usage poll failed for 1 account(s)" in capsys.readouterr().err
+
+    def test_every_account_failing_raises(self, monkeypatch):
+        blobs = {
+            "accounts": {
+                "dead": {"blob": _live_blob("dead"), "email": "dead@example.com", "org_uuid": "org-dead"},
+            }
+        }
+        monkeypatch.setattr(accounts.time, "time", lambda: 2_000.0)
+        monkeypatch.setattr(accounts, "profile_live_blob", lambda _label: None)
+        monkeypatch.setattr(accounts, "fetch_usage", lambda _token: None)
+        monkeypatch.setattr(accounts, "merge_reset_rows", lambda _rows: None)
+
+        with pytest.raises(accounts.AccountsError, match="usage poll failed for 1 account"):
+            accounts.poll_blobs_usage(blobs)
 
 
 def _live_blob(atok, future_ms=3_000_000_000_000):
@@ -4671,6 +4734,60 @@ class TestAuthDeadRouting:
         for row in rows:
             row["five_hour"], row["seven_day"] = 10.0, 10.0
         assert accounts.pick_profile_route(rows, set(), None) == "alive"
+
+
+class TestAnyAuthenticatedProfile:
+    def _blobs(self):
+        return {
+            "accounts": {
+                "first": {"email": "first@x", "org_uuid": "1"},
+                "second": {"email": "second@x", "org_uuid": "2"},
+            }
+        }
+
+    def _patch(self, monkeypatch, tmp_path, auth_by_label):
+        monkeypatch.setattr(accounts, "load_blobs", self._blobs)
+        monkeypatch.setattr(
+            accounts,
+            "route_rows",
+            lambda *_args: [
+                accounts_row("first", 100.0, seven_day=100.0),
+                accounts_row("second", 100.0, seven_day=100.0),
+            ],
+        )
+        monkeypatch.setattr(accounts, "excluded_labels", set)
+        monkeypatch.setattr(
+            accounts,
+            "verify_entry_auth",
+            lambda label, _entry, _now: auth_by_label[label],
+        )
+        monkeypatch.setattr(
+            accounts,
+            "ensure_native_profile",
+            lambda label, _entry: tmp_path / label,
+        )
+
+    def test_skips_a_label_whose_credential_is_not_ok(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, {"first": "expired", "second": "ok"})
+
+        picked = accounts.any_authenticated_profile()
+
+        assert picked["label"] == "second"
+        assert picked["profile"] == str(tmp_path / "second")
+        assert picked["email"] == "second@x"
+        assert picked["org_uuid"] == "2"
+
+    def test_returns_none_when_no_credential_works(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, {"first": "expired", "second": "dead"})
+
+        assert accounts.any_authenticated_profile() is None
+
+    def test_avoid_labels_skip_an_otherwise_good_account(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, {"first": "ok", "second": "ok_rotated"})
+
+        picked = accounts.any_authenticated_profile(avoid_labels={"first"})
+
+        assert picked["label"] == "second"
 
 
 class TestCaptureLiveClearsFlag:
