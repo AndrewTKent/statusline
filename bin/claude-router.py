@@ -44,6 +44,8 @@ SESSION_LIMIT_TEXT = "You've hit your session limit"
 FABLE_LIMIT_TEXT = "You've reached your Fable 5 limit."
 SYNC_OUTPUT_ON = b"\x1b[?2026h"
 SYNC_OUTPUT_OFF = b"\x1b[?2026l"
+# Erase the screen and the scrollback, then home: the relaunch starts on a blank terminal.
+CLEAR_SCREEN = b"\x1b[2J\x1b[3J\x1b[H"
 
 
 def _usable_claude(path: Path) -> bool:
@@ -449,6 +451,17 @@ def session_limit_route(
     return next_profile, fallback_model
 
 
+def hard_limit_kind_for(label: str, current_family: str) -> str | None:
+    """Which plan wall the active account has hit. A rate wall (5h or 7d) stops
+    any session; the Fable wall stops only a Fable session, since a general one
+    never bills it."""
+    if accounts.profile_session_limit_reached(label):
+        return "session"
+    if current_family == "fable" and accounts.profile_fable_limit_reached(label):
+        return "fable"
+    return None
+
+
 def set_synchronized_output(enabled: bool) -> bool:
     if not sys.stdout.isatty():
         return False
@@ -457,6 +470,42 @@ def set_synchronized_output(enabled: bool) -> bool:
             sys.stdout.fileno(),
             SYNC_OUTPUT_ON if enabled else SYNC_OUTPUT_OFF,
         )
+    except OSError:
+        return False
+    return True
+
+
+def policy_scope_path(state_path: Path) -> Path:
+    return state_path.with_suffix(".policy")
+
+
+def write_policy_scope(state_path: Path, policy_scope: str) -> None:
+    # The child's statusline reads this over its launch-time ACCOUNTS_POLICY_SCOPE,
+    # so a pin that lands on the account already in use needs no restart.
+    path = policy_scope_path(state_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(policy_scope + "\n")
+
+
+def route_unchanged(
+    selected: dict,
+    next_profile: dict,
+    current_model: str | None,
+    next_model: str | None,
+    model_override: str | None,
+    next_override: str | None,
+) -> bool:
+    return (
+        next_profile["label"] == selected["label"]
+        and next_model == current_model
+        and next_override == model_override
+    )
+
+def clear_screen() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    try:
+        os.write(sys.stdout.fileno(), CLEAR_SCREEN)
     except OSError:
         return False
     return True
@@ -471,6 +520,7 @@ def stop_for_handoff(child: subprocess.Popen) -> None:
         except subprocess.TimeoutExpired:
             child.kill()
             child.wait()
+        clear_screen()
     finally:
         if synchronized:
             set_synchronized_output(False)
@@ -568,6 +618,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     try:
         while True:
             state_path.unlink(missing_ok=True)
+            write_policy_scope(state_path, mode.get("policy_scope", "global"))
             env = routed_environment(
                 selected,
                 state_path,
@@ -642,15 +693,17 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if detected_limit is not None and limit_rejected is None:
                         limit_rejected = detected_limit
                         mark_detected_limit(selected, detected_limit)
-                hard_limit_reached = bool(
-                    hard_session_limit
-                    and accounts.profile_session_limit_reached(selected["label"])
+                hard_limit_kind = (
+                    hard_limit_kind_for(selected["label"], current_family)
+                    if hard_session_limit
+                    else None
                 )
+                hard_limit_reached = hard_limit_kind is not None
                 if hard_limit_reached:
                     limit_route = session_limit_route(
                         selected,
                         current_family,
-                        "session",
+                        hard_limit_kind,
                         router_pid,
                     )
                 elif limit_rejected:
@@ -672,7 +725,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 if hard_limit_reached and (not session_id or limit_route is None):
                     stop_for_handoff(child)
                     print(
-                        "accounts: hard session limit reached; no safe account is available",
+                        f"accounts: hard {hard_limit_kind} limit reached; no safe account is available",
                         file=sys.stderr,
                     )
                     return 1
@@ -711,6 +764,19 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             next_override = None
                         if next_profile is None:
                             continue
+                        if route_unchanged(
+                            selected,
+                            next_profile,
+                            current_model,
+                            next_model,
+                            model_override,
+                            next_override,
+                        ):
+                            applied_mode_generation = mode_generation
+                            write_policy_scope(
+                                state_path, mode.get("policy_scope", "global")
+                            )
+                            continue
                     elif mode_changed and mode.get("mode") in ("auto", "set"):
                         next_model = model_override or current_model
                         next_override = model_override
@@ -730,6 +796,19 @@ def run_supervised(binary: str, args: list[str]) -> int:
                                 lease_pid=router_pid,
                             )
                         if next_profile is None:
+                            continue
+                        if route_unchanged(
+                            selected,
+                            next_profile,
+                            current_model,
+                            next_model,
+                            model_override,
+                            next_override,
+                        ):
+                            applied_mode_generation = mode_generation
+                            write_policy_scope(
+                                state_path, mode.get("policy_scope", "global")
+                            )
                             continue
                     elif (
                         mode.get("mode") == "fable"
@@ -908,6 +987,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     finally:
         accounts.remove_session_lease(router_pid)
         state_path.unlink(missing_ok=True)
+        policy_scope_path(state_path).unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:

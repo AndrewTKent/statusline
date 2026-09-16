@@ -98,9 +98,16 @@ Codex does not expose a fixed token balance
 for subscription limits; the footer reports exact quota percentage remaining
 instead of inventing a token estimate. It binds each
 footer to the rollout file opened by its owning Codex process, so concurrent and
-resumed sessions do not exchange context values. The renderer always occupies
-up to 14 rows by default, so changing session data cannot move the composer. Tmux mouse handling
-is disabled so the terminal owns ordinary drag selection and copy/paste. Pane
+resumed sessions do not exchange context values. The footer stays 14 rows high
+by default; workflow updates never resize the conversation pane. Workflows take
+priority over the account table when space is tight; overflow is counted on the
+last row, and `codex-statusline --footer` shows all rows.
+
+Tmux mouse handling is enabled: scroll over the conversation to enter its history,
+and press `q` to return to live output. In iTerm2, enable mouse reporting and
+wheel reporting, and disable saving alternate-screen lines to scrollback. Otherwise
+scrolling can expose stale input bars and blank redraws from the outer terminal.
+Hold Option for iTerm2's ordinary text selection. Pane
 scrollback keeps a 100,000-line history; tune it with
 `CODEX_STATUSLINE_HISTORY_LIMIT`. When launched inside an existing
 tmux pane, that pane keeps the history depth it was created with; the session
@@ -365,7 +372,7 @@ Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated vers
 - `SHOW_ACCOUNT_RESETS=1` — adds a per-account board (5h%, reset, week%, fable%, reset, work-unit cap) below the main rows
 - `SHARED_ACCOUNT_SNAPSHOT=1` — read account/routing/quota rows only from the private accounts snapshot; use `accounts watch --interval 60` to refresh it explicitly
 - `SHARED_ACCOUNT_SNAPSHOT_FILE` / `SHARED_ACCOUNT_SNAPSHOT_MAX_AGE` — override the snapshot path or stale threshold
-- `ACCOUNTS_HARD_SESSION_LIMIT=1` — opt in to stopping routed Claude sessions at 100% five-hour utilization; account pins are bypassed only at that boundary
+- `ACCOUNTS_HARD_SESSION_LIMIT=0` — opt out of stopping routed Claude sessions at a plan wall (100% five-hour, 100% weekly, or 100% Fable for a Fable session); account pins are bypassed only at those boundaries
 
 **Token classifier** (feeds the `tokens` row's work/personal split — see `bin/scan-tokens.py`)
 - `WORK_PATHS` / `PERSONAL_PATHS` — comma-separated cwd/file-path substrings
@@ -408,9 +415,13 @@ native Claude binaries under `~/.local/share/claude/versions`, installs both
 router toolsets under `~/.local/bin`, and prepends supervised launchers from
 `~/.accounts/bin` and `~/.codex-accounts/bin` in new zsh sessions.
 
-`ACCOUNTS_HARD_SESSION_LIMIT=1` is an opt-in overage guard. A supervised
-session resumes on another safe account on the next supervisor check after
-100% five-hour utilization is observed, or terminates when none is available.
+The overage guard is on by default. A supervised session resumes on another
+safe account on the next supervisor check after its account reaches 100% of
+the five-hour or weekly window, or terminates when none is available. A Fable
+session is also moved at 100% Fable utilization, falling back to Opus on the
+same account when its general windows still have headroom. Past any of those
+walls the plan stops paying and extra usage starts, which is what the guard
+prevents. `ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
 
 | Command | What it does |
 |---------|---------------|
