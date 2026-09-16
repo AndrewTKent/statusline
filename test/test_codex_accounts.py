@@ -63,6 +63,40 @@ class CodexAccountsTest(unittest.TestCase):
             self.assertEqual((profile / "state_5.sqlite").resolve(), (shared / "state_5.sqlite").resolve())
             self.assertFalse((profile / "auth.json").exists())
 
+    def test_profile_directory_created_before_shared_is_folded_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared = root / ".codex"
+            profile = root / "profiles" / "personal"
+            (profile / "mcp-oauth-locks").mkdir(parents=True)
+            (profile / "mcp-oauth-locks" / "file-store.lock").write_text("")
+            (shared / "mcp-oauth-locks").mkdir(parents=True)
+            (shared / "mcp-oauth-locks" / "abc.lock").write_text("")
+
+            codex_accounts.ensure_profile(profile, shared)
+
+            self.assertTrue((profile / "mcp-oauth-locks").is_symlink())
+            self.assertEqual((profile / "mcp-oauth-locks").resolve(), (shared / "mcp-oauth-locks").resolve())
+            self.assertEqual(
+                sorted(p.name for p in (shared / "mcp-oauth-locks").iterdir()), ["abc.lock", "file-store.lock"]
+            )
+
+    def test_profile_entry_colliding_with_shared_still_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared = root / ".codex"
+            profile = root / "profiles" / "personal"
+            (profile / "locks").mkdir(parents=True)
+            (profile / "locks" / "same.lock").write_text("mine")
+            (shared / "locks").mkdir(parents=True)
+            (shared / "locks" / "same.lock").write_text("theirs")
+
+            with self.assertRaises(codex_accounts.AccountsError):
+                codex_accounts.ensure_profile(profile, shared)
+
+            self.assertEqual((shared / "locks" / "same.lock").read_text(), "theirs")
+            self.assertEqual((profile / "locks" / "same.lock").read_text(), "mine")
+
     def test_pick_account_uses_lowest_binding_usage(self) -> None:
         now = time.time()
         accounts = {
@@ -114,7 +148,15 @@ class CodexAccountsTest(unittest.TestCase):
             "rateLimits": {
                 "planType": "pro",
                 "primary": {"usedPercent": 41, "resetsAt": 2_000_000_000},
-            }
+            },
+            "rateLimitResetCredits": {
+                "availableCount": 2,
+                "credits": [
+                    {"status": "available", "expiresAt": 2_100_000_000},
+                    {"status": "redeemed", "expiresAt": 2_050_000_000},
+                    {"status": "available", "expiresAt": 2_090_000_000},
+                ],
+            },
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -124,6 +166,7 @@ class CodexAccountsTest(unittest.TestCase):
 
         self.assertEqual(row["rate_limits"]["plan_type"], "pro")
         self.assertEqual(row["rate_limits"]["primary"]["used_percent"], 41)
+        self.assertEqual(row["reset_credits"], {"count": 2, "expires_at": [2_090_000_000, 2_100_000_000]})
         self.assertNotIn("home", row)
 
     def test_session_hook_binds_thread_to_routed_label(self) -> None:

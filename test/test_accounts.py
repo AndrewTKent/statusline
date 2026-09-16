@@ -121,18 +121,14 @@ class TestEffectivePcts:
         assert accounts.effective_pcts(row, now)["fable"] == 0.0
 
 
-def test_hard_session_limit_setting_is_opt_in(tmp_path, monkeypatch):
+def test_hard_session_limit_is_on_unless_disabled(tmp_path, monkeypatch):
     config = tmp_path / "statusline.conf"
     monkeypatch.setattr(accounts, "CONF_PATH", config)
     monkeypatch.delenv("ACCOUNTS_HARD_SESSION_LIMIT", raising=False)
 
-    assert accounts.hard_session_limit_enabled() is False
-
-    config.write_text("ACCOUNTS_HARD_SESSION_LIMIT=1\n")
-
     assert accounts.hard_session_limit_enabled() is True
 
-    monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
+    config.write_text("ACCOUNTS_HARD_SESSION_LIMIT=0\n")
 
     assert accounts.hard_session_limit_enabled() is False
 
@@ -140,10 +136,24 @@ def test_hard_session_limit_setting_is_opt_in(tmp_path, monkeypatch):
 
     assert accounts.hard_session_limit_enabled() is True
 
+    monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
 
-@pytest.mark.parametrize(("usage", "reached"), [(99.9, False), (100.0, True)])
-def test_profile_session_limit_uses_the_five_hour_boundary(
-    usage,
+    assert accounts.hard_session_limit_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("five_hour", "seven_day", "reached"),
+    [
+        (99.9, 0.0, False),
+        (100.0, 0.0, True),
+        (0.0, 99.9, False),
+        (0.0, 100.0, True),
+        (None, 100.0, True),
+    ],
+)
+def test_profile_session_limit_uses_either_rate_window_boundary(
+    five_hour,
+    seven_day,
     reached,
     monkeypatch,
 ):
@@ -151,10 +161,26 @@ def test_profile_session_limit_uses_the_five_hour_boundary(
     monkeypatch.setattr(
         accounts,
         "route_rows",
-        lambda *_args: [{"label": "work", "five_hour": usage}],
+        lambda *_args: [
+            {"label": "work", "five_hour": five_hour, "seven_day": seven_day}
+        ],
     )
 
     assert accounts.profile_session_limit_reached("work") is reached
+
+
+@pytest.mark.parametrize(("fable", "reached"), [(99.9, False), (100.0, True), (None, False)])
+def test_profile_fable_limit_uses_the_fable_boundary(fable, reached, monkeypatch):
+    monkeypatch.setattr(accounts, "load_blobs", lambda: {})
+    monkeypatch.setattr(
+        accounts,
+        "route_rows",
+        lambda *_args: [
+            {"label": "work", "five_hour": 0.0, "seven_day": 0.0, "fable": fable}
+        ],
+    )
+
+    assert accounts.profile_fable_limit_reached("work") is reached
 
 
 def test_hard_session_limit_bypasses_a_forced_exhausted_pin(monkeypatch):

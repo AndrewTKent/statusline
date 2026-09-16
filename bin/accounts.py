@@ -399,10 +399,11 @@ def _conf_var(name: str) -> str:
 
 
 def hard_session_limit_enabled() -> bool:
+    """On unless set to 0: a session past a plan wall bills extra usage."""
     value = os.environ.get("ACCOUNTS_HARD_SESSION_LIMIT") or _conf_var(
         "ACCOUNTS_HARD_SESSION_LIMIT"
     )
-    return value == "1"
+    return value != "0"
 
 
 def load_label_pairs() -> list[tuple[str, str, str | None]]:
@@ -2691,14 +2692,24 @@ def profile_session_limit_reached(label: str) -> bool:
             (candidate for candidate in rows if candidate["label"] == label),
             None,
         )
-        # Last-observed 100% stays unsafe until a post-reset poll proves headroom.
-        return bool(
-            row
-            and row["five_hour"] is not None
-            and row["five_hour"] >= SESSION_HARD_LIMIT_PCT
-        )
+        # Last-observed 100% on either rate window stays unsafe until a post-reset poll proves headroom.
+        return bool(row and _at_hard_limit(row["five_hour"], row["seven_day"]))
     except Exception:
         return False
+
+
+def profile_fable_limit_reached(label: str) -> bool:
+    """The Fable window is spent; a Fable session kept here bills extra usage."""
+    try:
+        rows = route_rows(load_blobs(), label, time.time())
+        row = next((candidate for candidate in rows if candidate["label"] == label), None)
+        return bool(row and _at_hard_limit(row["fable"]))
+    except Exception:
+        return False
+
+
+def _at_hard_limit(*pcts: float | None) -> bool:
+    return any(pct is not None and pct >= SESSION_HARD_LIMIT_PCT for pct in pcts)
 
 
 def profile_near_wall(label: str) -> bool:

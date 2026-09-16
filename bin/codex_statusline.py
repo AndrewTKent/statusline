@@ -97,7 +97,10 @@ SHELL_COMMAND_BREAKS = re.compile(
 
 
 def terminal_size() -> os.terminal_size:
-    return shutil.get_terminal_size((120, 40))
+    try:
+        return os.get_terminal_size(sys.__stdout__.fileno())
+    except (AttributeError, OSError, ValueError):
+        return shutil.get_terminal_size((120, 40))
 
 
 def default_width() -> int:
@@ -3258,11 +3261,12 @@ def format_reset(timestamp: Any, now: datetime | None = None) -> str:
         return "reset n/a"
 
     local_now = (now or datetime.now(timezone.utc)).astimezone()
-    if reset_at.date() == local_now.date():
-        return f"resets {format_clock(reset_at)}"
-    if reset_at.year == local_now.year:
-        return f"resets {reset_at.strftime('%b').lower()} {reset_at.day} {format_clock(reset_at)}"
-    return f"resets {reset_at.strftime('%b').lower()} {reset_at.day} {reset_at.year}"
+    seconds = max(0, int(reset_at.timestamp() - local_now.timestamp()))
+    if seconds >= 86_400:
+        return f"resets {seconds // 86_400}d"
+    if seconds >= 3600:
+        return f"resets {seconds // 3600}h{seconds % 3600 // 60}m"
+    return f"resets {seconds // 60}m"
 
 
 def limit_display(limit: dict[str, Any], now: datetime | None = None) -> tuple[float, str]:
@@ -3420,6 +3424,24 @@ def account_binding_usage(rate_limits: dict[str, Any]) -> float:
     return max(values, default=101.0)
 
 
+def unexpired_reset_credits(account_usage: dict[str, Any], now: datetime | None = None) -> list[int]:
+    credits = account_usage.get("reset_credits")
+    expires_at = credits.get("expires_at") if isinstance(credits, dict) else None
+    cutoff = (now or datetime.now(timezone.utc)).timestamp()
+    return sorted(
+        int(value)
+        for value in (expires_at if isinstance(expires_at, list) else [])
+        if isinstance(value, (int, float)) and value > cutoff
+    )
+
+
+def reset_credit_text(expires_at: list[int]) -> str:
+    if not expires_at:
+        return "—"
+    soonest = datetime.fromtimestamp(expires_at[0]).astimezone()
+    return f"{len(expires_at)} exp {soonest.strftime('%b').lower()} {soonest.day}"
+
+
 def codex_account_board(current_account: str) -> dict[str, Any]:
     root = Path(os.environ.get("CODEX_ACCOUNTS_HOME", Path.home() / ".codex-accounts"))
     registry = read_json(root / "accounts.json")
@@ -3444,6 +3466,7 @@ def codex_account_board(current_account: str) -> dict[str, Any]:
             {
                 "label": label,
                 "weekly": weekly_rate_limit(rate_limits),
+                "reset_credits": unexpired_reset_credits(account_usage),
                 "binding_usage": account_binding_usage(rate_limits),
                 "error": str(account_usage.get("error") or ""),
             }
@@ -3721,7 +3744,7 @@ def render_sigil(data: dict[str, Any], p: Palette) -> str:
     )
 
 
-def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
+def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | None = None) -> str:
     usage = data["usage"]
     tokens = data["tokens"]
     rate_limits = usage.get("rate_limits") or {}
@@ -3822,26 +3845,27 @@ def render_footer(data: dict[str, Any], width: int, p: Palette) -> str:
     )
     lines.append(row("mode", permissions, solid(p.dim)))
 
+    workflows = (data.get("agents") or {}).get("running", [])
     board_rows = account_board.get("rows") or []
     if board_rows and width >= 40:
         def clip_board_line(value: str) -> str:
             return value if len(value) <= width else f"{value[: width - 1]}…"
 
-        lines.append(
-            clip_board_line(f"    {'acct':<16} {'week':>6}  reset")
-        )
+        if max_rows is None or len(lines) + len(board_rows) + len(workflows) < max_rows:
+            lines.append(clip_board_line(f"    {'acct':<16} {'week':>6}  {'reset':<18} banked"))
         for account in board_rows:
             marker = "*" if account["label"] == account_board.get("current_label") else "·"
             weekly = account.get("weekly")
             if weekly:
                 used, reset = limit_display(weekly)
                 reset_value = "now" if reset == "reset" else reset.removeprefix("resets ").removeprefix("reset ")
-                detail = f"{format_pct(used):>6}  {reset_value}"
+                detail = f"{format_pct(used):>6}  {reset_value:<18}"
             else:
-                detail = "     —  unavailable"
+                detail = f"{'—':>6}  {'unavailable':<18}"
+            banked = reset_credit_text(account.get("reset_credits") or [])
             label = short_text(str(account["label"]), 16)
-            lines.append(clip_board_line(f"  {marker} {label:<16} {detail}"))
-    for workflow in (data.get("agents") or {}).get("running", []):
+            lines.append(clip_board_line(f"  {marker} {label:<16} {detail} {banked}"))
+    for workflow in workflows:
         status = short_text(f"◯ {workflow} 0/1 agents done", width)
         lines.append(f"{p.dim}{status}{p.reset}")
     return "\n".join(lines)
@@ -4099,7 +4123,7 @@ def render(data: dict[str, Any], args: argparse.Namespace, p: Palette) -> str:
     if args.all:
         return render_all_sessions(data, args.width, p, args.details)
     if args.footer:
-        return render_footer(data, args.width, p)
+        return render_footer(data, args.width, p, getattr(args, "footer_rows", None))
     fmt = args.format
     if fmt == "sigil":
         return render_sigil(data, p)
@@ -4135,6 +4159,8 @@ def watch_loop(args: argparse.Namespace, p: Palette) -> int:
             size = terminal_size()
             if args.dynamic_width:
                 args.width = size.columns
+            if args.footer:
+                args.footer_rows = size.lines
             data = all_sessions_snapshot(args) if args.all or args.top else snapshot(args)
             latest_activity_ms = snapshot_activity_ms(data, bool(args.all or args.top))
             if (
@@ -4146,14 +4172,12 @@ def watch_loop(args: argparse.Namespace, p: Palette) -> int:
             ):
                 args.thread_id = data["thread_id"]
             body = render(data, args, p)
-            pane = os.environ.get("TMUX_PANE")
-            if args.footer and args.footer_min_height > 0 and pane:
-                height = max(args.footer_min_height, len(body.splitlines()))
-                if height != size.lines:
-                    subprocess.run(
-                        ["tmux", "resize-pane", "-t", pane, "-y", str(height)],
-                        check=True, capture_output=True, timeout=2,
-                    )
+            if args.footer:
+                rows = body.splitlines()
+                if len(rows) > size.lines:
+                    hidden = len(rows) - size.lines + 1
+                    more = short_text(f"… {hidden} more rows · codex-statusline --footer", args.width)
+                    body = "\n".join(rows[:size.lines - 1] + [more])
             timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %I:%M:%S %p %Z")
             print("\033[2J\033[H", end="")
             print(body, end="" if args.footer else "\n")
