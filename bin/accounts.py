@@ -2487,6 +2487,37 @@ def confirm_stale_candidate(
         return False
 
 
+def any_authenticated_profile(
+    *,
+    avoid_labels: set[str] | None = None,
+) -> dict | None:
+    """The best-ranked profile whose credential still works, ignoring quota
+    entirely. Quota decides which account to route to; it must not decide
+    whether the app opens, because reading and resuming a session costs none."""
+    blobs = load_blobs()
+    accounts_map = blobs.get("accounts") or {}
+    avoid = set(avoid_labels or ()) | excluded_labels()
+    now = time.time()
+    ranked = [
+        row["label"]
+        for row in route_rows(blobs, None, now)
+        if row["label"] not in avoid
+    ]
+    for label in ranked:
+        candidate = accounts_map.get(label)
+        if candidate is None:
+            continue
+        if verify_entry_auth(label, candidate, now) not in ("ok", "ok_rotated"):
+            continue
+        return {
+            "profile": str(ensure_native_profile(label, candidate)),
+            "label": label,
+            "email": candidate.get("email") or "",
+            "org_uuid": candidate.get("org_uuid") or "",
+        }
+    return None
+
+
 def select_profile(
     *,
     avoid_labels: set[str] | None = None,

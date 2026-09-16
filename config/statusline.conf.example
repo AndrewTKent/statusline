@@ -61,6 +61,11 @@
 # another safe account when possible. On by default; set 0 to turn it off.
 # ACCOUNTS_HARD_SESSION_LIMIT=0
 
+# When no account has quota, the router warns and opens on the best
+# authenticated account anyway (reading and resuming cost nothing). Set 1 to
+# refuse instead, for unattended runs where a doomed session is worse than a stop.
+# ACCOUNTS_STRICT_QUOTA=1
+
 # ─── Token classifier (optional; for scan-tokens.py) ───────────────────────
 # Classify each token request as work / personal / unknown. Independent of
 # EMAIL_PAYER_MAP — email is about payment, work-type is about what you did.

@@ -4736,6 +4736,60 @@ class TestAuthDeadRouting:
         assert accounts.pick_profile_route(rows, set(), None) == "alive"
 
 
+class TestAnyAuthenticatedProfile:
+    def _blobs(self):
+        return {
+            "accounts": {
+                "first": {"email": "first@x", "org_uuid": "1"},
+                "second": {"email": "second@x", "org_uuid": "2"},
+            }
+        }
+
+    def _patch(self, monkeypatch, tmp_path, auth_by_label):
+        monkeypatch.setattr(accounts, "load_blobs", self._blobs)
+        monkeypatch.setattr(
+            accounts,
+            "route_rows",
+            lambda *_args: [
+                accounts_row("first", 100.0, seven_day=100.0),
+                accounts_row("second", 100.0, seven_day=100.0),
+            ],
+        )
+        monkeypatch.setattr(accounts, "excluded_labels", set)
+        monkeypatch.setattr(
+            accounts,
+            "verify_entry_auth",
+            lambda label, _entry, _now: auth_by_label[label],
+        )
+        monkeypatch.setattr(
+            accounts,
+            "ensure_native_profile",
+            lambda label, _entry: tmp_path / label,
+        )
+
+    def test_skips_a_label_whose_credential_is_not_ok(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, {"first": "expired", "second": "ok"})
+
+        picked = accounts.any_authenticated_profile()
+
+        assert picked["label"] == "second"
+        assert picked["profile"] == str(tmp_path / "second")
+        assert picked["email"] == "second@x"
+        assert picked["org_uuid"] == "2"
+
+    def test_returns_none_when_no_credential_works(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, {"first": "expired", "second": "dead"})
+
+        assert accounts.any_authenticated_profile() is None
+
+    def test_avoid_labels_skip_an_otherwise_good_account(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, {"first": "ok", "second": "ok_rotated"})
+
+        picked = accounts.any_authenticated_profile(avoid_labels={"first"})
+
+        assert picked["label"] == "second"
+
+
 class TestCaptureLiveClearsFlag:
     def test_matching_live_token_clears_auth_dead(self, monkeypatch, tmp_path):
         live = _blob(LIVE_MS)
