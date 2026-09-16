@@ -91,7 +91,7 @@ command -v tmux >/dev/null 2>&1 || {
     printf 'tmux is required for the multi-line Codex statusline\n' >&2
     exit 1
 }
-CODEX_ARGS=(-c 'tui.status_line=[]' ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
+CODEX_ARGS=(--no-alt-screen -c 'tui.status_line=[]' ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
 
 WORKING_DIR="$(pwd -P)"
 CODEX_WORKING_DIR="$WORKING_DIR"

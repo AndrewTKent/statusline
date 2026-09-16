@@ -66,7 +66,7 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(codex_statusline.tool_working_dir(direct), "/work/direct")
         self.assertEqual(codex_statusline.tool_working_dir(nested), "/work/nested")
 
-    def test_recent_same_repository_checkout_ignores_launch_checkout_and_other_repo(self) -> None:
+    def test_recent_active_checkout_ignores_launch_checkout_and_follows_other_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             project = tmp / "project"
@@ -104,16 +104,26 @@ class CodexStatuslineTest(unittest.TestCase):
                 capture_output=True,
             )
 
-            selected = codex_statusline.recent_same_repository_checkout(
+            selected_other_repo = codex_statusline.recent_active_checkout(
                 str(project),
                 [str(worktree), str(project), str(unrelated)],
             )
+            selected_after_launch = codex_statusline.recent_active_checkout(
+                str(project),
+                [str(worktree), str(unrelated), str(project)],
+            )
+            selected_launch_only = codex_statusline.recent_active_checkout(
+                str(project),
+                [str(project)],
+            )
             codex_statusline.git_info.cache_clear()
-            git = codex_statusline.git_info(str(worktree), "stale/branch", 1)
+            git = codex_statusline.git_info(selected_other_repo, "stale/branch", 1)
 
-        self.assertEqual(selected, str(worktree.resolve()))
-        self.assertEqual(git.repo, "project")
-        self.assertEqual(git.branch_name, "feature/actual")
+        self.assertEqual(selected_other_repo, str(unrelated.resolve()))
+        self.assertEqual(selected_after_launch, str(unrelated.resolve()))
+        self.assertEqual(selected_launch_only, str(project.resolve()))
+        self.assertEqual(git.repo, "unrelated")
+        self.assertEqual(git.branch_name, "main")
 
     def test_query_pull_request_resolves_branch(self) -> None:
         payload = json.dumps(
@@ -3837,6 +3847,7 @@ class CodexStatuslineTest(unittest.TestCase):
             self.assertEqual(
                 capture.read_text().splitlines(),
                 [
+                    "--no-alt-screen",
                     "-c",
                     "tui.status_line=[]",
                     "--dangerously-bypass-approvals-and-sandbox",
@@ -3848,19 +3859,19 @@ class CodexStatuslineTest(unittest.TestCase):
             subprocess.run([str(launcher)], check=True, env=env)
             self.assertEqual(
                 capture.read_text().splitlines(),
-                ["-c", "tui.status_line=[]", "--dangerously-bypass-approvals-and-sandbox"],
+                ["--no-alt-screen", "-c", "tui.status_line=[]", "--dangerously-bypass-approvals-and-sandbox"],
             )
 
             subprocess.run([str(launcher), "--sandbox", "read-only"], check=True, env=env)
             self.assertEqual(
                 capture.read_text().splitlines(),
-                ["-c", "tui.status_line=[]", "--sandbox", "read-only"],
+                ["--no-alt-screen", "-c", "tui.status_line=[]", "--sandbox", "read-only"],
             )
 
             subprocess.run([str(launcher), "--yolo"], check=True, env=env)
             self.assertEqual(
                 capture.read_text().splitlines(),
-                ["-c", "tui.status_line=[]", "--yolo"],
+                ["--no-alt-screen", "-c", "tui.status_line=[]", "--yolo"],
             )
 
             for permissions in (("-sread-only",), ("-s=read-only",), ("-anever",), ("-a=never",)):
@@ -3874,6 +3885,7 @@ class CodexStatuslineTest(unittest.TestCase):
             self.assertEqual(
                 capture.read_text().splitlines(),
                 [
+                    "--no-alt-screen",
                     "-c",
                     "tui.status_line=[]",
                     "--dangerously-bypass-approvals-and-sandbox",
@@ -4151,6 +4163,7 @@ class CodexStatuslineTest(unittest.TestCase):
             self.assertIn("-x 117 -y 83", new_session)
             self.assertIn("sleep 86400", new_session)
             self.assertIn("runner.sh", respawn_pane)
+            self.assertIn("--no-alt-screen", respawn_pane)
             self.assertNotIn("--internal-run", new_session)
             self.assertIn("kill-pane -t %0", capture.read_text())
             self.assertNotIn("--bind-after-ms", split_window)

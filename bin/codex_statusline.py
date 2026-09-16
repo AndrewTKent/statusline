@@ -2892,20 +2892,17 @@ def git_checkout_identity(cwd: str, bucket: int) -> tuple[str, str] | None:
     return root, common
 
 
-def recent_same_repository_checkout(launch_cwd: str, candidates: list[str]) -> str:
+def recent_active_checkout(launch_cwd: str, candidates: list[str]) -> str:
     bucket = int(time.time() // GIT_INFO_TTL_SECONDS)
     launch = git_checkout_identity(launch_cwd, bucket)
     if launch is None:
         return ""
-    launch_root, launch_common = launch
+    launch_root = launch[0]
     for candidate in reversed(candidates):
         checkout = git_checkout_identity(candidate, bucket)
-        if checkout is None:
-            continue
-        root, common = checkout
-        if root != launch_root and common == launch_common:
-            return root
-    return ""
+        if checkout is not None and checkout[0] != launch_root:
+            return checkout[0]
+    return launch_root
 
 
 @lru_cache(maxsize=128)
@@ -3416,7 +3413,7 @@ def snapshot_for_thread(
     usage = usage_from_rollout(thread)
     tokens.session = usage.session_total
     repo_cwd = thread.cwd if prefer_thread_cwd else (cwd if paths_related(cwd, thread.cwd) else thread.cwd)
-    repo_cwd = recent_same_repository_checkout(repo_cwd, list(activity.working_dirs)) or repo_cwd
+    repo_cwd = recent_active_checkout(repo_cwd, list(activity.working_dirs)) or repo_cwd
     git = git_info(repo_cwd, thread.git_branch, int(now.timestamp() // GIT_INFO_TTL_SECONDS))
     window = usage.context_window or context_window(model)
 
