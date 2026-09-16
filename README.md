@@ -480,7 +480,9 @@ under another isolated profile before a window is exhausted. The shell never
 regains control during a handoff. Changing to Fable mode also moves running
 supervised sessions to Fable in place — except a session you explicitly put on
 another model (a `--model` launch flag or a live `/model` switch), which stays
-there until you switch back to `/model fable` or re-run `accounts fable`. If
+there until you switch back to `/model fable` or re-run `accounts fable`. A
+live switch to the fallback model itself (Opus by default) is read as the
+fallback, not a pin: the session already retries Fable each turn. If
 every Fable-capable account is gated, the same session resumes on Opus using the
 safest general-model account. A Fable session that exhausts its window on the
 account it is on falls back to Opus inside the running process and returns to
