@@ -3068,3 +3068,285 @@ def test_accounts_pin_is_launch_only_for_a_live_supervisor(monkeypatch):
 
     assert claude_router.run_supervised("/real/claude", []) == 0
     assert "ACCOUNTS_PIN" not in os.environ
+
+
+FIRST = {"profile": "/p/first", "label": "first", "email": "first@x", "org_uuid": "o1"}
+SECOND = {"profile": "/p/second", "label": "second", "email": "second@x", "org_uuid": "o2"}
+
+
+class _IdleChild:
+    def __init__(self, ticks):
+        self.ticks = ticks
+
+    def poll(self):
+        self.ticks -= 1
+        return None if self.ticks >= 0 else 0
+
+    def wait(self):
+        return 0
+
+
+def _fallback_harness(monkeypatch, session_id, mode, ticks):
+    """A supervised child on FIRST that polls `ticks` times, then exits."""
+    launches = []
+    handoffs = []
+    polls = []
+
+    class Child:
+        def poll(self):
+            polls.append(True)
+            return None if len(polls) <= ticks else 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.delenv("ACCOUNTS_FABLE_FALLBACK_MODEL", raising=False)
+    monkeypatch.setattr(
+        claude_router.accounts, "load_mode_snapshot", lambda: (mode, (1, 1))
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda command, **kwargs: launches.append((command, kwargs)) or Child(),
+    )
+    monkeypatch.setattr(
+        claude_router, "stop_for_handoff", lambda child: handoffs.append(child)
+    )
+    monkeypatch.setattr(
+        claude_router.accounts, "handoff_target", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        claude_router.accounts, "profile_fable_exhausted", lambda _l: False
+    )
+    _pin_test_harness(monkeypatch, session_id, [])
+    return launches, handoffs, polls
+
+
+def test_fable_launch_carries_the_fallback_model_flag(monkeypatch):
+    session_id = str(uuid.uuid4())
+    launches, _handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "fable", "label": None}, ticks=0
+    )
+    monkeypatch.setattr(claude_router, "read_router_state", lambda _p: {})
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    command = launches[0][0]
+    assert claude_router.option_value(command, "--model") == "fable"
+    assert command[:3] == ["/real/claude", "--fallback-model", "opus"]
+    assert command[-2:] == ["--model", "fable"]
+
+
+def test_user_supplied_fallback_model_flag_is_kept(monkeypatch):
+    session_id = str(uuid.uuid4())
+    launches, _handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "fable", "label": None}, ticks=0
+    )
+    monkeypatch.setattr(claude_router, "read_router_state", lambda _p: {})
+
+    assert (
+        claude_router.run_supervised(
+            "/real/claude", ["--fallback-model", "sonnet"]
+        )
+        == 0
+    )
+
+    command = launches[0][0]
+    assert claude_router.option_value(command, "--model") == "fable"
+    assert command.count("--fallback-model") == 1
+    assert claude_router.option_value(command, "--fallback-model") == "sonnet"
+
+
+def test_opus_launch_carries_no_fallback_model_flag(monkeypatch):
+    session_id = str(uuid.uuid4())
+    launches, _handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "auto", "label": None}, ticks=0
+    )
+    monkeypatch.setattr(claude_router, "read_router_state", lambda _p: {})
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "opus"]) == 0
+
+    assert "--fallback-model" not in launches[0][0]
+
+
+def test_fallback_model_env_override_reaches_the_flag(monkeypatch):
+    session_id = str(uuid.uuid4())
+    launches, _handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "fable", "label": None}, ticks=0
+    )
+    monkeypatch.setenv("ACCOUNTS_FABLE_FALLBACK_MODEL", "sonnet")
+    monkeypatch.setattr(claude_router, "read_router_state", lambda _p: {})
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert claude_router.option_value(launches[0][0], "--fallback-model") == "sonnet"
+
+
+def test_board_polled_fable_exhaustion_on_the_current_account_keeps_the_child_running(
+    monkeypatch,
+):
+    session_id = str(uuid.uuid4())
+    launches, handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "set", "label": "first"}, ticks=4
+    )
+    exhausted_checks = []
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "profile_fable_exhausted",
+        lambda label: exhausted_checks.append(label) or True,
+    )
+    # The child never renders the fallback: idle, its statusline still says Fable.
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Fable 5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "fable"]) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
+    assert exhausted_checks == ["first"]
+
+
+def test_transcript_fable_limit_on_the_current_account_keeps_the_child_running(
+    monkeypatch, tmp_path
+):
+    session_id = str(uuid.uuid4())
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    launches, handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "set", "label": "first"}, ticks=4
+    )
+    limited = []
+    routes = []
+
+    def launch(command, **kwargs):
+        launches.append((command, kwargs))
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "isApiErrorMessage": True,
+                    "apiErrorStatus": 429,
+                    "error": "rate_limit",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You've reached your Fable 5 limit.",
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
+        return _IdleChild(4)
+
+    monkeypatch.setattr(claude_router.subprocess, "Popen", launch)
+    monkeypatch.setattr(
+        claude_router, "session_transcript_path", lambda _c: transcript
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "mark_fable_limit",
+        lambda email, org_uuid: limited.append((email, org_uuid)),
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "session_limit_route",
+        lambda selected, family, kind, _pid: routes.append((family, kind))
+        or (selected, "opus"),
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Fable 5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "fable"]) == 0
+
+    assert limited == [("first@example.com", "org-first")]
+    assert routes == [("fable", "fable")]
+    assert len(launches) == 1
+    assert handoffs == []
+
+
+def test_fable_limit_with_another_fable_account_still_restarts_onto_it(monkeypatch):
+    session_id = str(uuid.uuid4())
+    launches, handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "set", "label": "first"}, ticks=4
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda command, **kwargs: launches.append((command, kwargs))
+        or _IdleChild(4 if len(launches) == 1 else 0),
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "handoff_target",
+        lambda label, *_a, **_k: "second" if label == "first" else None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **kwargs: SECOND if kwargs.get("avoid_labels") else FIRST,
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Fable 5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "fable"]) == 0
+
+    assert len(handoffs) == 1
+    assert [launch[1]["env"]["ACCOUNTS_ROUTED_LABEL"] for launch in launches] == [
+        "first",
+        "second",
+    ]
+    relaunch = launches[1][0]
+    assert claude_router.option_value(relaunch, "--model") == "fable"
+    assert claude_router.option_value(relaunch, "--fallback-model") == "opus"
+    assert relaunch[-2:] == ["--session-id", session_id]
+
+
+def test_router_applied_fallback_read_back_is_not_a_user_pin(monkeypatch):
+    # Tick 1: exhausted, fallback applied in place. Tick 2: the idle child still
+    # renders Fable. Tick 3: it has fallen back and renders Opus. Fable mode must
+    # keep polling for a Fable account afterwards, which a user pin would stop.
+    session_id = str(uuid.uuid4())
+    launches, handoffs, polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "fable", "label": None}, ticks=5
+    )
+    selections = []
+
+    def select_profile(**kwargs):
+        selections.append((len(polls), kwargs))
+        if kwargs.get("require_fable") and len(polls) > 0:
+            return None
+        return FIRST
+
+    monkeypatch.setattr(claude_router.accounts, "select_profile", select_profile)
+    monkeypatch.setattr(
+        claude_router.accounts, "profile_fable_exhausted", lambda _l: True
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {
+            "session_id": session_id,
+            "model": "Fable 5" if len(polls) < 3 else "Opus 4.5",
+        },
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
+    recovery_polls = [
+        tick for tick, kwargs in selections if tick >= 3 and kwargs.get("require_fable")
+    ]
+    assert recovery_polls

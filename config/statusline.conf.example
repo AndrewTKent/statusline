@@ -61,6 +61,11 @@
 # another safe account when possible. On by default; set 0 to turn it off.
 # ACCOUNTS_HARD_SESSION_LIMIT=0
 
+# A Fable session that exhausts its window on the account it is on falls back
+# to this model inside the running process and returns to Fable on its own when
+# the window resets; only a move to another account restarts the session.
+# ACCOUNTS_FABLE_FALLBACK_MODEL=opus
+
 # When no account has quota, the router warns and opens on the best
 # authenticated account anyway (reading and resuming cost nothing). Set 1 to
 # refuse instead, for unattended runs where a doomed session is worse than a stop.

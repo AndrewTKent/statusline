@@ -420,9 +420,13 @@ The overage guard is on by default. A supervised session resumes on another
 safe account on the next supervisor check after its account reaches 100% of
 the five-hour or weekly window, or terminates when none is available. A Fable
 session is also moved at 100% Fable utilization, falling back to Opus on the
-same account when its general windows still have headroom. Past any of those
-walls the plan stops paying and extra usage starts, which is what the guard
-prevents. `ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
+same account when its general windows still have headroom. That fallback
+happens inside the running process (every Fable launch carries
+`--fallback-model`; `ACCOUNTS_FABLE_FALLBACK_MODEL` changes the model) and the
+session returns to Fable on its own once the window resets; only a move to
+another account restarts it. Past any of those walls the plan stops paying and
+extra usage starts, which is what the guard prevents.
+`ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
 
 | Command | What it does |
 |---------|---------------|
@@ -478,7 +482,10 @@ supervised sessions to Fable in place — except a session you explicitly put on
 another model (a `--model` launch flag or a live `/model` switch), which stays
 there until you switch back to `/model fable` or re-run `accounts fable`. If
 every Fable-capable account is gated, the same session resumes on Opus using the
-safest general-model account.
+safest general-model account. A Fable session that exhausts its window on the
+account it is on falls back to Opus inside the running process and returns to
+Fable on its own when the window resets; only a move to another account
+restarts the session.
 Minted long-lived tokens remain outside `~/.claude`
 (`~/.accounts/vault.json`); archival copies only session JSONLs from
 `~/.claude/projects`.
