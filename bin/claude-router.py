@@ -242,6 +242,26 @@ def model_family(args: list[str], rendered_model: str | None = None) -> str:
     return "fable" if model_name(args, rendered_model) == "fable" else "general"
 
 
+def degraded_profile(reason: str) -> dict | None:
+    """Quota decides which account to route to, never whether the app opens:
+    reading history and resuming a session cost nothing, so exhaustion warns
+    and launches instead of refusing. ACCOUNTS_STRICT_QUOTA=1 restores the
+    refusal for unattended runs, where a doomed session is worse than a stop."""
+    if os.environ.get("ACCOUNTS_STRICT_QUOTA") == "1":
+        print(f"accounts: {reason}", file=sys.stderr)
+        return None
+    fallback = accounts.any_authenticated_profile()
+    if fallback is None:
+        print(f"accounts: {reason}, and no account is authenticated", file=sys.stderr)
+        return None
+    print(
+        f"accounts: {reason} — opening on {fallback['label']} anyway."
+        " Reading and resuming work; a model call will fail until a window resets.",
+        file=sys.stderr,
+    )
+    return fallback
+
+
 def routed_environment(
     selected: dict,
     state_path: Path,
@@ -558,7 +578,8 @@ def run_passthrough(binary: str, args: list[str]) -> int:
                 ),
             )
     if selected is None:
-        print("accounts: no account has enough quota", file=sys.stderr)
+        selected = degraded_profile("no account has enough quota")
+    if selected is None:
         return 1
     state_path = Path(f"/tmp/claude/account-router-{os.getpid()}.json")
     return subprocess.call(
@@ -609,7 +630,8 @@ def run_supervised(binary: str, args: list[str]) -> int:
             current_model = model_override
             current_family = "general"
     if selected is None:
-        print("accounts: no account has enough quota for this model", file=sys.stderr)
+        selected = degraded_profile("no account has enough quota for this model")
+    if selected is None:
         return 1
     os.environ.pop("ACCOUNTS_PIN", None)
 
@@ -724,8 +746,12 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     last_heartbeat = now
                 if hard_limit_reached and (not session_id or limit_route is None):
                     stop_for_handoff(child)
+                    # The stop is a cost guard, not a routing failure: continuing
+                    # past a plan wall bills overage, which is the user's call.
                     print(
-                        f"accounts: hard {hard_limit_kind} limit reached; no safe account is available",
+                        f"accounts: hard {hard_limit_kind} limit reached; no safe account is available."
+                        " The session is saved — resume it when a window resets, or set"
+                        " ACCOUNTS_HARD_SESSION_LIMIT=0 to continue now and bill the overage.",
                         file=sys.stderr,
                     )
                     return 1

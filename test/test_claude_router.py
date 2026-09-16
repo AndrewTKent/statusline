@@ -1699,11 +1699,19 @@ def test_fable_print_falls_back_to_opus(monkeypatch):
     assert calls[2][2]["env"]["CLAUDE_CONFIG_DIR"] == "/profiles/general"
 
 
-def test_passthrough_fails_closed_without_a_safe_profile(monkeypatch, capsys):
+def test_passthrough_fails_closed_without_an_authenticated_profile(
+    monkeypatch, capsys
+):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
     monkeypatch.setattr(
         claude_router.accounts,
         "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
         lambda **_kwargs: None,
     )
     monkeypatch.setattr(
@@ -1713,7 +1721,156 @@ def test_passthrough_fails_closed_without_a_safe_profile(monkeypatch, capsys):
     )
 
     assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 1
-    assert "no account has enough quota" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no account has enough quota, and no account is authenticated" in err
+
+
+def test_passthrough_opens_on_an_authenticated_account_when_quota_is_gone(
+    monkeypatch, capsys
+):
+    general = {
+        "profile": "/profiles/general",
+        "label": "general",
+        "email": "general@example.com",
+        "org_uuid": "org-general",
+    }
+    calls = []
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: general,
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "call",
+        lambda command, **kwargs: calls.append((command, kwargs)) or 0,
+    )
+
+    assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 0
+    assert len(calls) == 1
+    assert calls[0][1]["env"]["CLAUDE_CONFIG_DIR"] == "/profiles/general"
+    err = capsys.readouterr().err
+    assert "no account has enough quota" in err
+    assert "opening on general anyway" in err
+
+
+def test_strict_quota_refuses_instead_of_opening_degraded(monkeypatch, capsys):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("ACCOUNTS_STRICT_QUOTA", "1")
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: pytest.fail("strict mode consulted the auth fallback"),
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "call",
+        lambda *_args, **_kwargs: pytest.fail("used ambient credentials"),
+    )
+
+    assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 1
+    err = capsys.readouterr().err
+    assert "accounts: no account has enough quota\n" in err
+    assert "opening on" not in err
+
+
+def test_supervised_opens_on_an_authenticated_account_when_quota_is_gone(
+    monkeypatch, capsys
+):
+    general = {
+        "profile": "/profiles/general",
+        "label": "general",
+        "email": "general@example.com",
+        "org_uuid": "org-general",
+    }
+    launches = []
+
+    class Child:
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        lambda: ({"mode": "auto", "label": None}, (1, 1)),
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: general,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "upsert_session_lease",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "remove_session_lease",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda command, **kwargs: launches.append((command, kwargs)) or Child(),
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+    assert len(launches) == 1
+    assert launches[0][1]["env"]["CLAUDE_CONFIG_DIR"] == "/profiles/general"
+    assert launches[0][1]["env"]["ACCOUNTS_ROUTED_LABEL"] == "general"
+    err = capsys.readouterr().err
+    assert "no account has enough quota for this model" in err
+    assert "opening on general anyway" in err
+
+
+def test_supervised_refuses_without_an_authenticated_profile(monkeypatch, capsys):
+    monkeypatch.delenv("ACCOUNTS_STRICT_QUOTA", raising=False)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        lambda: ({"mode": "auto", "label": None}, (1, 1)),
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "any_authenticated_profile",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        claude_router.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("used ambient credentials"),
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 1
+    err = capsys.readouterr().err
+    assert "no account has enough quota for this model, and no account is authenticated" in err
 
 
 @pytest.mark.parametrize(
