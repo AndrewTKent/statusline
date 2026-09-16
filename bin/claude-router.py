@@ -536,6 +536,21 @@ def falls_back_in_process(
     )
 
 
+def returns_to_fable_in_process(
+    selected: dict,
+    next_profile: dict,
+    next_model: str | None,
+    in_process_fallback: str | None,
+) -> bool:
+    # A child that fell back in place still carries --fallback-model and
+    # retries fable at the start of every turn, so the same account needs no restart.
+    return (
+        in_process_fallback is not None
+        and next_profile["label"] == selected["label"]
+        and next_model == "fable"
+    )
+
+
 def clear_screen() -> bool:
     if not sys.stdout.isatty():
         return False
@@ -829,6 +844,11 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             next_model,
                             model_override,
                             next_override,
+                        ) or returns_to_fable_in_process(
+                            selected,
+                            next_profile,
+                            next_model,
+                            in_process_fallback,
                         ):
                             applied_mode_generation = mode_generation
                             write_policy_scope(
@@ -881,6 +901,13 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             continue
                         next_model = "fable"
                         next_override = None
+                        if returns_to_fable_in_process(
+                            selected,
+                            next_profile,
+                            next_model,
+                            in_process_fallback,
+                        ):
+                            continue
                     elif current_family == "fable":
                         target = accounts.handoff_target(
                             selected["label"],
