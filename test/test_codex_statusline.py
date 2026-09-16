@@ -2798,6 +2798,20 @@ class CodexStatuslineTest(unittest.TestCase):
 
         self.assertEqual(selected, thread_id)
 
+    def test_process_rollout_paths_answers_last_seen_when_lsof_stalls(self) -> None:
+        owner = 424242
+        codex_statusline.ROLLOUT_PATHS_LAST_SEEN.pop(owner, None)
+        ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="p1\nn/tmp/rollout-a.jsonl\n")
+        stalled = subprocess.TimeoutExpired(cmd="lsof", timeout=1.0)
+        with mock.patch.object(codex_statusline, "process_descendants", return_value=[owner]), mock.patch.object(
+            codex_statusline.Path, "is_dir", return_value=False
+        ):
+            with mock.patch.object(codex_statusline.subprocess, "run", return_value=ok):
+                self.assertEqual(codex_statusline.process_rollout_paths(owner), {"/tmp/rollout-a.jsonl"})
+            with mock.patch.object(codex_statusline.subprocess, "run", side_effect=stalled):
+                self.assertEqual(codex_statusline.process_rollout_paths(owner), {"/tmp/rollout-a.jsonl"})
+        codex_statusline.ROLLOUT_PATHS_LAST_SEEN.pop(owner, None)
+
     def test_process_rollout_paths_finds_open_rollout_unmocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             rollout = Path(tmpdir) / "rollout-integration.jsonl"
