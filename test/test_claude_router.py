@@ -2600,7 +2600,7 @@ def test_fable_mode_honors_an_explicit_opus_launch(monkeypatch):
     assert selections[0].get("require_fable") is False
 
 
-def test_fable_mode_keeps_a_live_opus_switch(monkeypatch, tmp_path):
+def test_fable_mode_keeps_a_live_sonnet_switch(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     session_id = str(uuid.uuid4())
     selections = []
@@ -2629,7 +2629,7 @@ def test_fable_mode_keeps_a_live_opus_switch(monkeypatch, tmp_path):
     monkeypatch.setattr(
         claude_router,
         "read_router_state",
-        lambda _path: {"session_id": session_id, "model": "Opus 4.5"},
+        lambda _path: {"session_id": session_id, "model": "Sonnet 4.5"},
     )
     monkeypatch.setattr(
         claude_router, "stop_for_handoff", lambda child: handoffs.append(child)
@@ -2641,6 +2641,7 @@ def test_fable_mode_keeps_a_live_opus_switch(monkeypatch, tmp_path):
     assert claude_router.option_value(launches[0], "--model") == "fable"
     assert len(launches) == 1
     assert handoffs == []
+    assert not [s for s in selections[1:] if s.get("require_fable")]
 
 
 def test_reissued_fable_mode_promotes_a_pinned_session(monkeypatch):
@@ -2676,7 +2677,7 @@ def test_reissued_fable_mode_promotes_a_pinned_session(monkeypatch):
     monkeypatch.setattr(
         claude_router,
         "read_router_state",
-        lambda _path: {"session_id": session_id, "model": "Opus 4.5"},
+        lambda _path: {"session_id": session_id, "model": "Sonnet 4.5"},
     )
     monkeypatch.setattr(claude_router, "stop_for_handoff", lambda _child: None)
     _pin_test_harness(monkeypatch, session_id, selections)
@@ -2768,7 +2769,7 @@ def test_router_imposed_opus_fallback_still_recovers_to_fable(monkeypatch):
 
 
 def test_live_switch_back_to_fable_clears_the_pin(monkeypatch):
-    # Opus pins the session; switching back to /model fable clears the pin so
+    # Sonnet pins the session; switching back to /model fable clears the pin so
     # normal Fable account handoff resumes.
     session_id = str(uuid.uuid4())
     selections = []
@@ -2792,9 +2793,9 @@ def test_live_switch_back_to_fable_clears_the_pin(monkeypatch):
         selections.append(kwargs)
         return second if kwargs.get("avoid_labels") else first
 
-    # poll 1 renders Opus (pins); poll 2+ renders Fable (clears pin)
+    # poll 1 renders Sonnet (pins); poll 2+ renders Fable (clears pin)
     def read_state(_path):
-        model = "Opus 4.5" if len(polls) < 2 else "Fable 5"
+        model = "Sonnet 4.5" if len(polls) < 2 else "Fable 5"
         return {"session_id": session_id, "model": model}
 
     monkeypatch.setattr(
@@ -3206,7 +3207,8 @@ def test_board_polled_fable_exhaustion_on_the_current_account_keeps_the_child_ru
 
     assert len(launches) == 1
     assert handoffs == []
-    assert exhausted_checks == ["first"]
+    # The child carries --fallback-model, so its fable wall is not the board's call.
+    assert exhausted_checks == []
 
 
 def test_transcript_fable_limit_on_the_current_account_keeps_the_child_running(
@@ -3443,3 +3445,91 @@ def test_reissued_fable_mode_on_the_fallen_back_account_keeps_the_child_running(
 
     assert len(launches) == 1
     assert handoffs == []
+
+
+def test_a_fable_limit_and_the_rendered_fallback_in_one_tick_keep_the_child_running(
+    monkeypatch, tmp_path
+):
+    # The child hits the fable wall and falls back by itself, so the tick that
+    # first sees the transcript limit already renders Opus. Neither reading may
+    # pin Opus: fable mode must still poll, and follow the child back to Fable.
+    session_id = str(uuid.uuid4())
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    launches, handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "fable", "label": None}, ticks=5
+    )
+    ticks = []
+    selections = []
+
+    def select_profile(**kwargs):
+        selections.append((len(ticks), kwargs))
+        return FIRST
+
+    def read_state(_path):
+        ticks.append(True)
+        model = "Opus 4.5" if len(ticks) < 4 else "Fable 5"
+        return {"session_id": session_id, "model": model}
+
+    def launch(command, **kwargs):
+        launches.append((command, kwargs))
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "isApiErrorMessage": True,
+                    "apiErrorStatus": 429,
+                    "error": "rate_limit",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "You've reached your Fable 5 limit."}
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
+        return _IdleChild(5)
+
+    monkeypatch.setattr(claude_router.accounts, "select_profile", select_profile)
+    monkeypatch.setattr(claude_router.subprocess, "Popen", launch)
+    monkeypatch.setattr(claude_router, "session_transcript_path", lambda _c: transcript)
+    monkeypatch.setattr(claude_router.accounts, "mark_fable_limit", lambda *_a: None)
+    monkeypatch.setattr(
+        claude_router.accounts, "profile_general_exhausted", lambda _l: False
+    )
+    monkeypatch.setattr(claude_router, "read_router_state", read_state)
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
+    # Fable mode keeps polling while the child still renders the fallback.
+    assert [
+        tick for tick, kwargs in selections if tick in (2, 3) and kwargs.get("require_fable")
+    ]
+
+
+def test_a_rendered_sonnet_in_a_fable_child_still_pins(monkeypatch):
+    session_id = str(uuid.uuid4())
+    launches, handoffs, polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "fable", "label": None}, ticks=4
+    )
+    selections = []
+
+    def select_profile(**kwargs):
+        selections.append((len(polls), kwargs))
+        return SECOND if len(polls) > 0 and kwargs.get("require_fable") else FIRST
+
+    monkeypatch.setattr(claude_router.accounts, "select_profile", select_profile)
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Sonnet 4.5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
+    assert not [tick for tick, kwargs in selections if tick > 0 and kwargs.get("require_fable")]

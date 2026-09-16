@@ -525,14 +525,13 @@ def route_unchanged(
 def falls_back_in_process(
     selected: dict,
     next_profile: dict,
-    current_family: str,
     next_model: str | None,
-    fallback_model: str,
+    in_process_fallback: str | None,
 ) -> bool:
     return (
-        next_profile["label"] == selected["label"]
-        and current_family == "fable"
-        and next_model == fallback_model
+        in_process_fallback is not None
+        and next_profile["label"] == selected["label"]
+        and next_model == in_process_fallback
     )
 
 
@@ -540,12 +539,14 @@ def returns_to_fable_in_process(
     selected: dict,
     next_profile: dict,
     next_model: str | None,
+    current_model: str | None,
     in_process_fallback: str | None,
 ) -> bool:
-    # A child that fell back in place still carries --fallback-model and
-    # retries fable at the start of every turn, so the same account needs no restart.
+    # A child sitting on its own --fallback-model retries fable at the start of
+    # every turn, so the same account needs no restart; a pinned model still does.
     return (
         in_process_fallback is not None
+        and current_model == in_process_fallback
         and next_profile["label"] == selected["label"]
         and next_model == "fable"
     )
@@ -694,11 +695,15 @@ def run_supervised(binary: str, args: list[str]) -> int:
             transcript_not_before = (
                 child_started_at if transcript_path is None else None
             )
+            # The fallback the child carries; a rendered one is never a user pin,
+            # and a limit on this child routes against its fable primary.
+            in_process_fallback = None
             child_args = list(launch_args)
             if (
                 current_family == "fable"
                 and option_value(launch_args, "--fallback-model") is None
             ):
+                in_process_fallback = fallback_model
                 # In front, so the session selector stays last for the relaunch.
                 child_args = ["--fallback-model", fallback_model, *launch_args]
             child = subprocess.Popen([binary, *child_args], env=env)
@@ -706,7 +711,6 @@ def run_supervised(binary: str, args: list[str]) -> int:
             handoff = False
             limit_route = None
             limit_rejected = None
-            in_process_fallback = None
             while child.poll() is None:
                 try:
                     time.sleep(interval)
@@ -768,17 +772,18 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 if hard_limit_kind == "fable" and in_process_fallback:
                     hard_limit_kind = None
                 hard_limit_reached = hard_limit_kind is not None
+                limit_family = "fable" if in_process_fallback else current_family
                 if hard_limit_reached:
                     limit_route = session_limit_route(
                         selected,
-                        current_family,
+                        limit_family,
                         hard_limit_kind,
                         router_pid,
                     )
                 elif limit_rejected:
                     limit_route = session_limit_route(
                         selected,
-                        current_family,
+                        limit_family,
                         limit_rejected,
                         router_pid,
                     )
@@ -848,6 +853,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             selected,
                             next_profile,
                             next_model,
+                            current_model,
                             in_process_fallback,
                         ):
                             applied_mode_generation = mode_generation
@@ -905,6 +911,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             selected,
                             next_profile,
                             next_model,
+                            current_model,
                             in_process_fallback,
                         ):
                             continue
@@ -992,13 +999,11 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 if falls_back_in_process(
                     selected,
                     next_profile,
-                    current_family,
                     next_model,
-                    fallback_model,
+                    in_process_fallback,
                 ):
                     # The child carries --fallback-model: the same account's
                     # fable wall is crossed in place, and fable retried each turn.
-                    in_process_fallback = fallback_model
                     limit_rejected = None
                     limit_route = None
                     model_override = next_override
@@ -1066,7 +1071,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 if limit_rejected:
                     limit_route = session_limit_route(
                         selected,
-                        current_family,
+                        "fable" if in_process_fallback else current_family,
                         limit_rejected,
                         router_pid,
                     )
