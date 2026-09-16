@@ -521,6 +521,21 @@ def route_unchanged(
         and next_override == model_override
     )
 
+
+def falls_back_in_process(
+    selected: dict,
+    next_profile: dict,
+    current_family: str,
+    next_model: str | None,
+    fallback_model: str,
+) -> bool:
+    return (
+        next_profile["label"] == selected["label"]
+        and current_family == "fable"
+        and next_model == fallback_model
+    )
+
+
 def clear_screen() -> bool:
     if not sys.stdout.isatty():
         return False
@@ -596,6 +611,10 @@ def run_supervised(binary: str, args: list[str]) -> int:
     interval = float(os.environ.get("ACCOUNTS_ROUTER_INTERVAL", ROUTER_INTERVAL_S))
     mode, applied_mode_generation = accounts.load_mode_snapshot()
     hard_session_limit = accounts.hard_session_limit_enabled()
+    fallback_model = os.environ.get(
+        "ACCOUNTS_FABLE_FALLBACK_MODEL",
+        FABLE_FALLBACK_MODEL,
+    )
     current_model = model_name(args)
     current_effort = option_value(args, "--effort")
     current_family = "fable" if current_model == "fable" else "general"
@@ -660,11 +679,19 @@ def run_supervised(binary: str, args: list[str]) -> int:
             transcript_not_before = (
                 child_started_at if transcript_path is None else None
             )
-            child = subprocess.Popen([binary, *launch_args], env=env)
+            child_args = list(launch_args)
+            if (
+                current_family == "fable"
+                and option_value(launch_args, "--fallback-model") is None
+            ):
+                # In front, so the session selector stays last for the relaunch.
+                child_args = ["--fallback-model", fallback_model, *launch_args]
+            child = subprocess.Popen([binary, *child_args], env=env)
             last_heartbeat = time.monotonic()
             handoff = False
             limit_route = None
             limit_rejected = None
+            in_process_fallback = None
             while child.poll() is None:
                 try:
                     time.sleep(interval)
@@ -687,12 +714,15 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         and mapped_model
                         and mapped_model != current_model
                     ):
-                        # A live /model switch: pin the user's non-fable
-                        # choice so fable mode stops reasserting over it.
-                        user_pinned_model = (
-                            mapped_model if mapped_model != "fable" else None
-                        )
-                        model_override = None
+                        if mapped_model == in_process_fallback:
+                            model_override = in_process_fallback
+                        else:
+                            # A live /model switch: pin the user's non-fable
+                            # choice so fable mode stops reasserting over it.
+                            user_pinned_model = (
+                                mapped_model if mapped_model != "fable" else None
+                            )
+                            model_override = None
                     current_model = mapped_model
                     current_family = (
                         "fable" if current_model == "fable" else "general"
@@ -720,6 +750,8 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if hard_session_limit
                     else None
                 )
+                if hard_limit_kind == "fable" and in_process_fallback:
+                    hard_limit_kind = None
                 hard_limit_reached = hard_limit_kind is not None
                 if hard_limit_reached:
                     limit_route = session_limit_route(
@@ -867,8 +899,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
                                 continue
                             next_model = "fable"
                             next_override = None
-                        elif accounts.profile_fable_exhausted(
-                            selected["label"]
+                        elif (
+                            in_process_fallback is None
+                            and accounts.profile_fable_exhausted(selected["label"])
                         ):
                             next_model = os.environ.get(
                                 "ACCOUNTS_FABLE_FALLBACK_MODEL",
@@ -929,6 +962,22 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     else:
                         continue
                     applied_mode_generation = mode_generation
+                if falls_back_in_process(
+                    selected,
+                    next_profile,
+                    current_family,
+                    next_model,
+                    fallback_model,
+                ):
+                    # The child carries --fallback-model: the same account's
+                    # fable wall is crossed in place, and fable retried each turn.
+                    in_process_fallback = fallback_model
+                    limit_rejected = None
+                    limit_route = None
+                    model_override = next_override
+                    current_model = next_model
+                    current_family = "general"
+                    continue
                 stop_for_handoff(child)
                 launch_args = handoff_session_args(
                     args,
@@ -964,10 +1013,13 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         and mapped_model
                         and mapped_model != current_model
                     ):
-                        user_pinned_model = (
-                            mapped_model if mapped_model != "fable" else None
-                        )
-                        model_override = None
+                        if mapped_model == in_process_fallback:
+                            model_override = in_process_fallback
+                        else:
+                            user_pinned_model = (
+                                mapped_model if mapped_model != "fable" else None
+                            )
+                            model_override = None
                     current_model = mapped_model
                     current_family = (
                         "fable" if current_model == "fable" else "general"
