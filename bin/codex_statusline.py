@@ -3561,10 +3561,18 @@ def descendant_activity_summary(
         for thread in descendants
         if int(now.timestamp()) - thread.updated_at <= active_window_seconds
     ]
-    running = [
-        workflow_label(thread)
+    running_threads = [
+        thread
         for thread, activity in recent
         if activity.active_turn_seconds > 0 or activity.active_tools > 0
+    ]
+    running = [workflow_label(thread) for thread in running_threads]
+    running_details = [
+        {
+            "label": workflow_label(thread),
+            "elapsed_seconds": int(now.timestamp()) - thread.created_at,
+        }
+        for thread in running_threads
     ]
     return {
         "total": len(descendants),
@@ -3572,6 +3580,7 @@ def descendant_activity_summary(
         "active_tools": sum(activity.active_tools for _, activity in recent),
         "active_shells": sum(activity.active_shells for _, activity in recent),
         "running": running,
+        "running_details": running_details,
     }
 
 
@@ -3854,7 +3863,7 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
     )
     lines.append(row("mode", permissions, solid(p.dim)))
 
-    workflows = (data.get("agents") or {}).get("running", [])
+    workflows = (data.get("agents") or {}).get("running_details", [])
     board_rows = account_board.get("rows") or []
     if board_rows and width >= 40:
         def clip_board_line(value: str) -> str:
@@ -3875,7 +3884,10 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
             label = short_text(str(account["label"]), 16)
             lines.append(clip_board_line(f"  {marker} {label:<16} {detail} {banked}"))
     for workflow in workflows:
-        status = short_text(f"◯ {workflow} 0/1 agents done", width)
+        status = short_text(
+            f"◯ {workflow['label']} 0/1 agents done · {format_duration(workflow['elapsed_seconds'])}",
+            width,
+        )
         lines.append(f"{p.dim}{status}{p.reset}")
     return "\n".join(lines)
 
