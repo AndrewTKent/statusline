@@ -1671,6 +1671,10 @@ def process_descendants(owner_pid: int) -> set[int]:
     return descendants
 
 
+ROLLOUT_LSOF_TIMEOUT_SECONDS = 2.5
+ROLLOUT_PATHS_LAST_SEEN: dict[int, set[str]] = {}
+
+
 def process_rollout_paths(owner_pid: int) -> set[str]:
     pids = process_descendants(owner_pid)
     proc_root = Path("/proc")
@@ -1691,16 +1695,18 @@ def process_rollout_paths(owner_pid: int) -> set[str]:
                 continue
         return paths
 
+    # -b skips the kernel calls that block on a stalled NFS mount (OrbStack's) and hold
+    # lsof past the timeout; a miss then answers the last paths seen for this owner.
     try:
         result = subprocess.run(
-            ["lsof", "-n", "-P", "-Fn", "-p", ",".join(str(pid) for pid in sorted(pids))],
+            ["lsof", "-b", "-n", "-P", "-Fn", "-p", ",".join(str(pid) for pid in sorted(pids))],
             capture_output=True,
             text=True,
-            timeout=1.0,
+            timeout=ROLLOUT_LSOF_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return set()
+        return ROLLOUT_PATHS_LAST_SEEN.get(owner_pid, set())
 
     paths = set()
     for line in result.stdout.splitlines():
@@ -1710,7 +1716,10 @@ def process_rollout_paths(owner_pid: int) -> set[str]:
         name = Path(path).name
         if name.startswith("rollout-") and name.endswith(".jsonl"):
             paths.add(path)
-    return paths
+    if paths:
+        ROLLOUT_PATHS_LAST_SEEN[owner_pid] = paths
+        return paths
+    return ROLLOUT_PATHS_LAST_SEEN.get(owner_pid, set())
 
 
 def select_owner_thread_id(conn: sqlite3.Connection, owner_pid_file: str) -> str:
