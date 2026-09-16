@@ -3350,3 +3350,96 @@ def test_router_applied_fallback_read_back_is_not_a_user_pin(monkeypatch):
         tick for tick, kwargs in selections if tick >= 3 and kwargs.get("require_fable")
     ]
     assert recovery_polls
+
+
+def _fallen_back_fable_session(monkeypatch, session_id, recovery, mode_snapshot=None):
+    """Fable mode on FIRST; tick 1 exhausts fable and falls back in process,
+    tick 2 renders the fallback, and `recovery` answers the Fable polls after."""
+    launches, handoffs, polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "fable", "label": None}, ticks=5
+    )
+    selections = []
+
+    def select_profile(**kwargs):
+        selections.append((len(polls), kwargs))
+        if not kwargs.get("require_fable"):
+            return FIRST
+        return FIRST if len(polls) < 2 else recovery
+
+    monkeypatch.setattr(claude_router.accounts, "select_profile", select_profile)
+    if mode_snapshot is not None:
+        monkeypatch.setattr(
+            claude_router.accounts, "load_mode_snapshot", mode_snapshot
+        )
+    monkeypatch.setattr(
+        claude_router.accounts, "profile_fable_exhausted", lambda _l: True
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {
+            "session_id": session_id,
+            "model": "Fable 5" if len(polls) < 2 else "Opus 4.5",
+        },
+    )
+    return launches, handoffs, selections
+
+
+def test_same_account_fable_reset_after_an_in_process_fallback_keeps_the_child_running(
+    monkeypatch,
+):
+    session_id = str(uuid.uuid4())
+    launches, handoffs, selections = _fallen_back_fable_session(
+        monkeypatch, session_id, recovery=FIRST
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert [
+        tick for tick, kwargs in selections if tick >= 2 and kwargs.get("require_fable")
+    ]
+    assert len(launches) == 1
+    assert handoffs == []
+
+
+def test_another_fable_account_freeing_after_an_in_process_fallback_restarts_onto_it(
+    monkeypatch,
+):
+    session_id = str(uuid.uuid4())
+    launches, handoffs, _selections = _fallen_back_fable_session(
+        monkeypatch, session_id, recovery=SECOND
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert len(handoffs) == 1
+    assert [launch[1]["env"]["ACCOUNTS_ROUTED_LABEL"] for launch in launches] == [
+        "first",
+        "second",
+    ]
+    relaunch = launches[1][0]
+    assert claude_router.option_value(relaunch, "--model") == "fable"
+    assert claude_router.option_value(relaunch, "--fallback-model") == "opus"
+
+
+def test_reissued_fable_mode_on_the_fallen_back_account_keeps_the_child_running(
+    monkeypatch,
+):
+    session_id = str(uuid.uuid4())
+    generations = []
+
+    def load_mode_snapshot():
+        generations.append(True)
+        # The launch snapshot and tick 1 share a generation; `accounts fable`
+        # is re-issued before tick 2.
+        generation = (1, 1) if len(generations) < 3 else (2, 2)
+        return {"mode": "fable", "label": None}, generation
+
+    launches, handoffs, _selections = _fallen_back_fable_session(
+        monkeypatch, session_id, recovery=FIRST, mode_snapshot=load_mode_snapshot
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
