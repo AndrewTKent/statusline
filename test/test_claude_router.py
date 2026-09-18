@@ -3735,6 +3735,39 @@ class TestHandoffNotice:
 
         assert args == ["--model", "opus", "--session-id", "sid-1"]
 
+    def test_a_relaunch_that_resumes_a_transcript_drops_the_prompt_it_was_launched_with(
+        self, tmp_path, monkeypatch
+    ):
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text('{"type":"user"}\n')
+        monkeypatch.setattr(claude_router, "session_transcript_path", lambda _s: transcript)
+
+        args = claude_router.handoff_session_args(
+            ["--dangerously-skip-permissions", "the original brief"], "sid-1"
+        )
+
+        assert args == ["--dangerously-skip-permissions", "--resume", "sid-1"]
+
+    def test_the_notice_is_the_only_positional_a_relaunch_carries(
+        self, tmp_path, monkeypatch
+    ):
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text('{"type":"user"}\n')
+        monkeypatch.setattr(claude_router, "session_transcript_path", lambda _s: transcript)
+
+        args = claude_router.handoff_session_args(
+            ["--dangerously-skip-permissions", "the original brief"],
+            "sid-1",
+            notice="moved",
+        )
+
+        assert args == [
+            "--dangerously-skip-permissions",
+            "--resume",
+            "sid-1",
+            "moved",
+        ]
+
     def test_the_notice_names_the_wall_that_moved_the_session(self):
         reasons = [
             claude_router.handoff_notice("a", "b", kind)
@@ -3746,6 +3779,33 @@ class TestHandoffNotice:
             "fable limit",
             "routing change",
         ]
+
+
+class TestLaunchPromptWalk:
+    def test_two_positionals_leave_the_arguments_alone(self):
+        args = ["--dangerously-skip-permissions", "one", "two"]
+
+        assert claude_router.without_launch_prompt(args) == args
+
+    def test_a_single_value_options_value_is_not_the_prompt(self):
+        args = ["--model", "opus"]
+
+        assert claude_router.without_launch_prompt(args) == args
+
+    def test_a_variadic_options_values_are_not_the_prompt(self):
+        args = ["--add-dir", "one", "two", "--dangerously-skip-permissions", "brief"]
+
+        assert claude_router.without_launch_prompt(args) == args[:-1]
+
+    def test_an_option_that_carries_its_value_consumes_nothing_after_it(self):
+        args = ["--model=opus", "brief"]
+
+        assert claude_router.without_launch_prompt(args) == args[:-1]
+
+    def test_an_option_the_walk_does_not_know_leaves_the_arguments_alone(self):
+        args = ["--system-prompt-file", "brief.md", "--dangerously-skip-permissions"]
+
+        assert claude_router.without_launch_prompt(args) == args
 
 
 class TestHandoffCount:
