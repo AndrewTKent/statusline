@@ -748,7 +748,7 @@ remote_epoch_relative() {
 }
 
 remote_board_labels() {
-    local root="$1" board_dir board_name
+    local root="$1" board_dir
     [ -d "$root" ] || return 0
     local -a board_dirs
     # set +f locally: script-wide `set -f` (L3) blocks glob expansion otherwise.
@@ -757,8 +757,7 @@ remote_board_labels() {
     set -f
     for board_dir in "${board_dirs[@]}"; do
         [ -d "$board_dir" ] || continue
-        board_name="${board_dir%/}"; board_name="${board_name##*/}"
-        jq -r --arg board "$board_name" '(.accounts // {}) | keys[] | $board + "/" + .' \
+        jq -r '(.accounts // {}) | keys[]' \
             "$board_dir/statusline-snapshot.json" 2>/dev/null
         [ "${REMOTE_BOARD_CODEX_ROWS:-0}" = "1" ] || continue
         jq -r 'keys[] | "cx " + .' "$board_dir/codex-usage.json" 2>/dev/null
@@ -833,7 +832,9 @@ remote_board_lines() {
                 [ "$row_seven" != "—" ] && seven_color=$(color_for_pct "${row_seven%\%}")
                 [ "$row_fable" != "—" ] && fable_color=$(color_for_pct "${row_fable%\%}")
             fi
-            printf -v pad_name '%-*s' "$name_width" "${board_name}/${row_label}"
+            # The header above already names the board; rows read like local ones.
+            row_label="$(printf '%s' "${row_label:0:1}" | tr '[:lower:]' '[:upper:]')${row_label:1}"
+            printf -v pad_name '%-*s' "$name_width" "$row_label"
             suffix=""
             [ "$row_expired" = "true" ] && suffix=" ${red}⚠ needs reauth${reset}"
             printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$row_five" 4)${reset}  ${dim}$(_rb_ralign "$row_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$row_seven" 4)${reset}   ${fable_color}$(_rb_ralign "$row_fable" 5)${reset}  ${dim}$(_rb_ralign "$row_fable_reset" 6)${reset}${suffix}"
