@@ -564,6 +564,14 @@ files.
   running. `14/15 agents` is agents finished over agents started.
 - **A board with a running job is pulled every 30 seconds** instead of
   `REMOTE_BOARD_PULL_INTERVAL`, and drops back when the last job stops.
+- **A job shows where it was sent from.** `job.json` may carry `origin_session`
+  (the sender's Claude Code session id) and `origin_pane` (the first 12 hex of
+  the SHA-256 of `tmux:<server>:<pane>`, `iterm:<session uuid>` or
+  `term:<TERM_SESSION_ID>`). A job renders only in a status line whose session
+  or terminal pane matches, so it follows the pane across `/clear` and new
+  sessions and stays off every other pane. A job with neither shows everywhere.
+  `REMOTE_JOBS_SHOW_ALL=1` lists every job and marks this pane's own with
+  `← this session`.
 - **Recently finished jobs stay visible for half an hour**, showing their state
   and age, then drop off. `REMOTE_JOB_NAME_MAX` (default 20) caps the name so a
   long branch cannot widen the table.

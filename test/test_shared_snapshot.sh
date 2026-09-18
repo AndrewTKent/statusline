@@ -184,6 +184,7 @@ board_output=$(render_with_boards)
 codex_rows_output=$(REMOTE_BOARD_CODEX_ROWS=1 render_with_boards)
 [[ "$codex_rows_output" == *"cx team-1"*"37%"* ]] || { printf 'REMOTE_BOARD_CODEX_ROWS=1 did not render the Codex row\n' >&2; exit 1; }
 [[ "$board_output" != *$'\u25b8'* ]] || { printf 'a board without a jobs file rendered a job line\n' >&2; exit 1; }
+PANE_TEST_ID=$({ printf 'iterm:PANE-TEST' | shasum -a 256 2>/dev/null || printf 'iterm:PANE-TEST' | sha256sum; } | cut -c1-12)
 cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
 {
   "version": 1,
@@ -202,8 +203,18 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
     },
     "just-done": {
       "state": "done", "branch": "andrew/done", "head": "def5678",
-      "account": "team-2", "origin_session": "another-session", "sent_at": $(( NOW - 7200 )),
+      "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 7200 )),
       "updated_at": $(( NOW - 120 )), "handoffs": 0, "report": true, "workflows": []
+    },
+    "their-job": {
+      "state": "running", "branch": "andrew/theirs", "head": "1234abc",
+      "account": "team-1", "origin_session": "another-session", "sent_at": $(( NOW - 600 )),
+      "updated_at": $NOW, "handoffs": 0, "report": false, "workflows": []
+    },
+    "pane-job": {
+      "state": "running", "branch": "andrew/pane", "head": "5678def",
+      "account": "team-1", "origin_session": "a-session-this-pane-ran-earlier", "origin_pane": "$PANE_TEST_ID",
+      "sent_at": $(( NOW - 600 )), "updated_at": $NOW, "handoffs": 0, "report": false, "workflows": []
     },
     "old-job": {
       "state": "done", "branch": "andrew/old", "head": "9abcdef",
@@ -215,7 +226,14 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
 JSON
 jobs_output=$(render_with_boards)
 [[ "$jobs_output" == *"demo-job"*"running"*"team-2"* ]] || { printf 'a running job did not name the account it is on\n' >&2; exit 1; }
-[[ "$(printf '%s\n' "$jobs_output" | grep -c 'this session')" = "1" && "$jobs_output" == *"demo-job"*"this session"* ]] || { printf 'only the job this session sent is marked as its own\n' >&2; exit 1; }
+[[ "$jobs_output" != *"their-job"* ]] || { printf "another session's job rendered here\n" >&2; exit 1; }
+[[ "$jobs_output" != *"this session"* ]] || { printf 'a session showing only its own jobs still marked one as its own\n' >&2; exit 1; }
+[[ "$jobs_output" != *"pane-job"* ]] || { printf "another pane's job rendered here\n" >&2; exit 1; }
+pane_jobs_output=$(TMUX="" ITERM_SESSION_ID="w0t0p0:PANE-TEST" render_with_boards)
+[[ "$pane_jobs_output" == *"pane-job"* ]] || { printf 'a job sent from this pane by an earlier session did not render\n' >&2; exit 1; }
+all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
+[[ "$all_jobs_output" == *"their-job"* ]] || { printf 'REMOTE_JOBS_SHOW_ALL=1 did not render every job\n' >&2; exit 1; }
+[[ "$(printf '%s\n' "$all_jobs_output" | grep -c 'this session')" = "1" && "$all_jobs_output" == *"demo-job"*"this session"* ]] || { printf 'with every job on screen, only the one this session sent is marked\n' >&2; exit 1; }
 [[ "$jobs_output" == *"2 handoffs"* ]] || { printf 'a running job did not count the moves the router made\n' >&2; exit 1; }
 [[ "$jobs_output" == *"solei loop to sun"*"14/15 agents"* ]] || { printf "a running job's running workflow did not render\n" >&2; exit 1; }
 [[ "$jobs_output" != *"scoping panel"* ]] || { printf 'a workflow that is not running still rendered\n' >&2; exit 1; }
