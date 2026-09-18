@@ -585,7 +585,9 @@ and any in-process workflow, subagent or background task died with the old
 process. `ACCOUNTS_HANDOFF_NOTICE=1` makes the relaunch carry a first message
 naming the accounts, the reason, and what was lost, so an unattended session can
 restart what was in flight. Off by default; a session with no transcript to
-resume never gets one.
+resume never gets one. The prompt a session was launched with stays behind on a
+relaunch that resumes — it is already in the transcript, and a second prompt
+beside the notice makes the CLI submit neither.
 
 ---
 

@@ -49,6 +49,100 @@ HANDOFF_NOTICE = (
     " it; if nothing was, reply in one line and wait."
 )
 HANDOFF_REASONS = {"session": "session limit", "fable": "fable limit"}
+# Option arity, read off `claude --help`. The CLI also accepts options it does
+# not list, so a name missing from all four sets means the walk gives up.
+FLAG_OPTIONS = frozenset(
+    {
+        "--allow-dangerously-skip-permissions",
+        "--ax-screen-reader",
+        "--background",
+        "--bare",
+        "--bg",
+        "--brief",
+        "--chrome",
+        "-c",
+        "--continue",
+        "--dangerously-skip-permissions",
+        "--disable-slash-commands",
+        "--exclude-dynamic-system-prompt-sections",
+        "--fork-session",
+        "--forward-subagent-text",
+        "-h",
+        "--help",
+        "--ide",
+        "--include-hook-events",
+        "--include-partial-messages",
+        "--no-chrome",
+        "--no-session-persistence",
+        "-p",
+        "--print",
+        "--replay-user-messages",
+        "--restricted",
+        "--safe-mode",
+        "--strict-mcp-config",
+        "--tmux",
+        "--verbose",
+        "-v",
+        "--version",
+    }
+)
+SINGLE_VALUE_OPTIONS = frozenset(
+    {
+        "--agent",
+        "--agents",
+        "--append-system-prompt",
+        "--autocompact",
+        "--debug-file",
+        "--effort",
+        "--environment",
+        "--fallback-model",
+        "--input-format",
+        "--json-schema",
+        "--max-budget-usd",
+        "--model",
+        "-n",
+        "--name",
+        "--output-format",
+        "--permission-mode",
+        "--permission-prompts",
+        "--plugin-dir",
+        "--plugin-url",
+        "--remote-control-session-name-prefix",
+        "--session-id",
+        "--setting-sources",
+        "--settings",
+        "--system-prompt",
+        "--system-prompt-snapshot",
+    }
+)
+OPTIONAL_VALUE_OPTIONS = frozenset(
+    {
+        "--cloud",
+        "-d",
+        "--debug",
+        "--from-pr",
+        "--prompt-suggestions",
+        "--remote-control",
+        "-r",
+        "--resume",
+        "--teleport",
+        "-w",
+        "--worktree",
+    }
+)
+VARIADIC_OPTIONS = frozenset(
+    {
+        "--add-dir",
+        "--allowedTools",
+        "--allowed-tools",
+        "--betas",
+        "--disallowedTools",
+        "--disallowed-tools",
+        "--file",
+        "--mcp-config",
+        "--tools",
+    }
+)
 SYNC_OUTPUT_ON = b"\x1b[?2026h"
 SYNC_OUTPUT_OFF = b"\x1b[?2026l"
 # Erase the screen and the scrollback, then home: the relaunch starts on a blank terminal.
@@ -340,6 +434,40 @@ def handoff_notice(old_label: str, new_label: str, limit_kind: str | None) -> st
     return HANDOFF_NOTICE.format(old=old_label, new=new_label, reason=reason)
 
 
+def prompt_arg_index(args: list[str]) -> int | None:
+    """Index of the sole positional prompt, or None when the walk is unsure —
+    dropping an option's value would be worse than keeping the prompt."""
+    found: int | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if not arg.startswith("-"):
+            if found is not None:
+                return None
+            found = index - 1
+        elif "=" in arg or arg in FLAG_OPTIONS:
+            continue
+        elif arg in SINGLE_VALUE_OPTIONS:
+            index += 1
+        elif arg in VARIADIC_OPTIONS:
+            while index < len(args) and not args[index].startswith("-"):
+                index += 1
+        elif arg in OPTIONAL_VALUE_OPTIONS:
+            if index < len(args) and not args[index].startswith("-"):
+                index += 1
+        else:
+            return None
+    return found
+
+
+def without_launch_prompt(args: list[str]) -> list[str]:
+    index = prompt_arg_index(args)
+    if index is None:
+        return list(args)
+    return [*args[:index], *args[index + 1 :]]
+
+
 def handoff_session_args(
     args: list[str],
     session_id: str,
@@ -356,6 +484,9 @@ def handoff_session_args(
     if transcript_size(session_transcript_path(session_id)) <= 0:
         # No transcript: nothing was in flight, and the selector is the last pair.
         return [*launch_args[:-2], "--session-id", session_id]
+    # The prompt it was launched with is already in the transcript, and a second
+    # positional beside the notice makes the CLI submit neither.
+    launch_args = without_launch_prompt(launch_args)
     if notice:
         return [*launch_args, notice]
     return launch_args
