@@ -3533,3 +3533,83 @@ def test_a_rendered_sonnet_in_a_fable_child_still_pins(monkeypatch):
     assert len(launches) == 1
     assert handoffs == []
     assert not [tick for tick, kwargs in selections if tick > 0 and kwargs.get("require_fable")]
+
+
+def test_a_child_that_moved_onto_fable_crosses_the_fable_wall_in_process(monkeypatch):
+    # Launched on opus, switched to fable in session. The account's fable is
+    # spent and it is the only one, so the move to opus must not restart.
+    session_id = str(uuid.uuid4())
+    launches, handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "auto", "label": None}, ticks=4
+    )
+    monkeypatch.setattr(
+        claude_router.accounts, "profile_fable_exhausted", lambda _l: True
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Fable 5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "opus"]) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
+
+
+def test_a_general_child_that_never_reached_fable_routes_its_wall_as_general(
+    monkeypatch, tmp_path
+):
+    session_id = str(uuid.uuid4())
+    transcript = tmp_path / "session.jsonl"
+    launches, handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "set", "label": "first"}, ticks=4
+    )
+    routes = []
+
+    def launch(command, **kwargs):
+        launches.append((command, kwargs))
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "isApiErrorMessage": True,
+                    "apiErrorStatus": 429,
+                    "error": "rate_limit",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You've hit your session limit",
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
+        return _IdleChild(4)
+
+    monkeypatch.setattr(claude_router.subprocess, "Popen", launch)
+    monkeypatch.setattr(
+        claude_router, "session_transcript_path", lambda _c: transcript
+    )
+    monkeypatch.setattr(
+        claude_router.accounts, "mark_session_limit", lambda *_a: None
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "session_limit_route",
+        lambda _selected, family, kind, _pid: routes.append((family, kind))
+        or None,
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Opus 4.5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "opus"]) == 0
+
+    assert routes and set(routes) == {("general", "session")}
+    assert handoffs == []

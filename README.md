@@ -421,9 +421,9 @@ safe account on the next supervisor check after its account reaches 100% of
 the five-hour or weekly window, or terminates when none is available. A Fable
 session is also moved at 100% Fable utilization, falling back to Opus on the
 same account when its general windows still have headroom. That fallback
-happens inside the running process (every Fable launch carries
-`--fallback-model`; `ACCOUNTS_FABLE_FALLBACK_MODEL` changes the model) and the
-session returns to Fable on its own once the window resets; only a move to
+happens inside the running process, whether the session launched on Fable or
+switched to it later (`ACCOUNTS_FABLE_FALLBACK_MODEL` changes the model), and
+the session returns to Fable on its own once the window resets; only a move to
 another account restarts it. Past any of those walls the plan stops paying and
 extra usage starts, which is what the guard prevents.
 `ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
