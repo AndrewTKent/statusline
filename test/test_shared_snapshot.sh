@@ -179,7 +179,7 @@ render_with_boards() {
 
 write_board_meta "$NOW" true
 board_output=$(render_with_boards)
-[[ "$board_output" == *"devbox/team-1"*"8%"* ]] || { printf 'a fresh board did not render its Claude rows\n' >&2; exit 1; }
+[[ "$board_output" == *$'\n'"· Team-1 "*"8%"* ]] || { printf 'a fresh board did not render its Claude rows\n' >&2; exit 1; }
 [[ "$board_output" != *"cx team-1"* ]] || { printf 'a board rendered its Codex row without being asked\n' >&2; exit 1; }
 codex_rows_output=$(REMOTE_BOARD_CODEX_ROWS=1 render_with_boards)
 [[ "$codex_rows_output" == *"cx team-1"*"37%"* ]] || { printf 'REMOTE_BOARD_CODEX_ROWS=1 did not render the Codex row\n' >&2; exit 1; }
@@ -190,12 +190,12 @@ board_header_line=$(printf '%s\n' "$board_output" | grep -n 'devbox · ' | head 
 write_board_meta "$(( NOW - 3600 ))" true
 stale_board_output=$(render_with_boards)
 [[ "$stale_board_output" == *"devbox · 1h ago"* ]] || { printf 'a stale board did not render its age\n' >&2; exit 1; }
-[[ "$stale_board_output" == *"devbox/team-1"*"8%"* ]] || { printf 'a stale board zeroed its last numbers\n' >&2; exit 1; }
+[[ "$stale_board_output" == *"· Team-1 "*"8%"* ]] || { printf 'a stale board zeroed its last numbers\n' >&2; exit 1; }
 
 write_board_meta "$NOW" false
 stopped_board_output=$(render_with_boards)
 [[ "$stopped_board_output" == *"devbox · stopped"* ]] || { printf 'a stopped board did not say so\n' >&2; exit 1; }
-[[ "$stopped_board_output" != *"devbox/team-1"* ]] || { printf 'a stopped board still rendered rows\n' >&2; exit 1; }
+[[ "$stopped_board_output" != *"· Team-1 "* ]] || { printf 'a stopped board still rendered rows\n' >&2; exit 1; }
 
 mkdir -p "$SANDBOX/empty-remote"
 no_board_output=$(render_with_boards "$SANDBOX/empty-remote")

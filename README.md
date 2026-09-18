@@ -503,7 +503,7 @@ files that poll publishes and renders them below its local table.
 * Work               84%   2h15m    51%     80%      2d
 · Personal            0%       —   100%      8%     23h
 · devbox · 1m ago
-· devbox/team-1      12%   3h40m    26%      4%      5d
+· Team-1             12%   3h40m    26%      4%      5d
 ```
 
 On the machine being watched, install the router and let its poller run:
