@@ -18,7 +18,7 @@ if ! ls "$versions_dir"/* >/dev/null 2>&1; then
 fi
 
 mkdir -p "$local_bin" "$install_root" "$router_bin" "$codex_router_bin" "$(dirname -- "$zshrc")"
-for script in accounts.py claude-router.py codex_accounts.py codex-router.py codex-account-session.py; do
+for script in accounts.py claude-router.py codex_accounts.py codex-router.py codex-account-session.py remote_boards.py; do
     temp="$install_root/.$script.$$"
     cp "$repo_root/bin/$script" "$temp"
     chmod 755 "$temp"
@@ -58,5 +58,14 @@ printf 'Then run: %s\n' "$codex_path_line"
 
 # Routing quality depends on a fresh board, so the pollers ship with the router
 # rather than as a step someone can skip.
-"$repo_root/macos/launchd/install-agents.sh" || \
-    printf 'Background agents did not fully install — run macos/launchd/install-agents.sh\n' >&2
+case "$(uname)" in
+    Darwin) agents="macos/launchd/install-agents.sh" ;;
+    Linux)  agents="linux/systemd/install-agents.sh" ;;
+    *)      agents="" ;;
+esac
+if [ -n "$agents" ]; then
+    "$repo_root/$agents" || \
+        printf 'Background agents did not fully install — run %s\n' "$agents" >&2
+else
+    printf 'No background-agent installer for %s — poll with `accounts watch`\n' "$(uname)" >&2
+fi

@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll the Codex account quota board
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=__INTERVAL__
+AccuracySec=10
+Persistent=true
+Unit=claude-codex-accounts-poll.service
+
+[Install]
+WantedBy=timers.target

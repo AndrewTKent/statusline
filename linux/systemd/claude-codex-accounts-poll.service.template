@@ -1,0 +1,15 @@
+# Template for the Codex quota-poll systemd user service.
+# linux/systemd/install-codex-accounts-poll.sh populates HOME and installs it
+# into ~/.config/systemd/user/.
+#
+# `codex-accounts poll` reads each account's rate limits without making an
+# inference, so the timer costs nothing but the request.
+
+[Unit]
+Description=Refresh the Codex account quota board
+
+[Service]
+Type=oneshot
+Environment=HOME=__HOME__
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=__HOME__/.local/bin/codex-accounts poll

@@ -3451,6 +3451,92 @@ def reset_credit_text(expires_at: list[int]) -> str:
     return f"{len(expires_at)} exp {soonest.strftime('%b').lower()} {soonest.day}"
 
 
+REMOTE_BOARD_MAX_AGE_S = 900.0
+
+
+def remote_board_age_text(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86_400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86_400}d"
+
+
+def remote_codex_boards(now: float | None = None) -> list[dict[str, Any]]:
+    """Codex rows other machines published, as the account poller last pulled them.
+
+    Reads only the local copies under ~/.accounts/remote, so rendering stays offline.
+    """
+    root = Path(os.environ.get("REMOTE_BOARDS_DIR") or Path.home() / ".accounts" / "remote")
+    try:
+        directories = sorted(entry for entry in root.iterdir() if entry.is_dir())
+    except OSError:
+        return []
+    now = now or time.time()
+    try:
+        max_age = float(os.environ.get("REMOTE_BOARD_MAX_AGE") or REMOTE_BOARD_MAX_AGE_S)
+    except ValueError:
+        max_age = REMOTE_BOARD_MAX_AGE_S
+
+    boards = []
+    for directory in directories:
+        meta = read_json(directory / "meta.json")
+        if meta.get("up") is False:
+            boards.append({"board": directory.name, "stopped": True, "age_s": 0, "fresh": False, "rows": []})
+            continue
+        try:
+            fetched_at = float(meta.get("fetched_at") or 0)
+        except (TypeError, ValueError):
+            fetched_at = 0.0
+        if fetched_at <= 0:
+            continue
+        usage = read_json(directory / "codex-usage.json")
+        rows = []
+        for label in sorted(usage):
+            account_usage = usage[label] if isinstance(usage[label], dict) else {}
+            rate_limits = (
+                account_usage.get("rate_limits")
+                if isinstance(account_usage.get("rate_limits"), dict)
+                else {}
+            )
+            rows.append(
+                {
+                    "label": label,
+                    "weekly": weekly_rate_limit(rate_limits),
+                    "reset_credits": unexpired_reset_credits(account_usage),
+                    "binding_usage": account_binding_usage(rate_limits),
+                    "error": str(account_usage.get("error") or ""),
+                }
+            )
+        if not rows:
+            continue
+        boards.append(
+            {
+                "board": directory.name,
+                "stopped": False,
+                "age_s": max(0, int(now - fetched_at)),
+                "fresh": not meta.get("error") and (now - fetched_at) <= max_age,
+                "rows": rows,
+            }
+        )
+    return boards
+
+
+def codex_board_row(account: dict[str, Any], marker: str, trailer: str) -> str:
+    weekly = account.get("weekly")
+    if weekly:
+        used, reset = limit_display(weekly)
+        reset_value = "now" if reset == "reset" else reset.removeprefix("resets ").removeprefix("reset ")
+        detail = f"{format_pct(used):>6}  {reset_value:<18}"
+    else:
+        detail = f"{'—':>6}  {'unavailable':<18}"
+    label = short_text(str(account["label"]), 16)
+    return f"  {marker} {label:<16} {detail} {trailer}"
+
+
 def codex_account_board(current_account: str) -> dict[str, Any]:
     root = Path(os.environ.get("CODEX_ACCOUNTS_HOME", Path.home() / ".codex-accounts"))
     registry = read_json(root / "accounts.json")
@@ -3496,6 +3582,7 @@ def codex_account_board(current_account: str) -> dict[str, Any]:
         "mode": str(mode.get("mode") or "auto"),
         "selected": selected,
         "rows": rows,
+        "remote": remote_codex_boards(),
     }
 
 
@@ -3873,16 +3960,21 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
             lines.append(clip_board_line(f"    {'acct':<16} {'week':>6}  {'reset':<18} banked"))
         for account in board_rows:
             marker = "*" if account["label"] == account_board.get("current_label") else "·"
-            weekly = account.get("weekly")
-            if weekly:
-                used, reset = limit_display(weekly)
-                reset_value = "now" if reset == "reset" else reset.removeprefix("resets ").removeprefix("reset ")
-                detail = f"{format_pct(used):>6}  {reset_value:<18}"
-            else:
-                detail = f"{'—':>6}  {'unavailable':<18}"
             banked = reset_credit_text(account.get("reset_credits") or [])
-            label = short_text(str(account["label"]), 16)
-            lines.append(clip_board_line(f"  {marker} {label:<16} {detail} {banked}"))
+            lines.append(clip_board_line(codex_board_row(account, marker, banked)))
+        for board in account_board.get("remote") or []:
+            board_name = board["board"]
+            if board["stopped"]:
+                lines.append(f"{p.dim}  · {board_name} · stopped{p.reset}")
+                continue
+            age = remote_board_age_text(board["age_s"])
+            lines.append(f"{p.dim}  · {board_name} · {age} ago{p.reset}")
+            for account in board["rows"]:
+                trailer = reset_credit_text(account.get("reset_credits") or [])
+                if not board["fresh"]:
+                    trailer = f"{age} ago"
+                row_text = clip_board_line(codex_board_row(account, "·", trailer))
+                lines.append(row_text if board["fresh"] else f"{p.dim}{row_text}{p.reset}")
     for workflow in workflows:
         status = short_text(
             f"◯ {workflow['label']} 0/1 agents done · {format_duration(workflow['elapsed_seconds'])}",
@@ -4068,6 +4160,18 @@ def render_top(data: dict[str, Any], args: argparse.Namespace, p: Palette) -> st
         )
     if credits := credit_balance_text(rate_limits):
         lines.append(f"credits {credits} remaining")
+    for board in remote_codex_boards():
+        board_name = board["board"]
+        if board["stopped"]:
+            lines.append(f"{p.dim}{board_name} · stopped{p.reset}")
+            continue
+        age = remote_board_age_text(board["age_s"])
+        for account in board["rows"]:
+            weekly = account.get("weekly")
+            used, reset_text = limit_display(weekly) if weekly else (0.0, "unavailable")
+            label = account["label"]
+            used_text = format_pct(used)
+            lines.append(f"{p.dim}{board_name}/{label} wk {used_text} {reset_text} · {age} ago{p.reset}")
     lines.extend(["─" * min(width, 140), columns])
 
     for session in sessions:

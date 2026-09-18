@@ -38,3 +38,8 @@ CODEX_STATUSLINE_NATIVE=0
 
 # Optional: choose a thread explicitly when running outside Codex.
 # CODEX_THREAD_ID=019f0000-0000-7000-8000-000000000000
+
+# Age past which a remote board's Codex rows render dimmed with their age
+# rather than as current. The rows come from ~/.accounts/remote, pulled by
+# `accounts poll`; see REMOTE_ACCOUNT_BOARDS in statusline.conf.
+# REMOTE_BOARD_MAX_AGE=900

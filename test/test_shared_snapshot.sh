@@ -146,6 +146,62 @@ while IFS= read -r output_line; do
     [[ "$output_line" == *General* ]] && general_line="$output_line"
 done <<< "$plain_output"
 [[ -n "$general_line" && "$general_line" != *"~ stale"* ]] || { printf 'fresh account without a scoped limit rendered stale\n' >&2; exit 1; }
+REMOTE_ROOT_DIR="$SANDBOX/remote"
+mkdir -p "$REMOTE_ROOT_DIR/devbox"
+cat > "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" <<JSON
+{
+  "version": 1,
+  "generated_at": $NOW,
+  "health": {"last_success_at": $NOW, "error": null},
+  "accounts": {
+    "team-1": {
+      "five_hour": {"used_pct": 8, "resets_at": "2099-01-01T12:00:00Z", "stale": false},
+      "seven_day": {"used_pct": 21, "resets_at": "2099-01-07T12:00:00Z", "stale": false},
+      "scoped": [{"kind": "fable", "label": "Fable", "used_pct": 3, "resets_at": "2099-01-07T12:00:00Z"}],
+      "expired": false
+    }
+  }
+}
+JSON
+cat > "$REMOTE_ROOT_DIR/devbox/codex-usage.json" <<JSON
+{"team-1": {"fetched_at": $NOW, "rate_limits": {"primary": {"resets_at": 4070000000, "used_percent": 37, "window_duration_mins": 10080}, "secondary": null}}}
+JSON
+write_board_meta() {
+    printf '{"name":"devbox","fetched_at":%s,"attempted_at":%s,"error":null,"up":%s}\n' \
+        "$1" "$NOW" "$2" > "$REMOTE_ROOT_DIR/devbox/meta.json"
+}
+render_with_boards() {
+    HOME="$TEST_HOME" PATH="$STUBS:$PATH" SHARED_TEST_VIOLATIONS="$VIOLATIONS" \
+        ACCOUNTS_ROUTED_LABEL=work ACCOUNTS_POLICY_SCOPE=global \
+        REMOTE_BOARDS_DIR="${1:-$REMOTE_ROOT_DIR}" \
+        "$SANDBOX/statusline.sh" < "$SANDBOX/input.json" | sed $'s/\033\\[[0-9;]*m//g'
+}
+
+write_board_meta "$NOW" true
+board_output=$(render_with_boards)
+[[ "$board_output" == *"devbox/team-1"*"8%"* ]] || { printf 'a fresh board did not render its Claude rows\n' >&2; exit 1; }
+[[ "$board_output" != *"cx team-1"* ]] || { printf 'a board rendered its Codex row without being asked\n' >&2; exit 1; }
+codex_rows_output=$(REMOTE_BOARD_CODEX_ROWS=1 render_with_boards)
+[[ "$codex_rows_output" == *"cx team-1"*"37%"* ]] || { printf 'REMOTE_BOARD_CODEX_ROWS=1 did not render the Codex row\n' >&2; exit 1; }
+board_table_line=$(printf '%s\n' "$board_output" | grep -n 'Work' | head -1 | cut -d: -f1)
+board_header_line=$(printf '%s\n' "$board_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
+[ "$board_header_line" -gt "$board_table_line" ] || { printf 'the board block did not render under the local table\n' >&2; exit 1; }
+
+write_board_meta "$(( NOW - 3600 ))" true
+stale_board_output=$(render_with_boards)
+[[ "$stale_board_output" == *"devbox · 1h ago"* ]] || { printf 'a stale board did not render its age\n' >&2; exit 1; }
+[[ "$stale_board_output" == *"devbox/team-1"*"8%"* ]] || { printf 'a stale board zeroed its last numbers\n' >&2; exit 1; }
+
+write_board_meta "$NOW" false
+stopped_board_output=$(render_with_boards)
+[[ "$stopped_board_output" == *"devbox · stopped"* ]] || { printf 'a stopped board did not say so\n' >&2; exit 1; }
+[[ "$stopped_board_output" != *"devbox/team-1"* ]] || { printf 'a stopped board still rendered rows\n' >&2; exit 1; }
+
+mkdir -p "$SANDBOX/empty-remote"
+no_board_output=$(render_with_boards "$SANDBOX/empty-remote")
+plain_baseline=$(run_statusline work | sed $'s/\033\\[[0-9;]*m//g')
+[ "$no_board_output" = "$plain_baseline" ] || { printf 'no configured board changed the render\n' >&2; exit 1; }
+
 wide_output=$(MAX_COLS=100 COLUMNS=80 run_statusline work)
 wide_plain=$(printf '%s' "$wide_output" | sed $'s/\033\\[[0-9;]*m//g')
 wide_first_line="${wide_plain%%$'\n'*}"

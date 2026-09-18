@@ -492,6 +492,57 @@ Minted long-lived tokens remain outside `~/.claude`
 (`~/.accounts/vault.json`); archival copies only session JSONLs from
 `~/.claude/projects`.
 
+### Remote account boards
+
+One machine's board can appear under another's. The remote machine runs this
+same router over its own accounts and polls itself; this machine copies the two
+files that poll publishes and renders them below its local table.
+
+```
+  acct                5h   reset   week   fable   reset
+* Work               84%   2h15m    51%     80%      2d
+· Personal            0%       —   100%      8%     23h
+· devbox · 1m ago
+· devbox/team-1      12%   3h40m    26%      4%      5d
+```
+
+On the machine being watched, install the router and let its poller run:
+
+```bash
+./install-account-router.sh          # picks launchd on macOS, systemd on Linux
+loginctl enable-linger "$USER"       # Linux: keep the timers up after logout
+```
+
+On the machine doing the watching, name the boards in `~/.claude/statusline.conf`:
+
+```bash
+REMOTE_ACCOUNT_BOARDS="devbox:devbox"                        # <name>:<ssh-host>
+REMOTE_BOARD_UP_DEVBOX='"$HOME/.local/bin/devbox-cli" status | grep -q running'
+```
+
+Mechanics, and the reason they are worth knowing:
+
+- **`accounts poll` does the pulling, not the renderer.** It fetches
+  `~/.accounts/statusline-snapshot.json` and `~/.codex-accounts/usage.json` over
+  SSH (`BatchMode`, short `ConnectTimeout`, hard overall timeout) into
+  `~/.accounts/remote/<name>/`. Every renderer reads only those local copies, so
+  no render ever blocks on the network.
+- **Credentials never cross.** Only percentages, reset times, labels and plan
+  names are in those two files, and token-shaped keys are dropped on arrival.
+- **Freshness is stated, not implied.** Numbers younger than
+  `REMOTE_BOARD_MAX_AGE` (default 900s) render as current; older or failed pulls
+  keep the last numbers, dimmed, with their age. Nothing is ever shown as zero
+  because a pull failed.
+- **A stopped machine is left alone.** When a board's up-check exits non-zero it
+  is not contacted at all, and the row reads `<name> · stopped`. The check runs
+  as `bash -lc` under the poller's environment, so give it absolute paths.
+- **Codex rides along, in its own place.** The same pull carries the remote
+  Codex quota rows, which appear in this machine's Codex statusline and
+  `codex-top`. `REMOTE_BOARD_CODEX_ROWS=1` also lists them, as `cx <label>`,
+  under the board's Claude rows.
+
+---
+
 ---
 
 ## Token Scanning and Redaction
@@ -611,6 +662,7 @@ Claude Code                    statusline.sh
 | `~/.claude/usage-ledger.json` | Durable per-day/per-model token ledger (`bin/usage-ledger.py`) | Permanent |
 | `~/.claude/statusline-tz` | Optional timezone override for reset-time display | Permanent |
 | `~/.accounts/statusline-snapshot.json` | Private declared-label routing and quota snapshot (`SHARED_ACCOUNT_SNAPSHOT=1`) | Written only by explicit `accounts poll`/`accounts watch` |
+| `~/.accounts/remote/<name>/` | Another machine's pulled board: its snapshot, its Codex usage, and the pull's `meta.json` | Rewritten by `accounts poll` |
 | `~/.claude/.credentials.json` | Claude Code's own OAuth credential — read-only, mtime-tracked | Claude-Code-managed |
 | `/tmp/claude/statusline-usage-cache-<profile>.json` | Account-keyed rate-limit API cache | 60s TTL |
 | `/tmp/claude/statusline-profile-cache-<profile>.json` | Account-keyed profile API cache | 5min TTL |

@@ -4549,5 +4549,47 @@ class WatchReliabilityTest(unittest.TestCase):
             )
 
 
+class RemoteCodexBoardTest(unittest.TestCase):
+    def _board(self, tmp: str, meta: dict) -> None:
+        directory = Path(tmp) / "devbox"
+        directory.mkdir()
+        (directory / "meta.json").write_text(json.dumps(meta))
+        (directory / "codex-usage.json").write_text(
+            json.dumps(
+                {
+                    "team-1": {
+                        "fetched_at": 1000,
+                        "rate_limits": {
+                            "primary": {
+                                "resets_at": 4070000000,
+                                "used_percent": 37,
+                                "window_duration_mins": 10080,
+                            }
+                        },
+                    }
+                }
+            )
+        )
+
+    def test_a_pull_older_than_the_max_age_is_still_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._board(tmp, {"fetched_at": 1000, "error": None, "up": True})
+            with mock.patch.dict(os.environ, {"REMOTE_BOARDS_DIR": tmp, "REMOTE_BOARD_MAX_AGE": "900"}):
+                boards = codex_statusline.remote_codex_boards(now=5000.0)
+
+        self.assertEqual(
+            [(board["fresh"], [row["label"] for row in board["rows"]]) for board in boards],
+            [(False, ["team-1"])],
+        )
+
+    def test_a_board_reported_down_carries_no_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._board(tmp, {"fetched_at": 1000, "error": None, "up": False})
+            with mock.patch.dict(os.environ, {"REMOTE_BOARDS_DIR": tmp}):
+                boards = codex_statusline.remote_codex_boards(now=1100.0)
+
+        self.assertEqual(boards, [{"board": "devbox", "stopped": True, "age_s": 0, "fresh": False, "rows": []}])
+
+
 if __name__ == "__main__":
     unittest.main()
