@@ -484,7 +484,8 @@ there until you switch back to `/model fable` or re-run `accounts fable`. A
 live switch to the fallback model itself (Opus by default) is read as the
 fallback, not a pin: the session already retries Fable each turn. If
 every Fable-capable account is gated, the same session resumes on Opus using the
-safest general-model account. A Fable session that exhausts its window on the
+safest general-model account. Chasing Fable never moves a session onto an
+account already at the departure wall, which would hand it straight back. A Fable session that exhausts its window on the
 account it is on falls back to Opus inside the running process and returns to
 Fable on its own when the window resets; only a move to another account
 restarts the session.

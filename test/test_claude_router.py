@@ -3613,3 +3613,101 @@ def test_a_general_child_that_never_reached_fable_routes_its_wall_as_general(
 
     assert routes and set(routes) == {("general", "session")}
     assert handoffs == []
+
+
+def test_fable_mode_does_not_hand_a_session_back_to_the_wall_it_just_left(tmp_path):
+    # "spent" is past DEPART_PCT but under the hard wall, so departure moves the
+    # session while the Fable pick still ranks it first; "fresh" declines Fable.
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    accounts_dir = home / ".accounts"
+    claude_dir.mkdir(parents=True)
+    accounts_dir.mkdir()
+    (home / ".claude.json").write_text('{"hasCompletedOnboarding":true}')
+    (claude_dir / "settings.json").write_text('{"model":"opus"}')
+    (accounts_dir / "blobs.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "accounts": {
+                    label: {
+                        "blob": _blob(label),
+                        "email": f"{label}@example.com",
+                        "org_uuid": f"org-{label}",
+                    }
+                    for label in ("spent", "fresh")
+                },
+            }
+        )
+    )
+    (accounts_dir / "mode.json").write_text('{"mode":"fable","label":null}')
+    (claude_dir / "account-resets.json").write_text(
+        json.dumps(
+            {
+                "spent@example.com|org-spent": {
+                    "five_hour_pct": 92,
+                    "seven_day_pct": 30,
+                    "fable_pct": 57,
+                    "last_seen": time.time(),
+                },
+                "fresh@example.com|org-fresh": {
+                    "five_hour_pct": 20,
+                    "seven_day_pct": 20,
+                    "fable_pct": 96,
+                    "last_seen": time.time(),
+                },
+            }
+        )
+    )
+    log_path = tmp_path / "launches.jsonl"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "sid = None\n"
+        "for flag in ('--session-id', '--resume'):\n"
+        "    if flag in args:\n"
+        "        sid = args[args.index(flag) + 1]\n"
+        "model = args[args.index('--model') + 1] if '--model' in args else None\n"
+        "label = os.environ['ACCOUNTS_ROUTED_LABEL']\n"
+        "log = Path(os.environ['ROUTER_TEST_LOG'])\n"
+        "with log.open('a') as f:\n"
+        "    f.write(json.dumps({'label': label, 'model': model}) + '\\n')\n"
+        "rendered = 'Opus' if (model == 'fable' and label == 'fresh') else 'Fable'\n"
+        "Path(os.environ['ACCOUNTS_ROUTER_STATE']).write_text(\n"
+        "    json.dumps({'session_id': sid, 'model': rendered, 'effort': 'high'})\n"
+        ")\n"
+        # A supervisor deciding a handoff never re-checks the child, so an
+        # unbounded loop has to be cut from here for the sequence to be read.
+        "if len(log.read_text().splitlines()) >= 4:\n"
+        "    os.kill(os.getppid(), signal.SIGTERM)\n"
+        "    sys.exit(0)\n"
+        "time.sleep(0.5)\n"
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("ACCOUNTS_PIN", None)
+    env.update(
+        {
+            "HOME": str(home),
+            "CLAUDE_REAL_BIN": str(fake_claude),
+            "ACCOUNTS_ROUTER_INTERVAL": "0.2",
+            "ACCOUNTS_HARD_SESSION_LIMIT": "1",
+            "ROUTER_TEST_LOG": str(log_path),
+            "PYTHONPATH": str(REPO / "bin"),
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(REPO / "bin" / "claude-router.py")],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    process.wait(timeout=30)
+    launches = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+    assert [launch["label"] for launch in launches] == ["spent", "fresh"]
