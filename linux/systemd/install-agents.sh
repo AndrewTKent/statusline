@@ -23,6 +23,10 @@ INTERVAL="${ACCOUNTS_POLL_INTERVAL:-120}"
 case "$INTERVAL" in
     ''|*[!0-9]*|0) INTERVAL=120 ;;
 esac
+JOBS_INTERVAL="${JOBS_PUBLISH_INTERVAL:-30}"
+case "$JOBS_INTERVAL" in
+    ''|*[!0-9]*|0) JOBS_INTERVAL=30 ;;
+esac
 
 if [ -n "${STATUSLINE_SKIP_AGENTS:-}" ]; then
     echo "STATUSLINE_SKIP_AGENTS set — skipping systemd timers"
@@ -55,6 +59,7 @@ install_unit() {
     fi
     for suffix in service timer; do
         sed -e "s#__HOME__#$HOME#g" -e "s#__INTERVAL__#$INTERVAL#g" \
+            -e "s#__JOBS_INTERVAL__#$JOBS_INTERVAL#g" \
             "$UNIT_SRC/$name.$suffix.template" > "$UNIT_DIR/$name.$suffix" || {
             echo "[!] could not write $name.$suffix" >&2
             failed=1
@@ -69,6 +74,7 @@ case "$ACTION" in
     --remove|remove)
         remove_unit claude-accounts-poll
         remove_unit claude-codex-accounts-poll
+        remove_unit claude-jobs-publish
         systemctl --user daemon-reload || true
         exit 0
         ;;
@@ -77,9 +83,11 @@ esac
 systemctl --user daemon-reload || failed=1
 install_unit claude-accounts-poll accounts
 install_unit claude-codex-accounts-poll codex-accounts
+install_unit claude-jobs-publish jobs-publish
 
-echo "Installed systemd user timers (every ${INTERVAL}s)"
+echo "Installed systemd user timers (boards every ${INTERVAL}s, jobs every ${JOBS_INTERVAL}s)"
 echo "  units:  $UNIT_DIR/claude-{,codex-}accounts-poll.{service,timer}"
+echo "          $UNIT_DIR/claude-jobs-publish.{service,timer}"
 echo "  status: systemctl --user list-timers"
 # Without linger a user timer stops at logout, which is exactly when an
 # unattended box needs to keep publishing its board.

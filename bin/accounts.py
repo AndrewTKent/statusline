@@ -408,6 +408,15 @@ def hard_session_limit_enabled() -> bool:
     return value != "0"
 
 
+def handoff_notice_enabled() -> bool:
+    """Off unless set to 1: a relaunched session is told it was moved, so an
+    unattended one can restart the workflows the stopped process took with it."""
+    value = os.environ.get("ACCOUNTS_HANDOFF_NOTICE") or _conf_var(
+        "ACCOUNTS_HANDOFF_NOTICE"
+    )
+    return value == "1"
+
+
 def load_label_pairs() -> list[tuple[str, str, str | None]]:
     pairs: list[tuple[str, str, str | None]] = []
     for pair in _conf_var("ACCOUNT_LABELS").split():

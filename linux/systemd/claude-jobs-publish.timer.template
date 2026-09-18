@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish the unattended Claude job board
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=__JOBS_INTERVAL__
+AccuracySec=5
+Persistent=true
+Unit=claude-jobs-publish.service
+
+[Install]
+WantedBy=timers.target

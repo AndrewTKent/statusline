@@ -42,6 +42,13 @@ LEGACY_DEFAULT_SESSION_NAMES = {" ", "\u2063"}
 ULTRACODE_ENV = "CLAUDE_ROUTER_ULTRACODE"
 SESSION_LIMIT_TEXT = "You've hit your session limit"
 FABLE_LIMIT_TEXT = "You've reached your Fable 5 limit."
+HANDOFF_NOTICE = (
+    "The account router moved this session from {old} to {new} ({reason})."
+    " The previous process was stopped: any in-process workflow, subagent or"
+    " background task it owned is gone. Check what was in flight and relaunch"
+    " it; if nothing was, reply in one line and wait."
+)
+HANDOFF_REASONS = {"session": "session limit", "fable": "fable limit"}
 SYNC_OUTPUT_ON = b"\x1b[?2026h"
 SYNC_OUTPUT_OFF = b"\x1b[?2026l"
 # Erase the screen and the scrollback, then home: the relaunch starts on a blank terminal.
@@ -328,11 +335,17 @@ def transcript_size(path: Path | None) -> int:
         return 0
 
 
+def handoff_notice(old_label: str, new_label: str, limit_kind: str | None) -> str:
+    reason = HANDOFF_REASONS.get(limit_kind or "", "routing change")
+    return HANDOFF_NOTICE.format(old=old_label, new=new_label, reason=reason)
+
+
 def handoff_session_args(
     args: list[str],
     session_id: str,
     model_override: str | None = None,
     effort_override: str | None = None,
+    notice: str | None = None,
 ) -> list[str]:
     launch_args = resume_session_args(
         args,
@@ -340,9 +353,24 @@ def handoff_session_args(
         model_override,
         effort_override,
     )
-    if transcript_size(session_transcript_path(session_id)) > 0:
-        return launch_args
-    return [*launch_args[:-2], "--session-id", session_id]
+    if transcript_size(session_transcript_path(session_id)) <= 0:
+        # No transcript: nothing was in flight, and the selector is the last pair.
+        return [*launch_args[:-2], "--session-id", session_id]
+    if notice:
+        return [*launch_args, notice]
+    return launch_args
+
+
+def seed_handoff_count(state_path: Path, handoffs: int) -> None:
+    """The child's statusline rewrites this file on every render and carries the
+    count forward, so the router only has to seed it after a move."""
+    if handoffs <= 0:
+        return
+    state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp = state_path.with_suffix(".seed")
+    with open(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
+        handle.write(json.dumps({"handoffs": handoffs}) + "\n")
+    os.replace(temp, state_path)
 
 
 def record_limit_kind(record: dict) -> str | None:
@@ -627,6 +655,8 @@ def run_supervised(binary: str, args: list[str]) -> int:
     interval = float(os.environ.get("ACCOUNTS_ROUTER_INTERVAL", ROUTER_INTERVAL_S))
     mode, applied_mode_generation = accounts.load_mode_snapshot()
     hard_session_limit = accounts.hard_session_limit_enabled()
+    notice_on_handoff = accounts.handoff_notice_enabled()
+    handoff_count = 0
     fallback_model = os.environ.get(
         "ACCOUNTS_FABLE_FALLBACK_MODEL",
         FABLE_FALLBACK_MODEL,
@@ -675,6 +705,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     try:
         while True:
             state_path.unlink(missing_ok=True)
+            seed_handoff_count(state_path, handoff_count)
             write_policy_scope(state_path, mode.get("policy_scope", "global"))
             env = routed_environment(
                 selected,
@@ -1020,11 +1051,15 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     current_family = "general"
                     continue
                 stop_for_handoff(child)
+                moved_by = hard_limit_kind if hard_limit_reached else limit_rejected
                 launch_args = handoff_session_args(
                     args,
                     session_id,
                     next_model,
                     current_effort,
+                    handoff_notice(selected["label"], next_profile["label"], moved_by)
+                    if notice_on_handoff
+                    else None,
                 )
                 selected = next_profile
                 model_override = next_override
@@ -1034,6 +1069,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if next_model
                     else current_family
                 )
+                handoff_count += 1
                 handoff = True
                 break
             if not handoff:
@@ -1093,6 +1129,11 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     session_id,
                     next_model,
                     current_effort,
+                    handoff_notice(
+                        selected["label"], next_profile["label"], limit_rejected
+                    )
+                    if notice_on_handoff
+                    else None,
                 )
                 selected = next_profile
                 model_override = next_override
@@ -1102,6 +1143,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if next_model
                     else current_family
                 )
+                handoff_count += 1
                 handoff = True
     finally:
         accounts.remove_session_lease(router_pid)

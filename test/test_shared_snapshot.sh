@@ -183,6 +183,44 @@ board_output=$(render_with_boards)
 [[ "$board_output" != *"cx team-1"* ]] || { printf 'a board rendered its Codex row without being asked\n' >&2; exit 1; }
 codex_rows_output=$(REMOTE_BOARD_CODEX_ROWS=1 render_with_boards)
 [[ "$codex_rows_output" == *"cx team-1"*"37%"* ]] || { printf 'REMOTE_BOARD_CODEX_ROWS=1 did not render the Codex row\n' >&2; exit 1; }
+[[ "$board_output" != *$'\u25b8'* ]] || { printf 'a board without a jobs file rendered a job line\n' >&2; exit 1; }
+cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
+{
+  "version": 1,
+  "generated_at": $NOW,
+  "jobs": {
+    "demo-job": {
+      "state": "running", "branch": "andrew/demo", "head": "abc1234",
+      "account": "team-2", "origin_session": "session-test", "sent_at": $(( NOW - 3600 )),
+      "updated_at": $NOW, "handoffs": 2, "report": false,
+      "workflows": [
+        {"name": "solei loop to sun", "started_at": $(( NOW - 720 )),
+         "agents_started": 15, "agents_done": 14, "agents_failed": 0, "running": true},
+        {"name": "scoping panel", "started_at": $(( NOW - 7200 )),
+         "agents_started": 3, "agents_done": 3, "agents_failed": 0, "running": false}
+      ]
+    },
+    "just-done": {
+      "state": "done", "branch": "andrew/done", "head": "def5678",
+      "account": "team-2", "origin_session": "another-session", "sent_at": $(( NOW - 7200 )),
+      "updated_at": $(( NOW - 120 )), "handoffs": 0, "report": true, "workflows": []
+    },
+    "old-job": {
+      "state": "done", "branch": "andrew/old", "head": "9abcdef",
+      "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": true, "workflows": []
+    }
+  }
+}
+JSON
+jobs_output=$(render_with_boards)
+[[ "$jobs_output" == *"demo-job"*"running"*"team-2"* ]] || { printf 'a running job did not name the account it is on\n' >&2; exit 1; }
+[[ "$(printf '%s\n' "$jobs_output" | grep -c 'this session')" = "1" && "$jobs_output" == *"demo-job"*"this session"* ]] || { printf 'only the job this session sent is marked as its own\n' >&2; exit 1; }
+[[ "$jobs_output" == *"2 handoffs"* ]] || { printf 'a running job did not count the moves the router made\n' >&2; exit 1; }
+[[ "$jobs_output" == *"solei loop to sun"*"14/15 agents"* ]] || { printf "a running job's running workflow did not render\n" >&2; exit 1; }
+[[ "$jobs_output" != *"scoping panel"* ]] || { printf 'a workflow that is not running still rendered\n' >&2; exit 1; }
+[[ "$jobs_output" == *"just-done"*"done"*"2m ago"* ]] || { printf 'a job that finished recently did not render its state and age\n' >&2; exit 1; }
+[[ "$jobs_output" != *"old-job"* ]] || { printf 'a job that finished long ago still rendered\n' >&2; exit 1; }
 board_table_line=$(printf '%s\n' "$board_output" | grep -n 'Work' | head -1 | cut -d: -f1)
 board_header_line=$(printf '%s\n' "$board_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
 [ "$board_header_line" -gt "$board_table_line" ] || { printf 'the board block did not render under the local table\n' >&2; exit 1; }
@@ -196,6 +234,8 @@ write_board_meta "$NOW" false
 stopped_board_output=$(render_with_boards)
 [[ "$stopped_board_output" == *"devbox · stopped"* ]] || { printf 'a stopped board did not say so\n' >&2; exit 1; }
 [[ "$stopped_board_output" != *"· Team-1 "* ]] || { printf 'a stopped board still rendered rows\n' >&2; exit 1; }
+[[ "$stopped_board_output" != *"demo-job"* ]] || { printf 'a stopped board still rendered its jobs\n' >&2; exit 1; }
+rm -f "$REMOTE_ROOT_DIR/devbox/jobs.json"
 
 mkdir -p "$SANDBOX/empty-remote"
 no_board_output=$(render_with_boards "$SANDBOX/empty-remote")
