@@ -71,6 +71,33 @@
 # refuse instead, for unattended runs where a doomed session is worse than a stop.
 # ACCOUNTS_STRICT_QUOTA=1
 
+# ─── Remote account boards ─────────────────────────────────────────────────
+# Show another machine's account board under this one's. That machine runs the
+# same router and polls its own accounts; `accounts poll` here copies the two
+# snapshot files it publishes into ~/.accounts/remote/<name>/ over SSH, and the
+# status line reads only those local copies. Credentials never cross — only
+# percentages, reset times, labels and plan names.
+#
+# Space-separated <name>:<ssh-host> pairs. <name> is the label in the status
+# line and the directory under ~/.accounts/remote.
+# REMOTE_ACCOUNT_BOARDS="devbox:devbox"
+
+# Optional per-board liveness check, one variable per board name (uppercased,
+# non-alphanumerics become "_"). Exit 0 means up. A board that reports down is
+# never contacted, so a stopped machine is neither woken nor waited on.
+# It runs as `bash -lc` under the poller's own environment, which is not your
+# interactive shell — spell out the path to anything outside the system PATH.
+# REMOTE_BOARD_UP_DEVBOX='"$HOME/.local/bin/devbox-cli" status | grep -q running'
+
+# Seconds between pulls, and the age past which a board's numbers render dimmed
+# with their age instead of as current. Defaults: 120 and 900.
+# REMOTE_BOARD_PULL_INTERVAL=120
+# REMOTE_BOARD_MAX_AGE=900
+
+# A board's Codex accounts render in the Codex statusline only. Set to 1 to
+# also list them under the board's Claude rows here.
+# REMOTE_BOARD_CODEX_ROWS=0
+
 # ─── Token classifier (optional; for scan-tokens.py) ───────────────────────
 # Classify each token request as work / personal / unknown. Independent of
 # EMAIL_PAYER_MAP — email is about payment, work-type is about what you did.

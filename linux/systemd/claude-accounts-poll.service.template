@@ -1,0 +1,15 @@
+# Template for the accounts usage-poll systemd user service.
+# linux/systemd/install-accounts-poll.sh populates HOME and installs it into
+# ~/.config/systemd/user/.
+#
+# Type=oneshot with a paired timer: the job exits after each poll, so the timer
+# owns the cadence and a failed poll cannot turn into a restart loop.
+
+[Unit]
+Description=Refresh the Claude account usage board
+
+[Service]
+Type=oneshot
+Environment=HOME=__HOME__
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=__HOME__/.local/bin/accounts poll

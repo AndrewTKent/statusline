@@ -41,6 +41,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import remote_boards
+
 HOME = Path.home()
 LIVE_SERVICE = "Claude Code-credentials"
 LOCK_PATH = HOME / ".claude" / "accounts.lock"
@@ -638,7 +640,6 @@ def poll_and_write_snapshot(*, collector_locked: bool = False) -> int:
         n = poll_blobs_usage(blobs)
         if shared_snapshot_enabled():
             write_statusline_snapshot(blobs, error=None)
-        return n
     except Exception as exc:
         if shared_snapshot_enabled():
             try:
@@ -646,6 +647,9 @@ def poll_and_write_snapshot(*, collector_locked: bool = False) -> int:
             except Exception:
                 pass
         raise
+    # Other machines' boards ride the same poll: the render path never reaches the network.
+    remote_boards.refresh_all(_conf_var)
+    return n
 
 
 def cmd_poll(_args) -> None:

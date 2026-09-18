@@ -156,6 +156,34 @@ so it can chain after `scan-tokens.py` in the 60s launchd poll for free.
 }
 ```
 
+## Remote boards
+
+`accounts poll` publishes this machine's board to
+`~/.accounts/statusline-snapshot.json` (and `codex-accounts poll` to
+`~/.codex-accounts/usage.json`). A machine configured with
+`REMOTE_ACCOUNT_BOARDS` copies those same two files from each named board:
+
+```
+board machine                          this machine
+  accounts poll ────► snapshot.json        accounts poll
+  codex-accounts poll ► usage.json    ──ssh──► ~/.accounts/remote/<name>/
+                                                 statusline-snapshot.json
+                                                 codex-usage.json
+                                                 meta.json  (fetched_at, error, up)
+                                                      │
+                                               statusline.sh / codex_statusline.py
+```
+
+`bin/remote_boards.py` owns the pull. Properties the renderers depend on:
+
+- The pull happens on the poll, never on a render — no renderer opens a socket.
+- Exactly the two files above are read from a board, and every document is
+  scrubbed of token-shaped keys before it is written.
+- `meta.json` carries `fetched_at` (last *success*), the last `error`, and the
+  up-check verdict, so a stale or failed pull keeps the previous numbers and
+  states its age instead of rendering zeros.
+- A board whose up-check exits non-zero is not contacted at all.
+
 ## Classification precedence
 
 Every request gets two labels:
@@ -191,7 +219,12 @@ Every request gets two labels:
 macos/launchd/install-daemon.sh            # install / reload
 macos/launchd/install-daemon.sh --remove   # unload and delete plist
 macos/launchd/install-accounts-poll.sh     # account-board poller (1m); --remove to drop
+linux/systemd/install-agents.sh            # Linux: the same pollers as user timers
 ```
+
+`install-account-router.sh` picks the right one by platform. On Linux the timers
+are systemd *user* units, so `loginctl enable-linger $USER` is what keeps a board
+publishing after logout.
 
 ## Testing
 

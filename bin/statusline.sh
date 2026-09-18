@@ -723,6 +723,151 @@ shared_reset_relative() {
     fi
 }
 
+remote_age_text() {
+    local seconds="${1:-0}"
+    case "$seconds" in ''|*[!0-9-]*) seconds=0 ;; esac
+    [ "$seconds" -lt 0 ] 2>/dev/null && seconds=0
+    if [ "$seconds" -lt 60 ]; then
+        printf '%ds' "$seconds"
+    elif [ "$seconds" -lt 3600 ]; then
+        printf '%dm' "$(( seconds / 60 ))"
+    elif [ "$seconds" -lt 86400 ]; then
+        printf '%dh' "$(( seconds / 3600 ))"
+    else
+        printf '%dd' "$(( seconds / 86400 ))"
+    fi
+}
+
+remote_epoch_relative() {
+    local epoch="$1" now delta
+    case "$epoch" in ''|*[!0-9]*|0) printf '—'; return ;; esac
+    now=$(date +%s)
+    delta=$(( epoch - now ))
+    [ "$delta" -le 0 ] && { printf 'now'; return; }
+    remote_age_text "$delta"
+}
+
+remote_board_labels() {
+    local root="$1" board_dir board_name
+    [ -d "$root" ] || return 0
+    local -a board_dirs
+    # set +f locally: script-wide `set -f` (L3) blocks glob expansion otherwise.
+    set +f
+    board_dirs=( "$root"/*/ )
+    set -f
+    for board_dir in "${board_dirs[@]}"; do
+        [ -d "$board_dir" ] || continue
+        board_name="${board_dir%/}"; board_name="${board_name##*/}"
+        jq -r --arg board "$board_name" '(.accounts // {}) | keys[] | $board + "/" + .' \
+            "$board_dir/statusline-snapshot.json" 2>/dev/null
+        [ "${REMOTE_BOARD_CODEX_ROWS:-0}" = "1" ] || continue
+        jq -r 'keys[] | "cx " + .' "$board_dir/codex-usage.json" 2>/dev/null
+    done
+}
+
+# Boards other machines publish, pulled to ~/.accounts/remote by `accounts poll`.
+# Reads only those local copies: the render path never touches the network.
+remote_board_lines() {
+    local root="$1" max_age="$2" name_width="$3" now_epoch
+    local RB_SEP=$'\037'
+    [ -d "$root" ] || return 0
+    case "$max_age" in ''|*[!0-9]*|0) max_age=900 ;; esac
+    now_epoch=$(date +%s)
+    local board_dir board_name fetched_at board_error board_up age fresh
+    local rows codex_rows row_label row_five row_five_reset row_seven row_fable row_fable_reset row_expired
+    local cx_label cx_five cx_five_reset cx_week cx_week_reset cx_error
+    local pad_name five_color seven_color fable_color suffix
+    _rb_ralign() {
+        local value="$1" width="$2" padding
+        padding=$(( width - ${#value} ))
+        [ "$padding" -lt 0 ] && padding=0
+        printf '%*s%s' "$padding" '' "$value"
+    }
+    local -a board_dirs
+    # set +f locally: script-wide `set -f` (L3) blocks glob expansion otherwise.
+    set +f
+    board_dirs=( "$root"/*/ )
+    set -f
+    for board_dir in "${board_dirs[@]}"; do
+        [ -d "$board_dir" ] || continue
+        board_name="${board_dir%/}"; board_name="${board_name##*/}"
+        fetched_at=0; board_error=""; board_up="null"
+        eval "$(jq -r '
+            "fetched_at=" + (((.fetched_at // 0) | floor) | tostring | @sh),
+            "board_error=" + ((.error // "") | tostring | @sh),
+            "board_up=" + ((.up | tostring) | @sh)
+        ' "$board_dir/meta.json" 2>/dev/null)"
+        if [ "$board_up" = "false" ]; then
+            printf '%b\n' "${dim}· ${board_name} · stopped${reset}"
+            continue
+        fi
+        case "$fetched_at" in ''|*[!0-9]*) fetched_at=0 ;; esac
+        if [ "$fetched_at" -le 0 ]; then
+            printf '%b\n' "${dim}· ${board_name} · no data${board_error:+ · $board_error}${reset}"
+            continue
+        fi
+        age=$(( now_epoch - fetched_at ))
+        [ "$age" -lt 0 ] && age=0
+        fresh=true
+        { [ -n "$board_error" ] || [ "$age" -gt "$max_age" ]; } && fresh=false
+        suffix=""
+        [ -n "$board_error" ] && suffix=" · ${board_error}"
+        printf '%b\n' "${dim}· ${board_name} · $(remote_age_text "$age") ago${suffix}${reset}"
+        rows=$(jq -r '
+            (.accounts // {}) | to_entries[] |
+            ((.value.scoped // [] | map(select((.label // "" | ascii_downcase) == "fable")) | first) // {}) as $fable |
+            [.key, (.value.five_hour.used_pct // ""), (.value.five_hour.resets_at // ""),
+             (.value.seven_day.used_pct // ""), ($fable.used_pct // ""), ($fable.resets_at // ""),
+             (.value.expired // false)] | map(tostring) | join("")
+        ' "$board_dir/statusline-snapshot.json" 2>/dev/null)
+        while IFS=$RB_SEP read -r row_label row_five row_five_reset row_seven row_fable row_fable_reset row_expired; do
+            [ -z "$row_label" ] && continue
+            [ -z "$row_five" ] && row_five="—" || printf -v row_five '%.0f%%' "$row_five"
+            [ -z "$row_seven" ] && row_seven="—" || printf -v row_seven '%.0f%%' "$row_seven"
+            [ -z "$row_fable" ] && row_fable="—" || printf -v row_fable '%.0f%%' "$row_fable"
+            row_five_reset=$(shared_reset_relative "$row_five_reset" false)
+            row_fable_reset=$(shared_reset_relative "$row_fable_reset" false)
+            five_color="$dim"; seven_color="$dim"; fable_color="$dim"
+            if $fresh; then
+                [ "$row_five" != "—" ] && five_color=$(color_for_pct "${row_five%\%}")
+                [ "$row_seven" != "—" ] && seven_color=$(color_for_pct "${row_seven%\%}")
+                [ "$row_fable" != "—" ] && fable_color=$(color_for_pct "${row_fable%\%}")
+            fi
+            printf -v pad_name '%-*s' "$name_width" "${board_name}/${row_label}"
+            suffix=""
+            [ "$row_expired" = "true" ] && suffix=" ${red}⚠ needs reauth${reset}"
+            printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$row_five" 4)${reset}  ${dim}$(_rb_ralign "$row_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$row_seven" 4)${reset}   ${fable_color}$(_rb_ralign "$row_fable" 5)${reset}  ${dim}$(_rb_ralign "$row_fable_reset" 6)${reset}${suffix}"
+        done <<< "$rows"
+        # Codex accounts belong to the Codex footer unless the user asks for both here.
+        [ "${REMOTE_BOARD_CODEX_ROWS:-0}" = "1" ] || continue
+        codex_rows=$(jq -r '
+            to_entries[] | .key as $label | ((.value.rate_limits // {})) as $limits |
+            ([$limits.primary, $limits.secondary] | map(select(type == "object" and .used_percent != null))) as $windows |
+            (($windows | map(select(((.window_duration_mins // .window_minutes) // 0) >= 1440)) | first) // {}) as $week |
+            (($windows | map(select(((.window_duration_mins // .window_minutes) // 0) < 1440)) | first) // {}) as $five |
+            [$label, ($five.used_percent // ""), ($five.resets_at // ""),
+             ($week.used_percent // ""), ($week.resets_at // ""), (.value.error // "")] |
+            map(tostring) | join("")
+        ' "$board_dir/codex-usage.json" 2>/dev/null)
+        while IFS=$RB_SEP read -r cx_label cx_five cx_five_reset cx_week cx_week_reset cx_error; do
+            [ -z "$cx_label" ] && continue
+            [ -z "$cx_five" ] && cx_five="—" || printf -v cx_five '%.0f%%' "$cx_five"
+            [ -z "$cx_week" ] && cx_week="—" || printf -v cx_week '%.0f%%' "$cx_week"
+            cx_five_reset=$(remote_epoch_relative "$cx_five_reset")
+            cx_week_reset=$(remote_epoch_relative "$cx_week_reset")
+            five_color="$dim"; seven_color="$dim"
+            if $fresh; then
+                [ "$cx_five" != "—" ] && five_color=$(color_for_pct "${cx_five%\%}")
+                [ "$cx_week" != "—" ] && seven_color=$(color_for_pct "${cx_week%\%}")
+            fi
+            printf -v pad_name '%-*s' "$name_width" "cx ${cx_label}"
+            suffix=""
+            [ -n "$cx_error" ] && suffix=" ${dim}~ ${cx_error}${reset}"
+            printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$cx_five" 4)${reset}  ${dim}$(_rb_ralign "$cx_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$cx_week" 4)${reset}   ${dim}$(_rb_ralign "—" 5)${reset}  ${dim}$(_rb_ralign "$cx_week_reset" 6)${reset}${suffix}"
+        done <<< "$codex_rows"
+    done
+}
+
 render_shared_account_snapshot() {
     local snapshot_file="${SHARED_ACCOUNT_SNAPSHOT_FILE:-$HOME/.accounts/statusline-snapshot.json}"
     local before="" after="" snapshot="" snapshot_state="missing" snapshot_values="" shared_status_parsed=false
@@ -1046,7 +1191,12 @@ render_shared_account_snapshot() {
         local rows sorted_rows="" sort_key row_label row_display row_five row_five_reset row_five_stale row_five_pending
         local row_seven row_seven_reset row_seven_stale row_seven_pending row_scoped row_scoped_label
         local row_scoped_reset row_scoped_stale row_scoped_pending row_expired row_leases marker
-        local name_width=9
+        local name_width=9 remote_label remote_line
+        local remote_root="${REMOTE_BOARDS_DIR:-$HOME/.accounts/remote}"
+        while IFS= read -r remote_label; do
+            [ -z "$remote_label" ] && continue
+            [ "${#remote_label}" -gt "$name_width" ] && name_width=${#remote_label}
+        done <<< "$(remote_board_labels "$remote_root")"
         while IFS=$'\037' read -r row_label row_five row_five_reset row_five_stale row_five_pending \
             row_seven row_seven_reset row_seven_stale row_seven_pending row_scoped row_scoped_label \
             row_scoped_reset row_scoped_stale row_scoped_pending row_expired row_leases; do
@@ -1101,6 +1251,9 @@ render_shared_account_snapshot() {
                 "$(_shared_ralign "$row_five_reset" 6)" "$(_shared_ralign "$row_seven" 4)" \
                 "$(_shared_ralign "$row_scoped" 5)" "$(_shared_ralign "$row_scoped_reset" 6)" "$row_suffix"
         done <<< "$rows"
+        while IFS= read -r remote_line; do
+            [ -n "$remote_line" ] && _shared_emit '%b' "$remote_line"
+        done <<< "$(remote_board_lines "$remote_root" "${REMOTE_BOARD_MAX_AGE:-900}" "$name_width")"
     fi
 
     local rendered="${shared_output%$'\n'}" plain max_width=0 line width
