@@ -25,12 +25,14 @@ REMOTE_ROOT = HOME / ".accounts" / "remote"
 
 CLAUDE_SNAPSHOT = "statusline-snapshot.json"
 CODEX_USAGE = "codex-usage.json"
+JOBS = "jobs.json"
 META = "meta.json"
 
-# The whole contract with a board: these two files, nothing else.
+# The whole contract with a board: these three files, nothing else.
 PULLED_FILES = (
     (CLAUDE_SNAPSHOT, "$HOME/.accounts/statusline-snapshot.json"),
     (CODEX_USAGE, "$HOME/.codex-accounts/usage.json"),
+    (JOBS, "$HOME/handoffs/jobs.json"),
 )
 
 BOARD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
@@ -40,6 +42,7 @@ CONNECT_TIMEOUT_S = 5
 FETCH_TIMEOUT_S = 25
 UP_CHECK_TIMEOUT_S = 20
 DEFAULT_PULL_INTERVAL_S = 120.0
+RUNNING_JOB_PULL_INTERVAL_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,16 @@ def prune(names: set[str]) -> None:
             shutil.rmtree(entry, ignore_errors=True)
 
 
+def has_running_job(name: str) -> bool:
+    document = read_json(REMOTE_ROOT / name / JOBS, {})
+    jobs = document.get("jobs") if isinstance(document, dict) else None
+    if not isinstance(jobs, dict):
+        return False
+    return any(
+        isinstance(job, dict) and job.get("state") == "running" for job in jobs.values()
+    )
+
+
 def refresh_all(conf_var, *, now: float | None = None, runner=None) -> list[dict]:
     boards = parse_boards(conf_var("REMOTE_ACCOUNT_BOARDS"), conf_var)
     prune({board.name for board in boards})
@@ -214,8 +227,12 @@ def refresh_all(conf_var, *, now: float | None = None, runner=None) -> list[dict
     for board in boards:
         previous = read_json(REMOTE_ROOT / board.name / META, {})
         attempted_at = previous.get("attempted_at") if isinstance(previous, dict) else 0
+        # A board running a job is worth watching at the job's pace, not the board's.
+        board_interval = interval
+        if has_running_job(board.name):
+            board_interval = min(interval, RUNNING_JOB_PULL_INTERVAL_S)
         try:
-            due = now - float(attempted_at or 0) >= interval
+            due = now - float(attempted_at or 0) >= board_interval
         except (TypeError, ValueError):
             due = True
         if due:

@@ -663,9 +663,13 @@ if [ -z "$effort_val" ] && [ "${SHARED_ACCOUNT_SNAPSHOT:-0}" != "1" ]; then
 fi
 effort_label="$effort_val"
 prior_router_effort=""
+# The router seeds the move count here and every render carries it forward.
+prior_router_handoffs=0
 if [[ "${ACCOUNTS_ROUTER_STATE:-}" == /tmp/claude/account-router-*.json ]] &&
    [ -f "$ACCOUNTS_ROUTER_STATE" ]; then
     prior_router_effort=$(jq -r '.effort // empty' "$ACCOUNTS_ROUTER_STATE" 2>/dev/null)
+    prior_router_handoffs=$(jq -r '(.handoffs // 0) | floor' "$ACCOUNTS_ROUTER_STATE" 2>/dev/null)
+    case "$prior_router_handoffs" in ''|*[!0-9]*) prior_router_handoffs=0 ;; esac
 fi
 if [ "${CLAUDE_ROUTER_ULTRACODE:-}" = "1" ] && [ "$effort_val" = "xhigh" ]; then
     if [ -z "$prior_router_effort" ] || [ "$prior_router_effort" = "ultracode" ]; then
@@ -747,9 +751,23 @@ remote_epoch_relative() {
     remote_age_text "$delta"
 }
 
+# Jobs shown: running, or finished recently enough to still be news.
+REMOTE_JOB_WINDOW_S=1800
+
+remote_job_slugs() {
+    local board_dir="$1" now_epoch="$2"
+    jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
+        --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" '
+        (.jobs // {}) | to_entries[]
+        | select(.value.state == "running" or ((.value.updated_at // 0) >= $cutoff))
+        | .key[0:$cap]
+    ' "$board_dir/jobs.json" 2>/dev/null
+}
+
 remote_board_labels() {
-    local root="$1" board_dir
+    local root="$1" board_dir now_epoch
     [ -d "$root" ] || return 0
+    now_epoch=$(date +%s)
     local -a board_dirs
     # set +f locally: script-wide `set -f` (L3) blocks glob expansion otherwise.
     set +f
@@ -759,9 +777,70 @@ remote_board_labels() {
         [ -d "$board_dir" ] || continue
         jq -r '(.accounts // {}) | keys[]' \
             "$board_dir/statusline-snapshot.json" 2>/dev/null
+        remote_job_slugs "$board_dir" "$now_epoch"
         [ "${REMOTE_BOARD_CODEX_ROWS:-0}" = "1" ] || continue
         jq -r 'keys[] | "cx " + .' "$board_dir/codex-usage.json" 2>/dev/null
     done
+}
+
+# Unattended sessions a board is running, published by its jobs publisher. A
+# running job also lists the workflows it still has agents out on.
+remote_job_lines() {
+    local board_dir="$1" name_width="$2" fresh="$3" now_epoch="$4"
+    local RJ_SEP=$'\037'
+    [ -r "$board_dir/jobs.json" ] || return 0
+    local rows kind one two three four five six
+    local padded detail state_color job_color age plural
+    rows=$(jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
+        --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" '
+        (.jobs // {}) | to_entries[]
+        | select(.value.state == "running" or ((.value.updated_at // 0) >= $cutoff))
+        | (["job", .key[0:$cap], (.value.state // ""), (.value.account // ""),
+            ((.value.handoffs // 0) | tostring), ((.value.updated_at // 0) | tostring),
+            (if $sid != "" and (.value.origin_session // "") == $sid then "mine" else "" end)]
+           | join("")),
+          (select(.value.state == "running")
+           | (.value.workflows // [])[] | select(.running == true)
+           | ["wf", (.name // ""), ((.agents_done // 0) | tostring),
+              ((.agents_started // 0) | tostring), ((.agents_failed // 0) | tostring),
+              ((.started_at // 0) | tostring)]
+           | join(""))
+    ' "$board_dir/jobs.json" 2>/dev/null)
+    while IFS=$RJ_SEP read -r kind one two three four five six; do
+        case "$four" in ''|*[!0-9]*) four=0 ;; esac
+        case "$five" in ''|*[!0-9]*) five=0 ;; esac
+        case "$kind" in
+            job)
+                case "$two" in
+                    running) job_color="$green" ;;
+                    blocked) job_color="$red" ;;
+                    *)       job_color="$dim" ;;
+                esac
+                $fresh || job_color="$dim"
+                if [ "$two" = "running" ]; then
+                    detail=""
+                    [ -n "$three" ] && detail+=" ${dim}· ${three}${reset}"
+                    if [ "$four" -gt 0 ]; then
+                        plural="handoffs"; [ "$four" = "1" ] && plural="handoff"
+                        detail+=" ${dim}· ${four} ${plural}${reset}"
+                    fi
+                else
+                    detail=" ${dim}· $(remote_age_text "$(( now_epoch - five ))") ago${reset}"
+                fi
+                # The session that sent a job sees which of the box's jobs is its own.
+                [ "$six" = "mine" ] && detail+=" ${white}\xe2\x86\x90 this session${reset}"
+                printf -v padded '%-*s' "$name_width" "$one"
+                printf '%b\n' "${dim}· \xe2\x96\xb8${reset} ${dim}${padded}${reset} ${job_color}${two}${reset}${detail}"
+                ;;
+            wf)
+                age=$(remote_age_text "$(( now_epoch - five ))")
+                state_color="$dim"; $fresh && state_color="$cyan"
+                detail=""
+                [ "$four" -gt 0 ] && detail=" ${dim}· ${reset}${red}${four} failed${reset}"
+                printf '%b\n' "${dim}·     ${one}${reset} ${state_color}${two}/${three}${reset} ${dim}agents · ${age}${reset}${detail}"
+                ;;
+        esac
+    done <<< "$rows"
 }
 
 # Boards other machines publish, pulled to ~/.accounts/remote by `accounts poll`.
@@ -839,6 +918,7 @@ remote_board_lines() {
             [ "$row_expired" = "true" ] && suffix=" ${red}⚠ needs reauth${reset}"
             printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$row_five" 4)${reset}  ${dim}$(_rb_ralign "$row_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$row_seven" 4)${reset}   ${fable_color}$(_rb_ralign "$row_fable" 5)${reset}  ${dim}$(_rb_ralign "$row_fable_reset" 6)${reset}${suffix}"
         done <<< "$rows"
+        remote_job_lines "$board_dir" "$name_width" "$fresh" "$now_epoch"
         # Codex accounts belong to the Codex footer unless the user asks for both here.
         [ "${REMOTE_BOARD_CODEX_ROWS:-0}" = "1" ] || continue
         codex_rows=$(jq -r '
@@ -1300,7 +1380,8 @@ if [ "${SHARED_ACCOUNT_SNAPSHOT:-0}" = "1" ]; then
             --arg effort "$effort_label" \
             --arg label "${ACCOUNTS_ROUTED_LABEL:-}" \
             --arg cwd "$CWD" \
-            '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd}' \
+            --argjson handoffs "$prior_router_handoffs" \
+            '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd,handoffs:$handoffs}' \
             > "$_router_state_tmp" 2>/dev/null &&
             chmod 600 "$_router_state_tmp" 2>/dev/null &&
             mv "$_router_state_tmp" "$ACCOUNTS_ROUTER_STATE" 2>/dev/null
@@ -1457,7 +1538,8 @@ if [[ "${ACCOUNTS_ROUTER_STATE:-}" == /tmp/claude/account-router-*.json ]] &&
         --arg effort "$effort_label" \
         --arg label "$ACCT_TAG" \
         --arg cwd "$CWD" \
-        '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd}' \
+        --argjson handoffs "$prior_router_handoffs" \
+        '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd,handoffs:$handoffs}' \
         > "$_router_state_tmp" 2>/dev/null &&
         chmod 600 "$_router_state_tmp" 2>/dev/null &&
         mv "$_router_state_tmp" "$ACCOUNTS_ROUTER_STATE" 2>/dev/null

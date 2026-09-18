@@ -19,6 +19,7 @@ SNAPSHOT = {
     "accounts": {"team-1": {"five_hour": {"used_pct": 12}, "seven_day": {"used_pct": 30}}},
 }
 CODEX_USAGE = {"team-1": {"fetched_at": 1000, "rate_limits": {"primary": {"used_percent": 4}}}}
+JOBS = {"version": 1, "generated_at": 1000, "jobs": {"demo": {"state": "running"}}}
 
 
 def encoded(*documents):
@@ -54,12 +55,13 @@ class TestConfig:
         assert boards == [remote_boards.Board("devbox", "devbox-host", "is-it-up")]
 
 
-def test_the_fetch_asks_for_exactly_the_two_published_files():
+def test_the_fetch_asks_for_exactly_the_three_published_files():
     command = remote_boards.fetch_command()
 
     assert set(re.findall(r"\$HOME/[^\"\s]+", command)) == {
         "$HOME/.accounts/statusline-snapshot.json",
         "$HOME/.codex-accounts/usage.json",
+        "$HOME/handoffs/jobs.json",
     }
 
 
@@ -80,7 +82,7 @@ class TestRefreshBoard:
         board = remote_boards.Board("devbox", "devbox-host")
 
         remote_boards.refresh_board(
-            board, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE))
+            board, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, None))
         )
 
         assert sorted(entry.name for entry in (root / "devbox").iterdir()) == [
@@ -92,7 +94,7 @@ class TestRefreshBoard:
     def test_a_failed_pull_keeps_the_last_numbers_and_records_the_error(self, root):
         board = remote_boards.Board("devbox", "devbox-host")
         remote_boards.refresh_board(
-            board, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE))
+            board, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, None))
         )
 
         remote_boards.refresh_board(
@@ -122,11 +124,11 @@ class TestRefreshAll:
         boards = "devbox:devbox-host"
         settings = conf({"REMOTE_ACCOUNT_BOARDS": boards, "REMOTE_BOARD_PULL_INTERVAL": "120"})
         remote_boards.refresh_all(
-            settings, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE))
+            settings, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, None))
         )
 
         results = remote_boards.refresh_all(
-            settings, now=2060.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE))
+            settings, now=2060.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, None))
         )
 
         assert results == []
@@ -134,9 +136,20 @@ class TestRefreshAll:
     def test_a_board_dropped_from_the_config_loses_its_pulled_copy(self, root):
         settings = conf({"REMOTE_ACCOUNT_BOARDS": "devbox:devbox-host"})
         remote_boards.refresh_all(
-            settings, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE))
+            settings, now=2000.0, runner=lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, None))
         )
 
         remote_boards.refresh_all(conf({}), now=2000.0, runner=lambda argv, timeout: ok())
 
         assert not (root / "devbox").exists()
+
+
+class TestRunningJobs:
+    def test_a_board_running_a_job_is_pulled_again_inside_the_board_interval(self, root):
+        settings = conf({"REMOTE_ACCOUNT_BOARDS": "devbox:devbox-host", "REMOTE_BOARD_PULL_INTERVAL": "120"})
+        pull = lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, JOBS))
+        remote_boards.refresh_all(settings, now=2000.0, runner=pull)
+
+        results = remote_boards.refresh_all(settings, now=2060.0, runner=pull)
+
+        assert [meta["name"] for meta in results] == ["devbox"]

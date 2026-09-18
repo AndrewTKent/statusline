@@ -505,6 +505,8 @@ files that poll publishes and renders them below its local table.
 · Personal            0%       —   100%      8%     23h
 · devbox · 1m ago
 · Team-1             12%   3h40m    26%      4%      5d
+· ▸ iri-1234-cache   running · Team-1 · 2 handoffs
+·     solei loop to sun 14/15 agents · 12m
 ```
 
 On the machine being watched, install the router and let its poller run:
@@ -541,6 +543,41 @@ Mechanics, and the reason they are worth knowing:
   Codex quota rows, which appear in this machine's Codex statusline and
   `codex-top`. `REMOTE_BOARD_CODEX_ROWS=1` also lists them, as `cx <label>`,
   under the board's Claude rows.
+
+### Unattended jobs on a board
+
+A board that runs unattended Claude Code sessions publishes them too, and they
+render under its account rows: one line per job, and under a running job one
+line per workflow that still has agents out.
+
+On the board, each job is a tmux session working out of `~/handoffs/<slug>/`.
+The `jobs-publish` timer installed with the router rewrites `~/handoffs/jobs.json`
+every 30 seconds, and `accounts poll` here copies it alongside the two board
+files.
+
+- **State is observed, not reported.** A job is `running` while its tmux session
+  is alive, `done` or `blocked` once it writes a `report.md` (`status: blocked`
+  on the first line means blocked), and `gone` when it has neither. A wedged
+  session cannot claim to be healthy.
+- **Workflow progress comes from Claude Code's own journals.** A workflow counts
+  as running when agents it started have no result yet and the job is still
+  running. `14/15 agents` is agents finished over agents started.
+- **A board with a running job is pulled every 30 seconds** instead of
+  `REMOTE_BOARD_PULL_INTERVAL`, and drops back when the last job stops.
+- **Recently finished jobs stay visible for half an hour**, showing their state
+  and age, then drop off. `REMOTE_JOB_NAME_MAX` (default 20) caps the name so a
+  long branch cannot widen the table.
+
+### Being told the session was moved
+
+A cross-account move stops the running process and relaunches it on `--resume`.
+Claude Code adds "Continue from where you left off." only when the transcript
+ends mid-turn, so a session that was idle between turns never learns it moved —
+and any in-process workflow, subagent or background task died with the old
+process. `ACCOUNTS_HANDOFF_NOTICE=1` makes the relaunch carry a first message
+naming the accounts, the reason, and what was lost, so an unattended session can
+restart what was in flight. Off by default; a session with no transcript to
+resume never gets one.
 
 ---
 

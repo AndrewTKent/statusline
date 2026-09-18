@@ -27,6 +27,7 @@ ln -s "$HOME/.local/share/claude/versions/2.0.0" "$HOME/.local/bin/claude"
 [ "$(readlink "$HOME/.local/bin/codex-accounts")" = "$HOME/.local/lib/statusline/codex_accounts.py" ]
 [ "$(readlink "$HOME/.local/bin/codex-router")" = "$HOME/.local/lib/statusline/codex-router.py" ]
 [ "$(readlink "$HOME/.local/bin/codex-account-session")" = "$HOME/.local/lib/statusline/codex-account-session.py" ]
+[ "$(readlink "$HOME/.local/bin/jobs-publish")" = "$HOME/.local/lib/statusline/remote_jobs.py" ]
 [ "$(readlink "$HOME/.codex-accounts/bin/codex")" = "$HOME/.local/bin/codex-supervised" ]
 [ ! -L "$HOME/.local/bin/claude" ]
 grep -q claude-router "$HOME/.local/bin/claude"

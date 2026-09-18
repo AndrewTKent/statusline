@@ -23,8 +23,9 @@ SPEC.loader.exec_module(claude_router)
 
 
 @pytest.fixture(autouse=True)
-def disable_host_hard_session_limit(monkeypatch):
+def ignore_host_conf(monkeypatch):
     monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
+    monkeypatch.setenv("ACCOUNTS_HANDOFF_NOTICE", "0")
 
 
 @pytest.mark.parametrize(
@@ -3711,3 +3712,53 @@ def test_fable_mode_does_not_hand_a_session_back_to_the_wall_it_just_left(tmp_pa
     launches = [json.loads(line) for line in log_path.read_text().splitlines()]
 
     assert [launch["label"] for launch in launches] == ["spent", "fresh"]
+
+
+class TestHandoffNotice:
+    def test_a_relaunch_carries_the_notice_as_its_last_argument(self, tmp_path, monkeypatch):
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text('{"type":"user"}\n')
+        monkeypatch.setattr(claude_router, "session_transcript_path", lambda _s: transcript)
+
+        args = claude_router.handoff_session_args(
+            ["--model", "opus"], "sid-1", notice="moved"
+        )
+
+        assert args[-3:] == ["--resume", "sid-1", "moved"]
+
+    def test_a_relaunch_with_nothing_to_resume_carries_no_notice(self, monkeypatch):
+        monkeypatch.setattr(claude_router, "session_transcript_path", lambda _s: None)
+
+        args = claude_router.handoff_session_args(
+            ["--model", "opus"], "sid-1", notice="moved"
+        )
+
+        assert args == ["--model", "opus", "--session-id", "sid-1"]
+
+    def test_the_notice_names_the_wall_that_moved_the_session(self):
+        reasons = [
+            claude_router.handoff_notice("a", "b", kind)
+            for kind in ("session", "fable", None)
+        ]
+
+        assert [text.split("(")[1].split(")")[0] for text in reasons] == [
+            "session limit",
+            "fable limit",
+            "routing change",
+        ]
+
+
+class TestHandoffCount:
+    def test_the_move_count_is_seeded_where_the_status_line_carries_it_forward(self, tmp_path):
+        state = tmp_path / "account-router-1.json"
+
+        claude_router.seed_handoff_count(state, 2)
+
+        assert json.loads(state.read_text()) == {"handoffs": 2}
+
+    def test_a_session_that_never_moved_leaves_no_state_behind(self, tmp_path):
+        state = tmp_path / "account-router-1.json"
+
+        claude_router.seed_handoff_count(state, 0)
+
+        assert not state.exists()

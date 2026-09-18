@@ -167,8 +167,9 @@ so it can chain after `scan-tokens.py` in the 60s launchd poll for free.
 board machine                          this machine
   accounts poll ────► snapshot.json        accounts poll
   codex-accounts poll ► usage.json    ──ssh──► ~/.accounts/remote/<name>/
-                                                 statusline-snapshot.json
+  jobs-publish ─────► handoffs/jobs.json           statusline-snapshot.json
                                                  codex-usage.json
+                                                 jobs.json
                                                  meta.json  (fetched_at, error, up)
                                                       │
                                                statusline.sh / codex_statusline.py
@@ -177,12 +178,40 @@ board machine                          this machine
 `bin/remote_boards.py` owns the pull. Properties the renderers depend on:
 
 - The pull happens on the poll, never on a render — no renderer opens a socket.
-- Exactly the two files above are read from a board, and every document is
+- Exactly the three files above are read from a board, and every document is
   scrubbed of token-shaped keys before it is written.
 - `meta.json` carries `fetched_at` (last *success*), the last `error`, and the
   up-check verdict, so a stale or failed pull keeps the previous numbers and
   states its age instead of rendering zeros.
 - A board whose up-check exits non-zero is not contacted at all.
+- A board with a running job is pulled every 30s instead of the configured
+  interval, so a job's progress is not a minute stale.
+
+## Unattended jobs
+
+`bin/remote_jobs.py` (installed as `jobs-publish`, on a 30s timer) rewrites
+`~/handoffs/jobs.json` on the machine running the jobs. A job is one tmux
+session working out of `~/handoffs/<slug>/`, which holds the `job.json` written
+when it was sent and the `report.md` it writes when it finishes.
+
+Every field is derived from what is observable on that machine, never from the
+session cooperating:
+
+| field | derived from |
+|---|---|
+| `state` | `report.md` first (`status: blocked` → blocked, otherwise done), else the tmux session list (present → running, absent → gone) |
+| `head` | `git rev-parse --short HEAD` in the job's worktree |
+| `account`, `handoffs` | the router state file whose `cwd` is inside that worktree |
+| `workflows` | the Workflow journals under that session's project directory |
+
+A workflow counts as **running** when agents it started have no `result` or
+`failed` line *and* the job itself is still running. Journal lines carry no
+timestamps and an agent can work for an hour without writing one, so mtime
+cannot tell working apart from killed; the owning session's liveness can.
+`started_at` is the mtime of the workflow's script, which is written at launch.
+
+The file is replaced with `os.replace`, so a reader sees one version or the
+next. An empty `jobs` map is a valid result.
 
 ## Classification precedence
 

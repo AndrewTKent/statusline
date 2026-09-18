@@ -71,6 +71,12 @@
 # refuse instead, for unattended runs where a doomed session is worse than a stop.
 # ACCOUNTS_STRICT_QUOTA=1
 
+# A cross-account move stops the running process and relaunches it on --resume,
+# so any in-process workflow, subagent or background task dies with it. Set to 1
+# to have the relaunch carry a first message saying the session was moved and
+# what was lost, so an unattended session can restart what was in flight.
+# ACCOUNTS_HANDOFF_NOTICE=1
+
 # ─── Remote account boards ─────────────────────────────────────────────────
 # Show another machine's account board under this one's. That machine runs the
 # same router and polls its own accounts; `accounts poll` here copies the two
@@ -97,6 +103,16 @@
 # A board's Codex accounts render in the Codex statusline only. Set to 1 to
 # also list them under the board's Claude rows here.
 # REMOTE_BOARD_CODEX_ROWS=0
+
+# Unattended jobs a board is running render under its account rows, from the
+# jobs.json its publisher writes. A board with a running job is pulled every 30s
+# instead of REMOTE_BOARD_PULL_INTERVAL. Job names are cut to this many chars so
+# one long branch cannot widen the whole table.
+# REMOTE_JOB_NAME_MAX=20
+
+# ─── Unattended job publisher (on the machine running the jobs) ────────────
+# Seconds between rewrites of ~/handoffs/jobs.json by the jobs-publish timer.
+# JOBS_PUBLISH_INTERVAL=30
 
 # ─── Token classifier (optional; for scan-tokens.py) ───────────────────────
 # Classify each token request as work / personal / unknown. Independent of
