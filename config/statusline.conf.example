@@ -110,6 +110,10 @@
 # one long branch cannot widen the whole table.
 # REMOTE_JOB_NAME_MAX=20
 
+# Jobs render only in the session or terminal pane that sent them. Set to 1 to
+# list every job on the board in every status line.
+# REMOTE_JOBS_SHOW_ALL=0
+
 # ─── Unattended job publisher (on the machine running the jobs) ────────────
 # Seconds between rewrites of ~/handoffs/jobs.json by the jobs-publish timer.
 # JOBS_PUBLISH_INTERVAL=30

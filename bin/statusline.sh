@@ -754,12 +754,30 @@ remote_epoch_relative() {
 # Jobs shown: running, or finished recently enough to still be news.
 REMOTE_JOB_WINDOW_S=1800
 
+# The terminal pane this render belongs to, as the sender of a job records it: a
+# job stays with its pane across /clear and new sessions, where a session id does not.
+remote_job_pane_id() {
+    local raw=""
+    if [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+        raw="tmux:${TMUX%%,*}:${TMUX_PANE}"
+    elif [ -n "${ITERM_SESSION_ID:-}" ]; then
+        raw="iterm:${ITERM_SESSION_ID#*:}"
+    elif [ -n "${TERM_SESSION_ID:-}" ]; then
+        raw="term:${TERM_SESSION_ID}"
+    fi
+    [ -n "$raw" ] || return 0
+    { printf '%s' "$raw" | shasum -a 256 2>/dev/null || printf '%s' "$raw" | sha256sum 2>/dev/null; } | cut -c1-12
+}
+
 remote_job_slugs() {
     local board_dir="$1" now_epoch="$2"
     jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
-        --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" '
+        --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
+        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" '
         (.jobs // {}) | to_entries[]
         | select(.value.state == "running" or ((.value.updated_at // 0) >= $cutoff))
+        | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
+                 or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
         | .key[0:$cap]
     ' "$board_dir/jobs.json" 2>/dev/null
 }
@@ -792,12 +810,17 @@ remote_job_lines() {
     local rows kind one two three four five six
     local padded detail state_color job_color age plural
     rows=$(jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
-        --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" '
+        --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
+        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" '
         (.jobs // {}) | to_entries[]
         | select(.value.state == "running" or ((.value.updated_at // 0) >= $cutoff))
+        # A job belongs to the session that sent it; one with no sender shows everywhere.
+        | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
+                 or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
         | (["job", .key[0:$cap], (.value.state // ""), (.value.account // ""),
             ((.value.handoffs // 0) | tostring), ((.value.updated_at // 0) | tostring),
-            (if $sid != "" and (.value.origin_session // "") == $sid then "mine" else "" end)]
+            (if $all == "1" and (.value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
+             then "mine" else "" end)]
            | join("")),
           (select(.value.state == "running")
            | (.value.workflows // [])[] | select(.running == true)
@@ -827,7 +850,7 @@ remote_job_lines() {
                 else
                     detail=" ${dim}· $(remote_age_text "$(( now_epoch - five ))") ago${reset}"
                 fi
-                # The session that sent a job sees which of the box's jobs is its own.
+                # Only worth saying when every session's jobs are on screen.
                 [ "$six" = "mine" ] && detail+=" ${white}\xe2\x86\x90 this session${reset}"
                 printf -v padded '%-*s' "$name_width" "$one"
                 printf '%b\n' "${dim}· \xe2\x96\xb8${reset} ${dim}${padded}${reset} ${job_color}${two}${reset}${detail}"

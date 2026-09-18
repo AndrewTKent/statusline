@@ -219,6 +219,7 @@ def job_row(directory: Path, live: set[str]) -> dict | None:
         "head": git_head(worktree),
         "account": str(router.get("label") or ""),
         "origin_session": str(job.get("origin_session") or ""),
+        "origin_pane": str(job.get("origin_pane") or ""),
         "sent_at": as_int(job.get("sent_at")),
         "updated_at": last_change(directory, session),
         "handoffs": as_int(router.get("handoffs")),
