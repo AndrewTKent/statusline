@@ -910,6 +910,10 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         )
                         if next_profile is None:
                             continue
+                        # A fable pick ignores the rate axes, so the best fable
+                        # target can be the account departure just pushed us off.
+                        if accounts.profile_near_wall(next_profile["label"]):
+                            continue
                         next_model = "fable"
                         next_override = None
                         if returns_to_fable_in_process(
