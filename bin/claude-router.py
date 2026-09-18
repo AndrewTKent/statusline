@@ -746,6 +746,11 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     current_family = (
                         "fable" if current_model == "fable" else "general"
                     )
+                    if current_family == "fable":
+                        # A child that reached fable after launch carries no
+                        # --fallback-model, but its own fable decline still
+                        # substitutes a model in place, so a restart is waste.
+                        in_process_fallback = fallback_model
                     if (
                         model_override
                         and current_model
