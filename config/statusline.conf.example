@@ -77,6 +77,14 @@
 # what was lost, so an unattended session can restart what was in flight.
 # ACCOUNTS_HANDOFF_NOTICE=1
 
+# When a routed session hits a plan wall and no account can take it, the router
+# stops the session and exits, which leaves an unattended job dead until someone
+# restarts it. Set 1 to hold instead: wait for the soonest window reset on the
+# board (rechecking at least every 15 minutes), then resume the same session with
+# a first message saying it was held, for how long and why. Ctrl-C ends a hold.
+# Off by default.
+# ACCOUNTS_HOLD_FOR_RESET=1
+
 # ─── Remote account boards ─────────────────────────────────────────────────
 # Show another machine's account board under this one's. That machine runs the
 # same router and polls its own accounts; `accounts poll` here copies the two

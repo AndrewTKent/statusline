@@ -1,6 +1,8 @@
 """Unit tests for bin/remote_jobs.py — no tmux, no git, no network."""
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,10 +53,13 @@ def write_job(box, slug="demo"):
     return directory
 
 
-def write_router_state(box, session_id, label="team-1", handoffs=0):
-    state = box.parent / "state" / "account-router-42.json"
+def write_router_state(box, session_id, label="team-1", handoffs=0, pid=None, **extra):
+    """A live router by default: the file is named for this test's own pid."""
+    state = box.parent / "state" / f"account-router-{pid or os.getpid()}.json"
     state.write_text(
-        json.dumps({"session_id": session_id, "cwd": "/w", "label": label, "handoffs": handoffs})
+        json.dumps(
+            {"session_id": session_id, "cwd": "/w", "label": label, "handoffs": handoffs, **extra}
+        )
     )
 
 
@@ -74,13 +79,23 @@ def write_workflow(box, session_id, name, started, done=(), failed=()):
     )
 
 
+def dead_pid():
+    """A pid that just exited, so nothing can be running under it."""
+    child = subprocess.Popen(["true"])
+    child.wait()
+    return child.pid
+
+
 def only_job(payload):
     return payload["jobs"]["demo"]
 
 
 class TestState:
-    def test_a_job_whose_session_is_alive_and_has_no_report_is_running(self, box, monkeypatch):
+    def test_a_job_whose_session_and_router_are_alive_and_has_no_report_is_running(
+        self, box, monkeypatch
+    ):
         write_job(box)
+        write_router_state(box, "s-1")
         live(monkeypatch, "demo")
         monkeypatch.setattr(remote_jobs, "report_status", lambda _path: None)
 
@@ -91,6 +106,36 @@ class TestState:
         monkeypatch.setattr(remote_jobs, "report_status", lambda _path: None)
 
         assert only_job(remote_jobs.build(2000.0))["state"] == "gone"
+
+    def test_a_session_left_at_a_shell_after_its_router_exited_is_gone(
+        self, box, monkeypatch
+    ):
+        write_job(box)
+        write_router_state(box, "s-1", pid=dead_pid())
+        live(monkeypatch, "demo")
+        monkeypatch.setattr(remote_jobs, "report_status", lambda _path: None)
+
+        assert only_job(remote_jobs.build(2000.0))["state"] == "gone"
+
+    def test_a_job_naming_no_worktree_falls_back_to_the_tmux_session(self, box, monkeypatch):
+        directory = write_job(box)
+        job = json.loads((directory / "job.json").read_text())
+        del job["worktree"]
+        (directory / "job.json").write_text(json.dumps(job))
+        live(monkeypatch, "demo")
+        monkeypatch.setattr(remote_jobs, "report_status", lambda _path: None)
+
+        assert only_job(remote_jobs.build(2000.0))["state"] == "running"
+
+    def test_a_router_holding_for_a_reset_publishes_held_and_when(self, box, monkeypatch):
+        write_job(box)
+        write_router_state(box, "s-1", held_until=5000, held_reason="session limit")
+        live(monkeypatch, "demo")
+        monkeypatch.setattr(remote_jobs, "report_status", lambda _path: None)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["held_until"]) == ("held", 5000)
 
     def test_a_report_wins_over_a_session_that_is_still_alive(self, box, monkeypatch):
         directory = write_job(box)
@@ -129,7 +174,7 @@ class TestRouterState:
 
     def test_a_state_for_another_worktree_is_not_this_job(self, box):
         write_job(box)
-        (box.parent / "state" / "account-router-42.json").write_text(
+        (box.parent / "state" / f"account-router-{os.getpid()}.json").write_text(
             json.dumps({"session_id": "s-1", "cwd": "/elsewhere", "label": "team-2"})
         )
 

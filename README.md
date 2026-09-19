@@ -374,6 +374,7 @@ Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated vers
 - `SHARED_ACCOUNT_SNAPSHOT_FILE` / `SHARED_ACCOUNT_SNAPSHOT_MAX_AGE` — override the snapshot path or stale threshold
 - `ACCOUNTS_HARD_SESSION_LIMIT=0` — opt out of stopping routed Claude sessions at a plan wall (100% five-hour, 100% weekly, or 100% Fable for a Fable session); account pins are bypassed only at those boundaries
 - `ACCOUNTS_STRICT_QUOTA=1` — refuse to launch when no account has quota; by default the router warns and opens on the best authenticated account anyway, so history can be read and a session resumed until a window resets
+- `ACCOUNTS_HOLD_FOR_RESET=1` — when no account can take the work, hold the session until a window resets and resume it, instead of stopping (off by default)
 
 **Token classifier** (feeds the `tokens` row's work/personal split — see `bin/scan-tokens.py`)
 - `WORK_PATHS` / `PERSONAL_PATHS` — comma-separated cwd/file-path substrings
@@ -427,6 +428,29 @@ the session returns to Fable on its own once the window resets; only a move to
 another account restarts it. Past any of those walls the plan stops paying and
 extra usage starts, which is what the guard prevents.
 `ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
+
+`ACCOUNTS_HOLD_FOR_RESET=1` changes what happens when that guard fires and no
+other account can take the session. By default the router stops the session and
+exits, which is right at a keyboard and wrong for an unattended job: the tmux
+session drops to a bare shell and nothing brings the work back when the windows
+reset. With the hold on, the router stops the child the same way, then sleeps
+until the soonest reset on the board plus two minutes, polls, and tries to route
+again, re-holding if there is still no room. No sleep runs longer than 15
+minutes, which is also how often it rechecks a board that names no reset at all:
+once a five-hour reset slips into the past on a row the poll has not advanced,
+the soonest moment left on the board is the weekly reset, and sleeping to that
+would park the session for days. Within a sleep it waits in 30-second slices
+against the wall clock, so a suspended machine wakes on time. The stderr line
+says when it will resume, in local time. Ctrl-C ends a hold and exits as it does
+today. The hold also applies before the first launch, so a session started with
+every account walled waits instead of opening on an exhausted one.
+
+A resumed session carries a first message saying it was held, from when to when
+and why, whatever `ACCOUNTS_HANDOFF_NOTICE` is set to — a held session that comes
+back silently is the failure the hold exists to fix. As with a move, a session
+with no transcript to resume gets its original prompt again instead, because
+nothing was in flight to report. Each hold counts as one handoff in the move
+count the status line shows.
 
 | Command | What it does |
 |---------|---------------|
@@ -555,10 +579,17 @@ The `jobs-publish` timer installed with the router rewrites `~/handoffs/jobs.jso
 every 30 seconds, and `accounts poll` here copies it alongside the two board
 files.
 
-- **State is observed, not reported.** A job is `running` while its tmux session
-  is alive, `done` or `blocked` once it writes a `report.md` (`status: blocked`
-  on the first line means blocked), and `gone` when it has neither. A wedged
-  session cannot claim to be healthy.
+- **State is observed, not reported.** A job is `running` while both its tmux
+  session and the router supervising it are alive, `held` while that router is
+  waiting for a window to reset (with the time it resumes), `done` or `blocked`
+  once it writes a `report.md` (`status: blocked` on the first line means
+  blocked), and `gone` otherwise. A wedged session cannot claim to be healthy.
+- **A session outliving its router reads as `gone`, not `running`.** The router
+  writes `/tmp/claude/account-router-<pid>.json` from launch, and that file
+  outlives the process, so liveness is the pid in its name. A tmux session
+  sitting at a bare shell after its router exited used to publish as `running`
+  forever. A job that names no worktree cannot be matched to a router at all, so
+  there the tmux session is still the whole test.
 - **Workflow progress comes from Claude Code's own journals.** A workflow counts
   as running when agents it started have no result yet and the job is still
   running. `14/15 agents` is agents finished over agents started.
@@ -573,7 +604,9 @@ files.
   `REMOTE_JOBS_SHOW_ALL=1` lists every job and marks this pane's own with
   `← this session`.
 - **Recently finished jobs stay visible for half an hour**, showing their state
-  and age, then drop off. `REMOTE_JOB_NAME_MAX` (default 20) caps the name so a
+  and age, then drop off. A `held` job stays on screen however long the hold
+  lasts — it has not finished — and reads `held · resumes 10:20pm PDT` in the
+  reader's own time zone. `REMOTE_JOB_NAME_MAX` (default 20) caps the name so a
   long branch cannot widen the table.
 
 ### Being told the session was moved

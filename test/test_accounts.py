@@ -141,6 +141,93 @@ def test_hard_session_limit_is_on_unless_disabled(tmp_path, monkeypatch):
     assert accounts.hard_session_limit_enabled() is False
 
 
+def test_hold_for_reset_is_off_unless_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+    monkeypatch.delenv("ACCOUNTS_HOLD_FOR_RESET", raising=False)
+
+    assert accounts.hold_for_reset_enabled() is False
+
+
+def fake_board(monkeypatch, rows, *, limits=None, excluded=(), needs_login=()):
+    blobs = {
+        "accounts": {
+            label: {"email": f"{label}@example.com", "org_uuid": label}
+            for label in rows
+        }
+    }
+    resets = {
+        f"{label}@example.com|{label}": row for label, row in rows.items()
+    }
+    monkeypatch.setattr(accounts, "load_blobs", lambda: blobs)
+    monkeypatch.setattr(accounts, "load_resets", lambda: resets)
+    monkeypatch.setattr(accounts, "load_session_limits", lambda _now: limits or {})
+    monkeypatch.setattr(accounts, "excluded_labels", lambda: set(excluded))
+    monkeypatch.setattr(
+        accounts,
+        "entry_needs_login",
+        lambda entry, _now: entry["org_uuid"] in needs_login,
+    )
+
+
+def at(hours: float) -> str:
+    return (NOW + timedelta(hours=hours)).isoformat()
+
+
+def ts(hours: float) -> float:
+    return (NOW + timedelta(hours=hours)).timestamp()
+
+
+def test_the_wake_time_is_the_soonest_reset_on_the_board(monkeypatch):
+    fake_board(
+        monkeypatch,
+        {"a": {"five_hour_reset": at(1.0)}, "b": {"five_hour_reset": at(0.5)}},
+    )
+
+    assert accounts.next_routable_at(now_ts=NOW.timestamp()) == ts(0.5)
+
+
+def test_a_reset_already_behind_us_is_not_a_wake_time(monkeypatch):
+    fake_board(monkeypatch, {"a": {"five_hour_reset": at(-1.0)}})
+
+    assert accounts.next_routable_at(now_ts=NOW.timestamp()) is None
+
+
+def test_only_a_fable_session_waits_for_the_fable_window(monkeypatch):
+    fake_board(monkeypatch, {"a": {"fable_reset": at(1.0)}})
+
+    assert accounts.next_routable_at(now_ts=NOW.timestamp()) is None
+    assert accounts.next_routable_at(require_fable=True, now_ts=NOW.timestamp()) == ts(1.0)
+
+
+def test_a_detected_limit_expiring_is_a_wake_time(monkeypatch):
+    fake_board(monkeypatch, {"a": {}}, limits={"a@example.com|a": {"expires_at": ts(2.0)}})
+
+    assert accounts.next_routable_at(now_ts=NOW.timestamp()) == ts(2.0)
+
+
+def test_only_a_fable_session_waits_for_a_fable_limit_marker(monkeypatch):
+    fake_board(
+        monkeypatch,
+        {"a": {}},
+        limits={"a@example.com|a|fable": {"expires_at": ts(2.0)}},
+    )
+
+    assert accounts.next_routable_at(now_ts=NOW.timestamp()) is None
+    assert accounts.next_routable_at(require_fable=True, now_ts=NOW.timestamp()) == ts(2.0)
+
+
+@pytest.mark.parametrize("blocked", ["excluded", "needs_login"])
+def test_an_account_that_cannot_route_is_not_waited_for(blocked, monkeypatch):
+    fake_board(
+        monkeypatch,
+        {"a": {"five_hour_reset": at(2.0)}, "b": {"five_hour_reset": at(0.5)}},
+        excluded={"b"} if blocked == "excluded" else (),
+        needs_login={"b"} if blocked == "needs_login" else (),
+    )
+
+    assert accounts.next_routable_at(now_ts=NOW.timestamp()) == ts(2.0)
+
+
 @pytest.mark.parametrize(
     ("five_hour", "seven_day", "reached"),
     [

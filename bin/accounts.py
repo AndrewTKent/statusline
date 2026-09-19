@@ -417,6 +417,15 @@ def handoff_notice_enabled() -> bool:
     return value == "1"
 
 
+def hold_for_reset_enabled() -> bool:
+    """Off unless set to 1: with no account left, wait for a window to reset
+    and resume, instead of stopping the session for good."""
+    value = os.environ.get("ACCOUNTS_HOLD_FOR_RESET") or _conf_var(
+        "ACCOUNTS_HOLD_FOR_RESET"
+    )
+    return value == "1"
+
+
 def load_label_pairs() -> list[tuple[str, str, str | None]]:
     pairs: list[tuple[str, str, str | None]] = []
     for pair in _conf_var("ACCOUNT_LABELS").split():
@@ -2754,6 +2763,39 @@ def profile_fable_limit_reached(label: str) -> bool:
 
 def _at_hard_limit(*pcts: float | None) -> bool:
     return any(pct is not None and pct >= SESSION_HARD_LIMIT_PCT for pct in pcts)
+
+
+def next_routable_at(*, require_fable: bool = False, now_ts: float | None = None) -> float | None:
+    """The soonest moment the board could route again: the next window reset or
+    detected-limit expiry on an account that is allowed to take work. Whether it
+    then routes stays select_profile's call; this only says when to ask again.
+    None when nothing on the board changes on its own."""
+    now_ts = time.time() if now_ts is None else now_ts
+    resets = load_resets()
+    limits = load_session_limits(now_ts)
+    excludes = excluded_labels()
+    window_keys = ["five_hour_reset", "seven_day_reset"]
+    if require_fable:
+        window_keys.append("fable_reset")
+    moments: list[float] = []
+    for label, entry in (load_blobs().get("accounts") or {}).items():
+        if label in excludes or entry_needs_login(entry, now_ts):
+            continue
+        row = resets_row(resets, entry.get("email"), entry.get("org_uuid"))
+        moments += [
+            reset.timestamp()
+            for reset in (parse_iso(row.get(key)) for key in window_keys)
+            if reset is not None
+        ]
+        key = f"{entry.get('email')}|{entry.get('org_uuid')}"
+        marker_keys = [key, f"{key}|fable"] if require_fable else [key]
+        moments += [
+            float(limits[marker]["expires_at"])
+            for marker in marker_keys
+            if marker in limits
+        ]
+    ahead = [moment for moment in moments if moment > now_ts]
+    return min(ahead) if ahead else None
 
 
 def profile_near_wall(label: str) -> bool:
