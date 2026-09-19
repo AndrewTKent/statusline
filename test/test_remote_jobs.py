@@ -187,7 +187,7 @@ def session_of(box, session_id):
 
 class TestWorkflows:
     def test_agents_still_out_mean_the_workflow_is_running(self, box):
-        write_workflow(box, "s-1", "solei loop to sun", started=("a", "b"), done=("a",))
+        write_workflow(box, "s-1", "review loop", started=("a", "b"), done=("a",))
 
         workflow = remote_jobs.workflows_for(session_of(box, "s-1"), True)[0]
 
@@ -198,26 +198,26 @@ class TestWorkflows:
         )
 
     def test_agents_still_out_under_a_job_that_stopped_are_not_running(self, box):
-        write_workflow(box, "s-1", "solei loop to sun", started=("a", "b"), done=("a",))
+        write_workflow(box, "s-1", "review loop", started=("a", "b"), done=("a",))
 
         assert remote_jobs.workflows_for(session_of(box, "s-1"), False)[0]["running"] is False
 
     def test_a_workflow_whose_agents_all_reported_is_not_running(self, box):
-        write_workflow(box, "s-1", "solei loop to sun", started=("a",), failed=("a",))
+        write_workflow(box, "s-1", "review loop", started=("a",), failed=("a",))
 
         assert remote_jobs.workflows_for(session_of(box, "s-1"), True)[0]["running"] is False
 
     def test_the_workflow_is_named_by_its_script_rather_than_its_run_id(self, box):
-        write_workflow(box, "s-1", "solei loop to sun", started=("a",))
+        write_workflow(box, "s-1", "review loop", started=("a",))
 
         assert remote_jobs.workflows_for(session_of(box, "s-1"), True)[0]["name"] == (
-            "solei loop to sun"
+            "review loop"
         )
 
     def test_a_job_lists_the_workflows_of_the_session_its_router_state_names(self, box):
         write_job(box)
         write_router_state(box, "s-1")
-        write_workflow(box, "s-1", "solei loop to sun", started=("a",))
+        write_workflow(box, "s-1", "review loop", started=("a",))
 
         workflows = only_job(remote_jobs.build(2000.0))["workflows"]
 

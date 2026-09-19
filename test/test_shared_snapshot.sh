@@ -195,7 +195,7 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "account": "team-2", "origin_session": "session-test", "sent_at": $(( NOW - 3600 )),
       "updated_at": $NOW, "handoffs": 2, "report": false,
       "workflows": [
-        {"name": "solei loop to sun", "started_at": $(( NOW - 720 )),
+        {"name": "review loop", "started_at": $(( NOW - 720 )),
          "agents_started": 15, "agents_done": 14, "agents_failed": 0, "running": true},
         {"name": "scoping panel", "started_at": $(( NOW - 7200 )),
          "agents_started": 3, "agents_done": 3, "agents_failed": 0, "running": false}
@@ -240,7 +240,7 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
 [[ "$all_jobs_output" == *"their-job"* ]] || { printf 'REMOTE_JOBS_SHOW_ALL=1 did not render every job\n' >&2; exit 1; }
 [[ "$(printf '%s\n' "$all_jobs_output" | grep -c 'this session')" = "1" && "$all_jobs_output" == *"demo-job"*"this session"* ]] || { printf 'with every job on screen, only the one this session sent is marked\n' >&2; exit 1; }
 [[ "$jobs_output" == *"2 handoffs"* ]] || { printf 'a running job did not count the moves the router made\n' >&2; exit 1; }
-[[ "$jobs_output" == *"solei loop to sun"*"14/15 agents"* ]] || { printf "a running job's running workflow did not render\n" >&2; exit 1; }
+[[ "$jobs_output" == *"review loop"*"14/15 agents"* ]] || { printf "a running job's running workflow did not render\n" >&2; exit 1; }
 [[ "$jobs_output" != *"scoping panel"* ]] || { printf 'a workflow that is not running still rendered\n' >&2; exit 1; }
 [[ "$jobs_output" == *"just-done"*"done"*"2m ago"* ]] || { printf 'a job that finished recently did not render its state and age\n' >&2; exit 1; }
 [[ "$jobs_output" != *"old-job"* ]] || { printf 'a job that finished long ago still rendered\n' >&2; exit 1; }
