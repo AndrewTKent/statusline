@@ -216,6 +216,11 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "account": "team-1", "origin_session": "a-session-this-pane-ran-earlier", "origin_pane": "$PANE_TEST_ID",
       "sent_at": $(( NOW - 600 )), "updated_at": $NOW, "handoffs": 0, "report": false, "workflows": []
     },
+    "held-job-on-a-devbox": {
+      "state": "held", "held_until": $(( NOW + 3600 )), "branch": "andrew/held", "head": "0fedcba",
+      "account": "team-1", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
     "old-job": {
       "state": "done", "branch": "andrew/old", "head": "9abcdef",
       "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 90000 )),
@@ -239,6 +244,9 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
 [[ "$jobs_output" != *"scoping panel"* ]] || { printf 'a workflow that is not running still rendered\n' >&2; exit 1; }
 [[ "$jobs_output" == *"just-done"*"done"*"2m ago"* ]] || { printf 'a job that finished recently did not render its state and age\n' >&2; exit 1; }
 [[ "$jobs_output" != *"old-job"* ]] || { printf 'a job that finished long ago still rendered\n' >&2; exit 1; }
+[[ "$jobs_output" =~ held-job-on-a-devbox\ +held\ ·\ resumes\ [0-9]{1,2}:[0-9]{2}[ap]m\ [A-Z]+ ]] || { printf 'a held job did not say when it resumes\n' >&2; exit 1; }
+# 20 characters, the widest name on either board: a held job sizes the column like a running one.
+[[ "$jobs_output" =~ demo-job\ {13}running ]] || { printf "a held job's name did not widen the job column\n" >&2; exit 1; }
 board_table_line=$(printf '%s\n' "$board_output" | grep -n 'Work' | head -1 | cut -d: -f1)
 board_header_line=$(printf '%s\n' "$board_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
 [ "$board_header_line" -gt "$board_table_line" ] || { printf 'the board block did not render under the local table\n' >&2; exit 1; }

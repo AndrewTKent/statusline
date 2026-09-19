@@ -49,6 +49,18 @@ HANDOFF_NOTICE = (
     " it; if nothing was, reply in one line and wait."
 )
 HANDOFF_REASONS = {"session": "session limit", "fable": "fable limit"}
+HOLD_NOTICE = (
+    "The account router held this session from {start} to {end} because no"
+    " account had quota left ({reason}). The previous process was stopped: any"
+    " in-process workflow, subagent or background task it owned is gone. Check"
+    " what was in flight and relaunch it; if nothing was, reply in one line and wait."
+)
+HOLD_LAUNCH_REASON = "no account has quota for this model"
+# Wake after the reset, not on it: the usage API lags the window by a minute or so.
+HOLD_MARGIN_S = 120.0
+HOLD_RECHECK_S = 15 * 60.0
+# Short slices on the wall clock, so a suspended machine wakes on time, not late.
+HOLD_SLICE_S = 30.0
 # Option arity, read off `claude --help`. The CLI also accepts options it does
 # not list, so a name missing from all four sets means the walk gives up.
 FLAG_OPTIONS = frozenset(
@@ -492,16 +504,125 @@ def handoff_session_args(
     return launch_args
 
 
-def seed_handoff_count(state_path: Path, handoffs: int) -> None:
-    """The child's statusline rewrites this file on every render and carries the
-    count forward, so the router only has to seed it after a move."""
-    if handoffs <= 0:
-        return
+def local_clock(epoch: float) -> str:
+    moment = datetime.fromtimestamp(epoch).astimezone()
+    clock = f"{moment.strftime('%-I:%M')}{moment.strftime('%p').lower()} {moment.strftime('%Z')}"
+    if moment.date() == datetime.now().date():
+        return clock
+    return f"{clock} on {moment.strftime('%a %-d %b')}"
+
+
+def hold_notice(held_from: float, held_to: float, reason: str) -> str:
+    return HOLD_NOTICE.format(
+        start=local_clock(held_from),
+        end=local_clock(held_to),
+        reason=reason,
+    )
+
+
+def hold_reason(limit_kind: str | None) -> str:
+    return HANDOFF_REASONS.get(limit_kind or "", HOLD_LAUNCH_REASON)
+
+
+def first_route(family: str, lease_pid: int | None) -> tuple[dict, str | None] | None:
+    """The account to launch on, and the model override a Fable session needs
+    when only general headroom is left."""
+    selected = accounts.select_profile(
+        require_fable=family == "fable",
+        lease_pid=lease_pid,
+    )
+    if selected is not None:
+        return selected, None
+    if family != "fable":
+        return None
+    selected = accounts.select_profile(
+        require_fable=False,
+        prefer_fable=False,
+        lease_pid=lease_pid,
+    )
+    if selected is None:
+        return None
+    return selected, os.environ.get(
+        "ACCOUNTS_FABLE_FALLBACK_MODEL",
+        FABLE_FALLBACK_MODEL,
+    )
+
+
+def hold_wake_at(family: str, now: float) -> float:
+    """Never sleep past the recheck interval: once a five-hour reset slips into the
+    past on a row the poll has not advanced, the soonest moment left is the weekly
+    one, days out."""
+    reset = accounts.next_routable_at(require_fable=family == "fable", now_ts=now)
+    recheck = now + HOLD_RECHECK_S
+    if reset is None:
+        return recheck
+    return min(reset + HOLD_MARGIN_S, recheck)
+
+
+def sleep_until(wake_at: float) -> None:
+    while True:
+        remaining = wake_at - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(HOLD_SLICE_S, remaining))
+
+
+def refresh_board() -> None:
+    try:
+        accounts.poll_and_write_snapshot()
+    except (accounts.AccountsError, OSError) as exc:
+        # A failed poll leaves the last board, which the hold can still read.
+        print(f"accounts: board refresh skipped ({exc})", file=sys.stderr)
+
+
+def write_router_state(state_path: Path, state: dict) -> None:
     state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temp = state_path.with_suffix(".seed")
+    temp = state_path.with_suffix(".tmp")
     with open(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
-        handle.write(json.dumps({"handoffs": handoffs}) + "\n")
+        handle.write(json.dumps(state, sort_keys=True) + "\n")
     os.replace(temp, state_path)
+
+
+def hold_for_route(
+    family: str,
+    lease_pid: int | None,
+    state_path: Path,
+    state: dict,
+    reason: str,
+) -> tuple[dict, str | None, float] | None:
+    """Wait for a window to reset and route again; None when Ctrl-C ends the hold.
+    Returns the route and when the hold began."""
+    held_from = time.time()
+    while True:
+        try:
+            wake_at = hold_wake_at(family, time.time())
+            write_router_state(
+                state_path,
+                {**state, "cwd": os.getcwd(), "held_until": int(wake_at), "held_reason": reason},
+            )
+            print(
+                f"accounts: no account has quota left ({reason}); holding until"
+                f" {local_clock(wake_at)}, then resuming. Ctrl-C ends the hold.",
+                file=sys.stderr,
+            )
+            sleep_until(wake_at)
+            refresh_board()
+            route = first_route(family, lease_pid)
+        except KeyboardInterrupt:
+            print("accounts: hold ended by Ctrl-C.", file=sys.stderr)
+            return None
+        if route is not None:
+            return route[0], route[1], held_from
+
+
+def seed_router_state(state_path: Path, handoffs: int, session_id: str | None) -> None:
+    """The child's statusline rewrites this file on every render, but the jobs
+    publisher reads it to tell a live router from a dead one, so it has to exist
+    from launch rather than from the child's first render."""
+    state = {"cwd": os.getcwd(), "handoffs": handoffs}
+    if session_id:
+        state["session_id"] = session_id
+    write_router_state(state_path, state)
 
 
 def record_limit_kind(record: dict) -> str | None:
@@ -753,25 +874,24 @@ def run_passthrough(binary: str, args: list[str]) -> int:
             env[ULTRACODE_ENV] = "1"
         return subprocess.call([binary, *launch_args], env=env)
     current_family = model_family(launch_args)
-    selected = accounts.select_profile(require_fable=current_family == "fable")
-    if selected is None and current_family == "fable":
-        selected = accounts.select_profile(
-            require_fable=False,
-            prefer_fable=False,
+    state_path = Path(f"/tmp/claude/account-router-{os.getpid()}.json")
+    route = first_route(current_family, None)
+    if route is None and is_inference and accounts.hold_for_reset_enabled():
+        held = hold_for_route(
+            current_family, None, state_path, {}, HOLD_LAUNCH_REASON
         )
-        if selected is not None:
-            launch_args = replace_model_args(
-                launch_args,
-                os.environ.get(
-                    "ACCOUNTS_FABLE_FALLBACK_MODEL",
-                    FABLE_FALLBACK_MODEL,
-                ),
-            )
-    if selected is None:
+        state_path.unlink(missing_ok=True)
+        if held is None:
+            return 1
+        route = held[:2]
+    if route is None:
         selected = degraded_profile("no account has enough quota")
+    else:
+        selected, model_override = route
+        if model_override:
+            launch_args = replace_model_args(launch_args, model_override)
     if selected is None:
         return 1
-    state_path = Path(f"/tmp/claude/account-router-{os.getpid()}.json")
     return subprocess.call(
         [binary, *launch_args],
         env=routed_environment(selected, state_path, launch_args),
@@ -787,6 +907,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     mode, applied_mode_generation = accounts.load_mode_snapshot()
     hard_session_limit = accounts.hard_session_limit_enabled()
     notice_on_handoff = accounts.handoff_notice_enabled()
+    hold_for_reset = accounts.hold_for_reset_enabled()
     handoff_count = 0
     fallback_model = os.environ.get(
         "ACCOUNTS_FABLE_FALLBACK_MODEL",
@@ -807,26 +928,27 @@ def run_supervised(binary: str, args: list[str]) -> int:
         if option_value(launch_args, "--model") != current_model:
             launch_args = replace_model_args(launch_args, current_model)
     model_override = None
-    selected = accounts.select_profile(
-        require_fable=current_family == "fable",
-        lease_pid=router_pid,
-    )
-    if selected is None and current_family == "fable":
-        model_override = os.environ.get(
-            "ACCOUNTS_FABLE_FALLBACK_MODEL",
-            FABLE_FALLBACK_MODEL,
+    route = first_route(current_family, router_pid)
+    if route is None and hold_for_reset:
+        held = hold_for_route(
+            current_family,
+            router_pid,
+            state_path,
+            {"session_id": session_id},
+            HOLD_LAUNCH_REASON,
         )
-        selected = accounts.select_profile(
-            require_fable=False,
-            prefer_fable=False,
-            lease_pid=router_pid,
-        )
-        if selected is not None:
+        if held is None:
+            state_path.unlink(missing_ok=True)
+            return 1
+        route = held[:2]
+    if route is None:
+        selected = degraded_profile("no account has enough quota for this model")
+    else:
+        selected, model_override = route
+        if model_override:
             launch_args = replace_model_args(launch_args, model_override)
             current_model = model_override
             current_family = "general"
-    if selected is None:
-        selected = degraded_profile("no account has enough quota for this model")
     if selected is None:
         return 1
     os.environ.pop("ACCOUNTS_PIN", None)
@@ -836,7 +958,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     try:
         while True:
             state_path.unlink(missing_ok=True)
-            seed_handoff_count(state_path, handoff_count)
+            seed_router_state(state_path, handoff_count, session_id)
             write_policy_scope(state_path, mode.get("policy_scope", "global"))
             env = routed_environment(
                 selected,
@@ -965,6 +1087,40 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     last_heartbeat = now
                 if hard_limit_reached and (not session_id or limit_route is None):
                     stop_for_handoff(child)
+                    if hold_for_reset and session_id:
+                        held = hold_for_route(
+                            limit_family,
+                            router_pid,
+                            state_path,
+                            {
+                                **read_router_state(state_path),
+                                "session_id": session_id,
+                                "handoffs": handoff_count,
+                            },
+                            hold_reason(hard_limit_kind),
+                        )
+                        if held is None:
+                            return 1
+                        next_profile, next_override, held_from = held
+                        next_model = next_override or current_model
+                        launch_args = handoff_session_args(
+                            args,
+                            session_id,
+                            next_model,
+                            current_effort,
+                            hold_notice(held_from, time.time(), hold_reason(hard_limit_kind)),
+                        )
+                        selected = next_profile
+                        model_override = next_override
+                        current_model = next_model
+                        current_family = (
+                            model_family(["--model", next_model])
+                            if next_model
+                            else current_family
+                        )
+                        handoff_count += 1
+                        handoff = True
+                        break
                     # The stop is a cost guard, not a routing failure: continuing
                     # past a plan wall bills overage, which is the user's call.
                     print(

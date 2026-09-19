@@ -26,6 +26,7 @@ SPEC.loader.exec_module(claude_router)
 def ignore_host_conf(monkeypatch):
     monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
     monkeypatch.setenv("ACCOUNTS_HANDOFF_NOTICE", "0")
+    monkeypatch.setenv("ACCOUNTS_HOLD_FOR_RESET", "0")
 
 
 @pytest.mark.parametrize(
@@ -1640,7 +1641,7 @@ def test_fable_print_requires_fable_headroom(monkeypatch):
         )
         == 0
     )
-    assert calls[0] == ("select", {"require_fable": True})
+    assert calls[0] == ("select", {"require_fable": True, "lease_pid": None})
     assert calls[1][1][:5] == [
         "/real/claude",
         "--model",
@@ -1681,12 +1682,13 @@ def test_fable_print_falls_back_to_opus(monkeypatch):
         == 0
     )
     assert calls[:2] == [
-        ("select", {"require_fable": True}),
+        ("select", {"require_fable": True, "lease_pid": None}),
         (
             "select",
             {
                 "require_fable": False,
                 "prefer_fable": False,
+                "lease_pid": None,
             },
         ),
     ]
@@ -3808,17 +3810,295 @@ class TestLaunchPromptWalk:
         assert claude_router.without_launch_prompt(args) == args
 
 
-class TestHandoffCount:
+class TestRouterState:
     def test_the_move_count_is_seeded_where_the_status_line_carries_it_forward(self, tmp_path):
         state = tmp_path / "account-router-1.json"
 
-        claude_router.seed_handoff_count(state, 2)
+        claude_router.seed_router_state(state, 2, "s-1")
 
-        assert json.loads(state.read_text()) == {"handoffs": 2}
+        assert json.loads(state.read_text())["handoffs"] == 2
 
-    def test_a_session_that_never_moved_leaves_no_state_behind(self, tmp_path):
+    def test_a_session_that_never_moved_still_publishes_a_state_file(self, tmp_path):
         state = tmp_path / "account-router-1.json"
 
-        claude_router.seed_handoff_count(state, 0)
+        claude_router.seed_router_state(state, 0, "s-1")
 
-        assert not state.exists()
+        assert json.loads(state.read_text())["cwd"] == os.getcwd()
+
+
+class FakeClock:
+    """Wall clock that moves only when the router sleeps."""
+
+    def __init__(self, now=1_000_000.0):
+        self.now = now
+        self.slept = []
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+HELD = {
+    "profile": "/profiles/first",
+    "label": "first",
+    "email": "first@example.com",
+    "org_uuid": "org-first",
+}
+
+
+def fake_hold_board(monkeypatch, clock, routes, resets=None):
+    """select_profile answers from `routes` in order; the board names `resets` in order."""
+    routes = iter(routes)
+    resets = iter(resets or [clock.now + 3600] * 10)
+    monkeypatch.setattr(claude_router.time, "time", clock.time)
+    monkeypatch.setattr(claude_router.time, "sleep", clock.sleep)
+    monkeypatch.setattr(claude_router.accounts, "select_profile", lambda **_kw: next(routes))
+    # raising=False: the pin against the old code must fail on its return code, not here.
+    monkeypatch.setattr(
+        claude_router.accounts, "next_routable_at", lambda **_kw: next(resets), raising=False
+    )
+    monkeypatch.setattr(claude_router.accounts, "poll_and_write_snapshot", lambda: 0)
+
+
+class TestHoldForReset:
+    def test_a_hard_limit_with_no_route_holds_and_resumes_with_the_hold_notice(
+        self, tmp_path, monkeypatch
+    ):
+        session_id = str(uuid.uuid4())
+        transcript = tmp_path / ".claude" / "projects" / "-w" / f"{session_id}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("ACCOUNTS_HOLD_FOR_RESET", "1")
+        clock = FakeClock()
+        launches = []
+
+        class Child:
+            def __init__(self, running):
+                self.running = running
+
+            def poll(self):
+                return None if self.running else 0
+
+            def wait(self):
+                return 0
+
+        fake_hold_board(monkeypatch, clock, [HELD, HELD])
+        monkeypatch.setattr(
+            claude_router,
+            "initial_session_args",
+            lambda _args: (["brief", "--resume", session_id], session_id),
+        )
+        monkeypatch.setattr(claude_router.accounts, "hard_session_limit_enabled", lambda: True)
+        monkeypatch.setattr(
+            claude_router.accounts,
+            "profile_session_limit_reached",
+            lambda _label: len(launches) == 1,
+        )
+        monkeypatch.setattr(claude_router, "session_limit_route", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            claude_router.accounts,
+            "load_mode_snapshot",
+            lambda: ({"mode": "auto", "label": None}, (1, 1)),
+        )
+        monkeypatch.setattr(claude_router.accounts, "upsert_session_lease", lambda *_a: None)
+        monkeypatch.setattr(claude_router.accounts, "remove_session_lease", lambda *_a: None)
+        monkeypatch.setattr(
+            claude_router.subprocess,
+            "Popen",
+            lambda command, **_kw: launches.append(command) or Child(len(launches) == 1),
+        )
+        monkeypatch.setattr(
+            claude_router,
+            "read_router_state",
+            lambda _path: {"session_id": session_id, "model": "Opus 5"},
+        )
+        monkeypatch.setattr(claude_router, "stop_for_handoff", lambda _child: None)
+
+        assert claude_router.run_supervised("/real/claude", ["brief"]) == 0
+        relaunch = launches[1][1:]
+        assert claude_router.prompt_arg_index(relaunch) == len(relaunch) - 1
+        assert relaunch[-1].startswith("The account router held this session from ")
+        assert "(session limit)" in relaunch[-1]
+
+    def test_the_hold_wakes_after_the_soonest_reset_by_the_margin(self, monkeypatch):
+        monkeypatch.setattr(claude_router.accounts, "next_routable_at", lambda **_kw: 1300.0)
+
+        assert claude_router.hold_wake_at("general", 1000.0) == 1300.0 + claude_router.HOLD_MARGIN_S
+
+    def test_a_hold_never_sleeps_past_the_recheck_interval(self, monkeypatch):
+        # A five-hour reset that has slipped past leaves the weekly one as the
+        # soonest moment; sleeping to it would park the session for days.
+        monkeypatch.setattr(
+            claude_router.accounts, "next_routable_at", lambda **_kw: 1000.0 + 6 * 86400
+        )
+
+        assert claude_router.hold_wake_at("general", 1000.0) == 1000.0 + claude_router.HOLD_RECHECK_S
+
+    def test_a_board_with_no_reset_ahead_is_rechecked_later(self, monkeypatch):
+        monkeypatch.setattr(claude_router.accounts, "next_routable_at", lambda **_kw: None)
+
+        assert claude_router.hold_wake_at("general", 1000.0) == 1000.0 + claude_router.HOLD_RECHECK_S
+
+    def test_a_board_that_still_shows_no_room_holds_again_to_the_next_reset(
+        self, tmp_path, monkeypatch
+    ):
+        clock = FakeClock()
+        first_reset, second_reset = clock.now + 200, clock.now + 600
+        fake_hold_board(monkeypatch, clock, [None, HELD], [first_reset, second_reset])
+
+        held = claude_router.hold_for_route(
+            "general", 1, tmp_path / "account-router-1.json", {}, "session limit"
+        )
+
+        assert held[0] is HELD
+        assert clock.now >= second_reset
+
+    def test_the_hold_sleeps_in_short_slices_of_wall_clock_time(self, monkeypatch):
+        clock = FakeClock()
+        monkeypatch.setattr(claude_router.time, "time", clock.time)
+        monkeypatch.setattr(claude_router.time, "sleep", clock.sleep)
+
+        claude_router.sleep_until(clock.now + 3600)
+
+        assert max(clock.slept) <= claude_router.HOLD_SLICE_S
+
+    def test_the_state_file_says_when_the_hold_ends_and_why(self, tmp_path, monkeypatch):
+        clock = FakeClock()
+        state_path = tmp_path / "account-router-1.json"
+        seen = []
+        fake_hold_board(monkeypatch, clock, [HELD], [clock.now + 600])
+        monkeypatch.setattr(
+            claude_router.time,
+            "sleep",
+            lambda seconds: seen.append(json.loads(state_path.read_text())) or clock.sleep(seconds),
+        )
+
+        claude_router.hold_for_route("general", 1, state_path, {"handoffs": 2}, "session limit")
+
+        assert seen[0]["held_until"] == int(clock.now)
+        assert seen[0]["held_reason"] == "session limit"
+
+    def test_the_hold_line_names_the_resume_time_on_the_local_clock(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        clock = FakeClock()
+        fake_hold_board(monkeypatch, clock, [HELD], [clock.now + 600])
+
+        claude_router.hold_for_route("general", 1, tmp_path / "s.json", {}, "session limit")
+
+        wake = clock.now
+        assert f"holding until {claude_router.local_clock(wake)}" in capsys.readouterr().err
+
+    def test_the_hold_refreshes_the_board_before_routing_again(self, tmp_path, monkeypatch):
+        clock = FakeClock()
+        order = []
+        fake_hold_board(monkeypatch, clock, [HELD])
+        monkeypatch.setattr(
+            claude_router.accounts, "poll_and_write_snapshot", lambda: order.append("poll")
+        )
+        monkeypatch.setattr(
+            claude_router.accounts,
+            "select_profile",
+            lambda **_kw: order.append("select") or HELD,
+        )
+
+        claude_router.hold_for_route("general", 1, tmp_path / "s.json", {}, "x")
+
+        assert order == ["poll", "select"]
+
+    def test_a_poll_already_running_elsewhere_does_not_end_the_hold(self, tmp_path, monkeypatch):
+        clock = FakeClock()
+        fake_hold_board(monkeypatch, clock, [HELD])
+
+        def busy():
+            raise claude_router.accounts.AccountsError("account collector is already running")
+
+        monkeypatch.setattr(claude_router.accounts, "poll_and_write_snapshot", busy)
+
+        held = claude_router.hold_for_route("general", 1, tmp_path / "s.json", {}, "x")
+
+        assert held[0] is HELD
+
+    def test_ctrl_c_ends_the_hold(self, tmp_path, monkeypatch):
+        clock = FakeClock()
+        fake_hold_board(monkeypatch, clock, [HELD])
+
+        def interrupted(_seconds):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(claude_router.time, "sleep", interrupted)
+
+        assert claude_router.hold_for_route("general", 1, tmp_path / "s.json", {}, "x") is None
+
+    def test_ctrl_c_before_the_first_sleep_ends_the_hold(self, tmp_path, monkeypatch):
+        def interrupted(**_kw):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(claude_router.accounts, "next_routable_at", interrupted)
+
+        assert claude_router.hold_for_route("general", 1, tmp_path / "s.json", {}, "x") is None
+
+    def test_a_resume_time_on_another_day_carries_the_date(self):
+        tomorrow = time.time() + 86400
+
+        assert " on " in claude_router.local_clock(tomorrow)
+        assert " on " not in claude_router.local_clock(time.time())
+
+    def test_a_launch_with_no_route_holds_before_opening(self, monkeypatch):
+        monkeypatch.setenv("ACCOUNTS_HOLD_FOR_RESET", "1")
+        clock = FakeClock()
+        launches = []
+
+        class Child:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        fake_hold_board(monkeypatch, clock, [None, HELD])
+        monkeypatch.setattr(
+            claude_router,
+            "degraded_profile",
+            lambda _reason: pytest.fail("opened on an exhausted account"),
+        )
+        monkeypatch.setattr(
+            claude_router.accounts,
+            "load_mode_snapshot",
+            lambda: ({"mode": "auto", "label": None}, (1, 1)),
+        )
+        monkeypatch.setattr(claude_router.accounts, "upsert_session_lease", lambda *_a: None)
+        monkeypatch.setattr(claude_router.accounts, "remove_session_lease", lambda *_a: None)
+        monkeypatch.setattr(
+            claude_router.subprocess,
+            "Popen",
+            lambda command, **_kw: launches.append(command) or Child(),
+        )
+        monkeypatch.setattr(claude_router, "read_router_state", lambda _path: {})
+
+        assert claude_router.run_supervised("/real/claude", ["brief"]) == 0
+        assert "brief" in launches[0]
+
+    def test_a_print_launch_with_no_route_holds_before_opening(self, monkeypatch):
+        monkeypatch.setenv("ACCOUNTS_HOLD_FOR_RESET", "1")
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        clock = FakeClock()
+        calls = []
+        fake_hold_board(monkeypatch, clock, [None, HELD])
+        monkeypatch.setattr(
+            claude_router,
+            "degraded_profile",
+            lambda _reason: pytest.fail("opened on an exhausted account"),
+        )
+        monkeypatch.setattr(
+            claude_router.subprocess,
+            "call",
+            lambda command, **kwargs: calls.append(kwargs) or 0,
+        )
+
+        assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 0
+        assert calls[0]["env"]["CLAUDE_CONFIG_DIR"] == HELD["profile"]

@@ -21,6 +21,7 @@ JOBS_FILE = "jobs.json"
 JOB_FILE = "job.json"
 REPORT_FILE = "report.md"
 ROUTER_STATE_GLOB = "account-router-*.json"
+ROUTER_PID = re.compile(r"account-router-(\d+)\.json$")
 WORKFLOW_NAME = re.compile(r"name:\s*['\"]([^'\"]+)['\"]")
 SCRIPT_HEAD_BYTES = 2048
 COMMAND_TIMEOUT_S = 5
@@ -104,13 +105,29 @@ def report_status(path: Path) -> str | None:
     return "blocked" if first == "status: blocked" else "done"
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def router_alive(path: Path) -> bool:
+    """A state file outlives a router that was killed, so the pid in its name decides."""
+    match = ROUTER_PID.search(path.name)
+    return bool(match) and pid_alive(int(match.group(1)))
+
+
 def router_state_for(worktree: str) -> dict:
-    """The routed session working in this job's worktree, found by the cwd it renders."""
+    """The live routed session working in this job's worktree, found by the cwd it renders."""
     if not worktree:
         return {}
     prefix = worktree.rstrip("/") + "/"
     for path in children(router_state_dir()):
-        if not path.match(ROUTER_STATE_GLOB):
+        if not path.match(ROUTER_STATE_GLOB) or not router_alive(path):
             continue
         state = read_json(path, {})
         if not isinstance(state, dict):
@@ -203,18 +220,30 @@ def last_change(directory: Path, session: Path | None) -> int:
     return int(max((mtime(path) for path in paths), default=0.0))
 
 
+def session_state(tmux_alive: bool, worktree: str, router: dict) -> str:
+    """A tmux session left at a bare shell after its router exited is not running.
+    A job naming no worktree cannot be matched to a router, so tmux is all there is."""
+    if not tmux_alive:
+        return "gone"
+    if router.get("held_until"):
+        return "held"
+    if worktree and not router:
+        return "gone"
+    return "running"
+
+
 def job_row(directory: Path, live: set[str]) -> dict | None:
     job = read_json(directory / JOB_FILE, None)
     if not isinstance(job, dict):
         return None
     worktree = str(job.get("worktree") or "")
     report = report_status(directory / REPORT_FILE)
-    alive = directory.name in live
-    state = report or ("running" if alive else "gone")
     router = router_state_for(worktree)
+    state = report or session_state(directory.name in live, worktree, router)
     session = session_dir(str(router.get("session_id") or ""))
     return {
         "state": state,
+        "held_until": as_int(router.get("held_until")),
         "branch": str(job.get("branch") or ""),
         "head": git_head(worktree),
         "account": str(router.get("label") or ""),
