@@ -13,25 +13,25 @@
 </p>
 
 <p align="center">
-  <a href="#install">Install</a> &middot;
-  <a href="#what-you-see">What You See</a> &middot;
-  <a href="#formats">Formats</a> &middot;
-  <a href="#configure">Configure</a> &middot;
-  <a href="#accounts-multi-account-routing">Accounts</a> &middot;
-  <a href="#token-scanning-and-redaction">Token Scanning</a> &middot;
-  <a href="#macos-native">macOS Native</a> &middot;
-  <a href="#how-it-works">How It Works</a>
+  <a href="#quick-start">Quick start</a> &middot;
+  <a href="#claude-code-status-line">Claude Code</a> &middot;
+  <a href="#codex-status-line">Codex</a> &middot;
+  <a href="#accounts">Accounts</a> &middot;
+  <a href="#token-scanning">Token scanning</a> &middot;
+  <a href="#agent-metrics">Agent Metrics</a> &middot;
+  <a href="#macos-apps">macOS apps</a> &middot;
+  <a href="#how-it-works">How it works</a>
 </p>
 
 ---
 
 Five tools, one repo, shared data files:
 
-- **Claude Code statusline** (`bin/statusline.sh`) — the multi-line dashboard below
-- **Codex statusline** (`bin/codex-statusline`, `codex-top`) — the same idea for the Codex CLI
-- **`accounts`** (`bin/accounts.py`) — native-profile account routing and headroom board
-- **Token scanning & redaction** (`bin/scan-tokens*`) — attribute every token, redact before sharing
-- **Agent Metrics** (`bin/agent-metrics`) — opt-in local telemetry and dashboard
+- **Claude Code status line** (`bin/statusline.sh`): the multi-line dashboard below.
+- **Codex status line** (`bin/codex-statusline`, `codex-top`): the same idea for the Codex CLI.
+- **`accounts`** (`bin/accounts.py`): native-profile account routing and a headroom board.
+- **Token scanning** (`bin/scan-tokens*`): attributes every token to work/personal and to a payer.
+- **Agent Metrics** (`bin/agent-metrics`): opt-in local telemetry and dashboard.
 
 ```
 model   Fable 5.ultracode
@@ -47,719 +47,116 @@ usage   today 5.57M · session 1.16M · lifetime 593.31M
   acct        5h   reset   week   fable   reset
 · Work       84%   2h15m    51%     80%      2d
 · Work-Max   25%   2h25m    68%    100%      2d
-* Uni        60%   3h45m    31%     33%      6d
-· Mail        0%       —   100%     87%      2d
+* Personal   60%   3h45m    31%     33%      6d
 · Side        0%       —   100%     16%      2d
-· Personal    0%       —   100%      8%     23h
 ```
 
-Everything you need to not get rate-limited, blow your budget, or lose context mid-task. The Claude statusline is one bash script, zero dependencies beyond `jq`.
+The Claude status line is one bash script with no dependency beyond `jq`.
 
----
-
-## Install
+## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AndrewTKent/statusline/main/install.sh | bash
 ```
 
-Or via npm:
-```bash
-npx @andrewkent/claude-statusline install
-```
+Restart Claude Code. Requires [`jq`](https://jqlang.github.io/jq/) and a logged-in Claude Code; [`gh`](https://cli.github.com/) is optional, for PR badges.
 
-Or manually — copy the script, add one key to settings:
-```bash
-cp bin/statusline.sh ~/.claude/statusline.sh && chmod +x ~/.claude/statusline.sh
-```
-```json
-{ "statusLine": { "type": "command", "command": "~/.claude/statusline.sh", "padding": 0, "refreshInterval": 60 } }
-```
+Other ways in: `npx @andrewkent/claude-statusline install`, or copy `bin/statusline.sh` to `~/.claude/statusline.sh` and point `statusLine` at it ([docs/statusline.md](docs/statusline.md#install)).
 
-Restart Claude Code. Done.
+## Claude Code status line
 
-**Requires:** [`jq`](https://jqlang.github.io/jq/) &middot; Claude Code (logged in) &middot; Optional: [`gh`](https://cli.github.com/) for PR badges
+Claude Code pipes a JSON status blob to the script, and it prints one labeled row per fact: model, session time, account, repo, branch, PR, context fill, the 5-hour and weekly windows, and token totals. Rows appear only when their data exists. Rate limits refresh in the background, so a render never waits on the network except to validate a changed credential.
 
-### Codex
+Reference: [docs/statusline.md](docs/statusline.md) (every row, PR badges, notifications, files written).
 
-**Requires:** Codex CLI &middot; Python 3 &middot; `~/.local/bin` on `PATH` &middot; Multi-line statusline (default): `tmux` &middot; Optional: [`gh`](https://cli.github.com/) for PR linkage
+### Formats
+
+Set `FORMAT=` in `~/.claude/statusline.conf` or the `STATUSLINE_FORMAT` env var. Details: [docs/formats.md](docs/formats.md).
+
+| Format | What it renders |
+|--------|-----------------|
+| `default` | The multi-line dashboard above; falls through to `narrow` below `NARROW_THRESHOLD` (60) columns |
+| `compact` | Only the `context` and `session` rows |
+| `narrow` | The `default` facts with short labels and bars scaled to the width |
+| `sigil` | One dense, width-adaptive line, for tmux status bars |
+| `sparkline` | `default` plus cost and 5h-rate trend charts over the last 15 sessions |
+| `rprompt` | Writes a zsh right-prompt to `~/.claude/rprompt.txt` |
+| `iterm2` | Pushes values to the iTerm2 status bar, or the Kitty window title |
+
+### Configuration
+
+`~/.claude/statusline.conf` is sourced by bash, and every setting is optional. Full list: [docs/configuration.md](docs/configuration.md); annotated example: [`config/statusline.conf.example`](config/statusline.conf.example).
+
+| Key | Effect |
+|-----|--------|
+| `FORMAT` | Render mode (table above) |
+| `DAILY_BUDGET` | Daily cost ceiling; adds the `budget` row |
+| `ACCOUNT_LABELS`, `LABEL_COLORS` | Email pattern → short account tag, and its color |
+| `SHOW_ACCOUNT_RESETS` | Adds the per-account board |
+| `SHARED_ACCOUNT_SNAPSHOT` | Read account and quota rows only from the `accounts` snapshot |
+| `STATUSLINE_NOTIFY` | Opt in to macOS threshold notifications |
+| `WORK_PATHS`, `PERSONAL_PATHS`, `WORK_KEYWORDS`, `PERSONAL_KEYWORDS` | Work/personal token classifier |
+
+## Codex status line
+
+`codex-statusline` launches Codex with a fixed bottom pane showing the model, elapsed time, routed account, repo, context, tokens, permissions, and each Codex account's weekly quota. `codex-top` is the live view of every parent and subagent session. Both read local state only and call no API. Requires the Codex CLI, Python 3, `~/.local/bin` on `PATH`, and `tmux` for the multi-line footer.
 
 ```bash
 ./install-codex.sh
 codex-statusline
-codex-statusline --sandbox read-only --ask-for-approval on-request
 ```
 
-The default launcher uses a fixed bottom pane matching the multi-line Claude
-Code status view. It shows the current model, elapsed time, routed account,
-repository and branch, context use, local tokens consumed, purchased credits,
-permissions, and each registered Codex account's weekly quota and reset time.
-Codex does not expose a fixed token balance
-for subscription limits; the footer reports exact quota percentage remaining
-instead of inventing a token estimate. It binds each
-footer to the rollout file opened by its owning Codex process, so concurrent and
-resumed sessions do not exchange context values. The footer stays 14 rows high
-by default; workflow updates never resize the conversation pane. Workflows take
-priority over the account table when space is tight; overflow is counted on the
-last row, and `codex-statusline --footer` shows all rows.
+Reference: [docs/codex.md](docs/codex.md) (scrolling, native mode, permissions default, settings).
 
-Tmux mouse handling is enabled: scroll over the conversation to enter its history,
-and press `q` to return to live output. In iTerm2, enable mouse reporting and
-wheel reporting, and disable saving alternate-screen lines to scrollback. Otherwise
-scrolling can expose stale input bars and blank redraws from the outer terminal.
-Hold Option for iTerm2's ordinary text selection. Pane
-scrollback keeps a 100,000-line history; tune it with
-`CODEX_STATUSLINE_HISTORY_LIMIT`. When launched inside an existing
-tmux pane, that pane keeps the history depth it was created with; the session
-`mouse` and window `history-limit` options are restored when the launcher exits.
-When launched outside tmux, detaching (prefix d) leaves Codex running — reattach with
-`tmux attach -t codex-statusline-<pid>`; the session ends when Codex exits.
+## Accounts
 
-Set `CODEX_STATUSLINE_NATIVE=1` for Codex's compact one-row footer and
-`--no-alt-screen`. Native mode preserves normal terminal scrollback but cannot
-show account, elapsed time, daily or lifetime tokens, linked agents, or the
-Claude Code-style multi-row layout.
+`accounts` routes each Claude Code session to one of several subscription accounts, each in its own native profile under `~/.accounts/profiles/<label>`; `codex-accounts` does the same for Codex. A supervisor resumes a session on another account before a window is exhausted. When no safe account is left, the overage guard (on by default) stops it at 100% of a window, before extra usage starts.
 
-The footer refreshes every 3s (`CODEX_STATUSLINE_INTERVAL`) and backs off to a
-30s poll once its session has been idle for 10 minutes, exits when the owning
-process is gone, and opportunistically truncates the state DB's WAL when it
-grows past 128 MB — long-lived footers previously starved SQLite checkpoints
-until every Codex query slowed to a crawl.
+```bash
+./install-account-router.sh
+accounts status
+```
 
-The launcher defaults to Codex YOLO mode by passing
-`--dangerously-bypass-approvals-and-sandbox`. An explicit `-a/--ask-for-approval`,
-`-s/--sandbox`, or dangerous-bypass flag replaces that default; profile (`-p`) or
-`-c` approval overrides do not. Set
-`CODEX_STATUSLINE_MANAGE_APPROVALS=0` to pass no permission default. In multi-line
-mode, `tui.status_line=[]` keeps only Codex's compact built-in prompt footer while
-the detailed dashboard stays in the fixed pane.
-Settings load from `${CODEX_HOME:-~/.codex}/statusline.conf`; non-empty environment
-variables override file values, and `CODEX_STATUSLINE_CONFIG` points at a
-different file.
+| Command | What it does |
+|---------|--------------|
+| `accounts status` | Mode + per-account 5h/7d/Fable headroom |
+| `accounts auto` | Clear global and pane pins, then route supervised sessions to the freshest account |
+| `accounts set <label>` | Force every supervised session onto `<label>` |
+| `accounts pane set <label>` | Pin only the current terminal pane |
+| `accounts fable` | Switch live supervised sessions to Fable while headroom is available |
+| `accounts poll` | Refresh dormant stored/native profiles, then poll every routable account |
 
-`codex-top` is the live fleet view for parent and subagent sessions. Both views
-read the newest `~/.codex/state_N.sqlite` and rollout JSONL files locally; neither
-calls an API. Use `codex-watch --details` for expanded session details or
-`codex-statusline --json` for a machine-readable snapshot (renderer-only first flags
-dispatch to the renderer; anything else launches Codex). `codex-top` monitors existing sessions.
+Reference: [docs/accounts.md](docs/accounts.md) (all commands, Codex setup, the overage guard, Fable fallback, remote boards, unattended jobs, the handoff notice).
 
-### Agent Metrics (optional)
+## Token scanning
 
-Agent Metrics is an opt-in, local-first history and dashboard add-on for Claude
-Code and Codex. It is not installed or started by either default installer.
-Nothing is collected until one of its explicit commands is run. It requires
-Python 3.11 or newer; set `AGENT_METRICS_PYTHON` to a compatible interpreter
-when the system `python3` is older.
+`bin/scan-tokens.py` scans every session JSONL in the background, attributes each request to work or personal and to the plan that paid, and feeds the `tokens` and `usage` rows. `bin/usage-ledger.py` keeps a per-day, per-model ledger at `~/.claude/usage-ledger.json` that survives transcript cleanup.
+
+Reference: [docs/token-scanning.md](docs/token-scanning.md); engine design in [`bin/ARCHITECTURE.md`](bin/ARCHITECTURE.md).
+
+## Agent Metrics
+
+Opt-in, local-first history and a dashboard for Claude Code and Codex. Neither installer starts it, and nothing is collected until you run one of its commands. It stores numerical metadata and opaque IDs, never prompts, transcript text, credentials or emails, and serves on loopback only. Requires Python 3.11+.
 
 ```bash
 bin/agent-metrics init
 bin/agent-metrics sync --max-lines 5000
-bin/agent-metrics watch --interval 60 --max-lines 5000
 bin/agent-metrics serve
-# In another terminal, only when you want a browser window:
-bin/agent-metrics open
 ```
 
-`init` creates private runtime storage and a configuration file. On macOS the
-default is `~/Library/Application Support/statusline/agent-metrics/`; on Linux
-it is `${XDG_DATA_HOME:-~/.local/share}/statusline/agent-metrics/`. Override it
-with `--data-dir` or `AGENT_METRICS_DATA_DIR`. Runtime data is never written to
-this repository.
+Reference: [docs/agent-metrics.md](docs/agent-metrics.md).
 
-`sync` incrementally scans local Claude Code and Codex JSONL files into raw,
-event-level SQLite rows and rebuilds derived one-minute metrics. Repeated scans
-are idempotent. `--max-lines` bounds one invocation; omit it for an unlimited
-manual backfill. Bounded scans reserve capacity for appended live files and for
-both providers while rotating through older sources by salted source ID.
-`watch` is an explicit foreground loop that defaults to 5,000 lines every 60
-seconds, measured after each completed cycle. It prints live/backfill progress
-and remaining file/byte counts; Ctrl-C stops it cleanly. With
-`AGENT_METRICS_RECORDER=1` in `statusline.conf`, `macos/launchd/install-agents.sh`
-keeps `watch` running as a launchd agent (`com.claude-agent-metrics-watch`) in
-place of the token scanner; otherwise nothing autostarts it. The local dashboard polls that database for a stacked token
-timeline with selectable token series, one-minute raw or trailing moving-average views, a trailing-day hourly/cumulative view, provider/account/model/effort/session/agent filters, account and model
-totals, parent/child agent drilldown, compactions, tool outcomes and durations,
-turn latency, quota snapshots, and explicitly exposed cost. `serve` does not
-scan automatically and binds only to a loopback address; non-loopback binds are
-rejected. Its HTML, CSS, and JavaScript have no network dependencies or
-analytics.
-`open` passes a private local capability to the browser; dashboard API reads
-without that capability are rejected, including requests from other local processes.
+## macOS apps
 
-The database stores numerical metadata plus provider, model, effort, opaque
-session/request/call IDs, and tool names/statuses. It never stores prompts,
-transcript text, tool arguments or output, source text, source paths,
-credentials, token values, emails, or account-holder names. Account and source
-identities use a local salt. Claude attribution matches each event timestamp to
-`session-accounts.json` using half-open `[from,to)` spans; the organization ID
-participates in the account hash. Codex reads only the explicit current
-`account_id` field from `auth.json`; it never decodes or stores access, refresh,
-or identity tokens.
+A menu bar app, a Raycast extension and a widget bridge read the same data files the status line writes, with no extra API calls.
 
-Configuration lives in the runtime directory's `config.toml`; the generic
-template is [`config/agent-metrics.toml.example`](config/agent-metrics.toml.example).
-Source paths, account aliases, pricing metadata, retention, bind address, and
-port are configurable. Agent Metrics can reuse declared short Claude account
-labels from `ACCOUNT_LABELS` in a configurable `statusline.conf`; explicit
-`[account_aliases]` entries win, and the feature can be disabled. Patterns,
-emails, and organization IDs are matched only in memory and are never stored.
-Pricing is not applied to infer event cost.
+Reference: [docs/macos.md](docs/macos.md).
 
-Optional `[account_tiers]` entries map declared account labels to `5x` or
-`20x`. Agent Metrics records minute quota observations from the shared account
-snapshot and incrementally backfills the existing Claude utilization history
-when a declared label matches in memory. It excludes stale, pending-reset,
-reset-crossing, and zero/negative-utilization intervals, then compares tracked
-token deltas with positive five-hour utilization deltas by plan cohort, model,
-and reasoning effort. The dashboard reports samples, dispersion, and observed
-token ranges as a **tracked-token equivalent**. This is empirical local data,
-not an Anthropic-published fixed quota; other clients and untracked usage can
-bias it. For accounts without safe declared-label history, inference starts
-with new shared snapshots.
+## How it works
 
-Current capture limits: Codex local history does not expose historical account
-handoffs, so newly ingested Codex rows receive the account active at their first
-sync. Some Claude records omit reasoning effort, context limits, compaction
-details, quota, or cost; those fields remain empty rather than being inferred.
-Tool duration is available only when matching start/end records are present.
+On each render the script parses the status blob with one `jq` call, resolves the account, updates the daily ledgers, reads the token-scan summary, builds the git/PR segment from caches, and renders. Network refreshes run in the background.
 
----
-
-## What You See
-
-`default` renders one labeled row per fact — the block at the top of this README. Every row below `repo` is conditional on data actually being available:
-
-| Row | Shown when | What it shows |
-|-----|-----------|----------------|
-| `model` | always | Model + effort (`· low`/`· medium`/`· high`/`· xhigh`/`· max`/`· ultracode`) + `⚡fast` when Settings' fast mode is on |
-| `time` | session duration available | Wall-clock (`⏱ 24:12`); adds `idle Nm` after 30s with no user turn |
-| `account` | account resolved | Tag from `ACCOUNT_LABELS`, colored per `LABEL_COLORS` |
-| `repo` | always | Primary repository name |
-| `tree` | the checkout is a linked worktree | Worktree name |
-| `branch` | the checkout is in Git | Branch, dirty `*`, and `↑`/`↓` divergence |
-| `pr` | the checkout maps to an open PR | PR number and title for the checked-out branch or detached PR head |
-| `context` | always | Context-window fill — 15-dot sweet-spot bar (blue <30%, green 30–70%, yellow 70–85%, red 85%+) |
-| `session` | 5h rate-limit data available | 5h window used, 15-dot bar + `resets <time>` |
-| `weekly` | 7-day rate-limit data available | 7-day window used, 15-dot bar + `resets <date>` |
-| `fable` | account has a per-model weekly cap | That cap's usage, 15-dot bar (label = the scoped model; opt-out `SHOW_FABLE_ROW=0`) |
-| `budget` | `DAILY_BUDGET` set | Spend vs. cap, 10-dot bar |
-| `tokens` | scan data available | All-time work/personal token ratio, 10-dot bar (opt-out `SHOW_TOKENS_ROW=0`) |
-| goal row | `CHALLENGE_GOAL_M` set (see script header comment) | Progress toward a token goal, labeled `CHALLENGE_LABEL` (opt-out `SHOW_CHALLENGE_ROW=0`) |
-| `bounty` | bounty config set and uncleared | ETA to a work-token floor (opt-out `SHOW_BOUNTY_ROW=0`) |
-| `usage` | scan data available | Today / this session / lifetime totals, human-formatted |
-| `stack` | `SHOW_BACKENDS_ROW=1` | Live snapshot across Claude/Codex/remote agents (`bin/live-state.py`) |
-| per-account rows | `SHOW_ACCOUNT_RESETS=1` | One row per tracked account: 5h%, reset, week%, fable%, reset, work-unit cap |
-
-PR badge states: `[draft]`, `[PR✗]` checks failing, `[PR△]` changes requested, `[PR✓]` approved, `[PR⋯]` checks pending, `[PR]` open with no strong signal either way.
-
-### Token tracking
-
-`tokens` and `usage` are both fed by `bin/scan-tokens.py`'s background scan of every session JSONL, cached to `~/.claude/token-scan-summary.json` (small, preferred) or `~/.claude/token-scan-cache.json` (full, fallback) — rescanned in the background whenever that cache is older than 180s.
-
-- **`tokens`** — all-time work/personal ratio (cyan = work, magenta = personal), classified per-request by the `WORK_PATHS`/`WORK_KEYWORDS` vs `PERSONAL_PATHS`/`PERSONAL_KEYWORDS` rules in `statusline.conf`
-- **`usage`** — today / this session / lifetime, human-formatted (k/M/B)
-- Subagent (Agent tool) tokens are scanned separately (30s cache) and only break out in the optional token-goal row
-
-### Account tagging
-
-All cost and token ledgers are tagged with your account label (e.g., `work` or `personal`), derived from your OAuth email via `ACCOUNT_LABELS`. This lets you aggregate spend by account after the fact. Two related but distinct dimensions live inside the token scanner itself: `EMAIL_PAYER_MAP` (which plan paid) and the work/personal path/keyword classifier (what the work was) — see Configure.
-
-Set `SHARED_ACCOUNT_SNAPSHOT=1` to make account and quota rendering read-only and snapshot-only. Run `accounts poll` for one refresh or `accounts watch --interval 60` as an explicit foreground loop. The renderer reads `~/.accounts/statusline-snapshot.json` once, maps the current account only through `ACCOUNTS_ROUTED_LABEL`, and displays only declared short labels. It does not inspect credentials, call the profile or usage APIs, write shared ledgers, or start the full token scanner. Missing, stale, pending-reset, and error data remain unknown or visibly stale; they are never rendered as zero. `SHARED_ACCOUNT_SNAPSHOT_FILE` and `SHARED_ACCOUNT_SNAPSHOT_MAX_AGE` are configurable.
-
-Shared mode uses its own lightweight presentation: the default layout keeps the
-account board, while compact terminal formats use one line. It still refreshes
-the terminal title and router state, but skips legacy notifications and history writes.
-
-Claude Code's `statusLine.refreshInterval` controls renderer cadence. A 60-second interval matches the foreground account watcher and avoids repeated work for minute-resolution quota data.
-
-### Terminal tab titles
-
-The script sets the terminal tab title (via ANSI escape) to `repo-name` on main/master, or `repo-name (branch)` on feature branches. Useful in Zed, iTerm2, and other terminals to tell sessions apart at a glance.
-
-### Background — Notifications
-
-macOS Notification Center alerts are off by default; opt in with
-`STATUSLINE_NOTIFY=1` (exported, or set in `~/.claude/statusline.conf`).
-When enabled they fire once per threshold, deduped:
-- **Rate limit** at 80%, 90%, 95%
-- **Context** at 80%, 95%
-- **Budget** at 90%, 100%
-
-### Automatic account detection
-
-When you `/login` inside a routed profile, the status bar detects the credential change before writing its ledgers, refreshes the profile, and updates the rate limits and account label on the next render. Sessions using that same native profile see the refreshed login. If the login belongs to another stored account, the router repairs the current profile and pins the logged-in account at the active policy scope: pane-local for a pane pin, otherwise global.
-
----
-
-## Formats
-
-Seven render modes. Set `FORMAT=` in `~/.claude/statusline.conf` or `STATUSLINE_FORMAT=` env var.
-
-### `default` — Multi-line dashboard (shown above)
-
-The full cockpit, one labeled row per fact. Auto-falls-through to `narrow` when the detected terminal width is below `NARROW_THRESHOLD` (default 60 cols).
-
-### `compact` — Context + session only
-
-Just the `context` and `session` rows — the two numbers that actually gate you.
-
-### `narrow` — Trimmed fallback for tight panels
-
-Same facts as `default` (model+effort, dir+branch, context, 5h, 7d+cost), trimmed hard: short labels, 5–8 char bars scaled to `COLS`, no reset timestamps or breakdowns. Auto-selected under `default` when the panel is narrow; can also be set explicitly.
-
-### `sigil` — Single dense line
-
-```
-◈ Opus 4.6 · $2.14 ($8.90/d) · ●●●○○ 60% · ⎇ feature-123✦↑1[PR✓] · 42%⏱24:12 · 71%w
-```
-
-Width-adaptive: full detail (cost, daily aggregate, context, git, 5h rate, weekly) at ≥120 cols; drops the daily aggregate and weekly at ≥80; drops git detail to a bare branch name and rate to a bare percentage below 80. Good for tmux status bars or small terminals.
-
-### `sparkline` — Default + trend history
-
-```
-  ...default output...
-  trend   cost▁▂▃▅▃▂▁▄▆█  rate▁▃▅▇█▇▅▃▂▁
-```
-
-Appends inline `▁▂▃▄▅▆▇█` mini-charts (cost and 5h-rate trend, last 15 sessions) read from `~/.claude/session-history.jsonl`. See if you're burning hotter today than yesterday.
-
-### `rprompt` — Zsh right-prompt
-
-Writes zsh-formatted status to `~/.claude/rprompt.txt`. Add to `.zshrc`:
-
-```zsh
-_claude_rprompt() {
-  local f=~/.claude/rprompt.txt
-  [[ -f "$f" ]] || return
-  local age=$(( $(date +%s) - $(stat -f %m "$f") ))
-  (( age > 300 )) && { RPROMPT=""; return }
-  RPROMPT="$(cat "$f")"
-}
-autoload -Uz add-zsh-hook
-add-zsh-hook precmd _claude_rprompt
-```
-
-Claude metrics in your shell prompt gutter. Zero vertical space. Auto-hides after 5 minutes of inactivity. Also emits `sigil` to stdout for Claude Code's own status area.
-
-### `iterm2` — Native terminal status bar
-
-Pushes structured data to iTerm2 via `OSC 1337;SetUserVar` or sets the Kitty window title via `OSC 2`. Auto-detects your terminal; also emits `sigil` to stdout as a fallback.
-
-**iTerm2 setup:** Preferences → Profiles → Session → Status Bar → add "Interpolated String" components:
-
-`\(user.claude_model)` &middot; `\(user.claude_cost)` &middot; `\(user.claude_ctx)` &middot; `\(user.claude_git)` &middot; `\(user.claude_rate)` &middot; `\(user.claude_timer)`
-
----
-
-## Configure
-
-Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated version with every knob: [`config/statusline.conf.example`](config/statusline.conf.example). All settings are optional — the script works with no config file at all.
-
-**Cost & format**
-- `DAILY_BUDGET=20` — daily cost ceiling; enables the `budget` row + 90%/100% notifications (when opted in)
-- `STATUSLINE_NOTIFY=1` — opt in to macOS Notification Center threshold alerts (default off)
-- `FORMAT=default` — `default | compact | narrow | sigil | sparkline | rprompt | iterm2`
-
-**Branch display**
-- `BRANCH_PREFIX_STRIP="andrew/"` — strip a literal prefix off the displayed branch name
-- `MAX_BRANCH=24` — max visible branch chars before an ellipsis
-
-**Account labels**
-- `ACCOUNT_LABELS="work:*@company.com personal:me@gmail.com"` — email pattern → short tag, first match wins
-- `LABEL_COLORS="work:cyan personal:magenta"` — tag → color for the `account` row (unmapped tags default to orange)
-- `EMAIL_PAYER_MAP="work:you@company.com personal:me@gmail.com"` — which plan paid, for the token scanner's `payer` dimension (independent of the work/personal classifier below)
-- `SHOW_ACCOUNT_RESETS=1` — adds a per-account board (5h%, reset, week%, fable%, reset, work-unit cap) below the main rows
-- `SHARED_ACCOUNT_SNAPSHOT=1` — read account/routing/quota rows only from the private accounts snapshot; use `accounts watch --interval 60` to refresh it explicitly
-- `SHARED_ACCOUNT_SNAPSHOT_FILE` / `SHARED_ACCOUNT_SNAPSHOT_MAX_AGE` — override the snapshot path or stale threshold
-- `ACCOUNTS_HARD_SESSION_LIMIT=0` — opt out of stopping routed Claude sessions at a plan wall (100% five-hour, 100% weekly, or 100% Fable for a Fable session); account pins are bypassed only at those boundaries
-- `ACCOUNTS_STRICT_QUOTA=1` — refuse to launch when no account has quota; by default the router warns and opens on the best authenticated account anyway, so history can be read and a session resumed until a window resets
-- `ACCOUNTS_HOLD_FOR_RESET=1` — when no account can take the work, hold the session until a window resets and resume it, instead of stopping (off by default)
-
-**Token classifier** (feeds the `tokens` row's work/personal split — see `bin/scan-tokens.py`)
-- `WORK_PATHS` / `PERSONAL_PATHS` — comma-separated cwd/file-path substrings
-- `WORK_KEYWORDS` / `PERSONAL_KEYWORDS` — comma-separated prompt keywords (weighted 3× a path hit)
-
-**Bounty / challenge tracker** (opt-in token-goal ETA)
-- `CHALLENGE_START`, `BOUNTY_TARGET_TOKENS`, `BOUNTY_LOOKBACK_DAYS`, `BOUNTY_SESSION_GAP_MIN`
-
-**Row visibility** (each defaults on when its data exists; `0` hides it)
-- `SHOW_FABLE_ROW`, `SHOW_TOKENS_ROW`, `SHOW_CHALLENGE_ROW`, `SHOW_BOUNTY_ROW`
-
-**Live state stack row** (opt-in)
-- `SHOW_BACKENDS_ROW=1` — adds a `stack` row from `bin/live-state.py`: a snapshot across Claude (`account-resets.json`), Codex (newest `state_N.sqlite`), and remote autobuild agents (`$AGENT_SESSIONS_PATH`)
-
----
-
-## Accounts: Multi-Account Routing
-
-`accounts` (`bin/accounts.py`) and `codex-accounts` (`bin/codex_accounts.py`)
-provide per-session routing and headroom boards. Each Claude account gets a
-native config under `~/.accounts/profiles/<label>`; each Codex account gets an
-isolated `CODEX_HOME` under `~/.codex-accounts/profiles/<label>`.
-Credentials and entitlement caches are isolated; projects, transcripts, settings,
-skills, and plugins are shared. Interactive sessions remain first-party
-subscription sessions instead of API-token sessions.
-
-For shared statusline rendering, enable `SHARED_ACCOUNT_SNAPSHOT=1` in
-`statusline.conf`. The router installer registers a launch agent that runs
-`accounts poll` every minute; `accounts watch --interval 60` is the foreground
-alternative.
-
-Install the router from a local checkout:
-
-```bash
-./install-account-router.sh
-```
-
-The installer puts the Claude router wrapper at `~/.local/bin/claude`, keeps
-native Claude binaries under `~/.local/share/claude/versions`, installs both
-router toolsets under `~/.local/bin`, and prepends supervised launchers from
-`~/.accounts/bin` and `~/.codex-accounts/bin` in new zsh sessions.
-
-The overage guard is on by default. A supervised session resumes on another
-safe account on the next supervisor check after its account reaches 100% of
-the five-hour or weekly window, or terminates when none is available. A Fable
-session is also moved at 100% Fable utilization, falling back to Opus on the
-same account when its general windows still have headroom. That fallback
-happens inside the running process, whether the session launched on Fable or
-switched to it later (`ACCOUNTS_FABLE_FALLBACK_MODEL` changes the model), and
-the session returns to Fable on its own once the window resets; only a move to
-another account restarts it. Past any of those walls the plan stops paying and
-extra usage starts, which is what the guard prevents.
-`ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
-
-`ACCOUNTS_HOLD_FOR_RESET=1` changes what happens when that guard fires and no
-other account can take the session. By default the router stops the session and
-exits, which is right at a keyboard and wrong for an unattended job: the tmux
-session drops to a bare shell and nothing brings the work back when the windows
-reset. With the hold on, the router stops the child the same way, then sleeps
-until the soonest reset on the board plus two minutes, polls, and tries to route
-again, re-holding if there is still no room. No sleep runs longer than 15
-minutes, which is also how often it rechecks a board that names no reset at all:
-once a five-hour reset slips into the past on a row the poll has not advanced,
-the soonest moment left on the board is the weekly reset, and sleeping to that
-would park the session for days. Within a sleep it waits in 30-second slices
-against the wall clock, so a suspended machine wakes on time. The stderr line
-says when it will resume, in local time. Ctrl-C ends a hold and exits as it does
-today. The hold also applies before the first launch, so a session started with
-every account walled waits instead of opening on an exhausted one.
-
-A resumed session carries a first message saying it was held, from when to when
-and why, whatever `ACCOUNTS_HANDOFF_NOTICE` is set to — a held session that comes
-back silently is the failure the hold exists to fix. As with a move, a session
-with no transcript to resume gets its original prompt again instead, because
-nothing was in flight to report. Each hold counts as one handoff in the move
-count the status line shows.
-
-| Command | What it does |
-|---------|---------------|
-| `accounts set <label>` | Force every supervised session onto `<label>` |
-| `accounts pane set <label>` | Pin only the current terminal pane to `<label>` |
-| `accounts pane clear` | Return the current pane to the global policy |
-| `accounts auto` | Clear global and pane pins, then route supervised sessions to the freshest account |
-| `accounts fable` | Switch live supervised sessions to Fable while headroom is available |
-| `accounts status` | Mode + per-account 5h/7d/Fable headroom + ⚠login flags |
-| `accounts poll` | Refresh dormant stored/native profiles, then poll every routable account |
-| `accounts refresh [label]` | Refresh stale file-backed credentials without a browser |
-| `accounts mint <label>` | Mint + vault a 1-year token for headless jobs |
-| `accounts tokens` | List minted tokens and expiry |
-| `accounts sync` | Converge the token vault with a second machine |
-| `accounts pick-env` | Emit `CLAUDE_CONFIG_DIR` and account metadata |
-
-Codex uses its own command because the two CLIs expose different auth and quota
-interfaces:
-
-| Command | What it does |
-|---------|---------------|
-| `codex-accounts register [label]` | Register the current authenticated Codex home |
-| `codex-accounts login [label]` | Authenticate another ChatGPT account in an isolated home |
-| `codex-accounts auto` | Route supervised sessions to the account with the most headroom |
-| `codex-accounts set <label>` | Pin supervised sessions to one account |
-| `codex-accounts status` | Show the mode and each account's quota windows |
-| `codex-accounts poll` | Refresh quota through Codex app-server without an inference |
-| `codex-accounts pick --poll` | Poll and print the account selected by the current policy |
-
-Codex requires `cli_auth_credentials_store = "file"` and this SessionStart hook:
-
-```toml
-[[hooks.SessionStart]]
-command = "if [ -x \"$HOME/.local/bin/codex-account-session\" ]; then exec \"$HOME/.local/bin/codex-account-session\"; fi"
-```
-
-The hook binds each thread to its routed label so the statusline stays correct
-when concurrent sessions use different accounts. Automatic handoffs require a
-fresh weekly usage reading strictly above 80% and another account whose binding
-usage is at least 15 points lower. Poll errors, missing or stale weekly readings,
-and short-window usage alone do not trigger a handoff. A hard `codex-accounts set`
-pin moves the thread on the next supervisor check.
-
-Inside Claude Code, prefix these with `!` (for example,
-`!accounts set acme-max`). Set `"respondToBashCommands": false` in
-`~/.claude/settings.json` so the switch does not trigger an LLM response.
-
-`claude-router.py` supervises interactive sessions. It reserves the selected
-account, watches the active model's quota windows, and resumes the exact session
-under another isolated profile before a window is exhausted. The shell never
-regains control during a handoff. Changing to Fable mode also moves running
-supervised sessions to Fable in place — except a session you explicitly put on
-another model (a `--model` launch flag or a live `/model` switch), which stays
-there until you switch back to `/model fable` or re-run `accounts fable`. A
-live switch to the fallback model itself (Opus by default) is read as the
-fallback, not a pin: the session already retries Fable each turn. If
-every Fable-capable account is gated, the same session resumes on Opus using the
-safest general-model account. Chasing Fable never moves a session onto an
-account already at the departure wall, which would hand it straight back. A Fable session that exhausts its window on the
-account it is on falls back to Opus inside the running process and returns to
-Fable on its own when the window resets; only a move to another account
-restarts the session.
-Minted long-lived tokens remain outside `~/.claude`
-(`~/.accounts/vault.json`); archival copies only session JSONLs from
-`~/.claude/projects`.
-
-### Remote account boards
-
-One machine's board can appear under another's. The remote machine runs this
-same router over its own accounts and polls itself; this machine copies the two
-files that poll publishes and renders them below its local table.
-
-```
-  acct                5h   reset   week   fable   reset
-* Work               84%   2h15m    51%     80%      2d
-· Personal            0%       —   100%      8%     23h
-· devbox · 1m ago
-· Team-1             12%   3h40m    26%      4%      5d
-· ▸ iri-1234-cache   running · Team-1 · 2 handoffs
-·     solei loop to sun 14/15 agents · 12m
-```
-
-On the machine being watched, install the router and let its poller run:
-
-```bash
-./install-account-router.sh          # picks launchd on macOS, systemd on Linux
-loginctl enable-linger "$USER"       # Linux: keep the timers up after logout
-```
-
-On the machine doing the watching, name the boards in `~/.claude/statusline.conf`:
-
-```bash
-REMOTE_ACCOUNT_BOARDS="devbox:devbox"                        # <name>:<ssh-host>
-REMOTE_BOARD_UP_DEVBOX='"$HOME/.local/bin/devbox-cli" status | grep -q running'
-```
-
-Mechanics, and the reason they are worth knowing:
-
-- **`accounts poll` does the pulling, not the renderer.** It fetches
-  `~/.accounts/statusline-snapshot.json` and `~/.codex-accounts/usage.json` over
-  SSH (`BatchMode`, short `ConnectTimeout`, hard overall timeout) into
-  `~/.accounts/remote/<name>/`. Every renderer reads only those local copies, so
-  no render ever blocks on the network.
-- **Credentials never cross.** Only percentages, reset times, labels and plan
-  names are in those two files, and token-shaped keys are dropped on arrival.
-- **Freshness is stated, not implied.** Numbers younger than
-  `REMOTE_BOARD_MAX_AGE` (default 900s) render as current; older or failed pulls
-  keep the last numbers, dimmed, with their age. Nothing is ever shown as zero
-  because a pull failed.
-- **A stopped machine is left alone.** When a board's up-check exits non-zero it
-  is not contacted at all, and the row reads `<name> · stopped`. The check runs
-  as `bash -lc` under the poller's environment, so give it absolute paths.
-- **Codex rides along, in its own place.** The same pull carries the remote
-  Codex quota rows, which appear in this machine's Codex statusline and
-  `codex-top`. `REMOTE_BOARD_CODEX_ROWS=1` also lists them, as `cx <label>`,
-  under the board's Claude rows.
-
-### Unattended jobs on a board
-
-A board that runs unattended Claude Code sessions publishes them too, and they
-render under its account rows: one line per job, and under a running job one
-line per workflow that still has agents out.
-
-On the board, each job is a tmux session working out of `~/handoffs/<slug>/`.
-The `jobs-publish` timer installed with the router rewrites `~/handoffs/jobs.json`
-every 30 seconds, and `accounts poll` here copies it alongside the two board
-files.
-
-- **State is observed, not reported.** A job is `running` while both its tmux
-  session and the router supervising it are alive, `held` while that router is
-  waiting for a window to reset (with the time it resumes), `done` or `blocked`
-  once it writes a `report.md` (`status: blocked` on the first line means
-  blocked), and `gone` otherwise. A wedged session cannot claim to be healthy.
-- **A session outliving its router reads as `gone`, not `running`.** The router
-  writes `/tmp/claude/account-router-<pid>.json` from launch, and that file
-  outlives the process, so liveness is the pid in its name. A tmux session
-  sitting at a bare shell after its router exited used to publish as `running`
-  forever. A job that names no worktree cannot be matched to a router at all, so
-  there the tmux session is still the whole test.
-- **Workflow progress comes from Claude Code's own journals.** A workflow counts
-  as running when agents it started have no result yet and the job is still
-  running. `14/15 agents` is agents finished over agents started.
-- **A board with a running job is pulled every 30 seconds** instead of
-  `REMOTE_BOARD_PULL_INTERVAL`, and drops back when the last job stops.
-- **A job shows where it was sent from.** `job.json` may carry `origin_session`
-  (the sender's Claude Code session id) and `origin_pane` (the first 12 hex of
-  the SHA-256 of `tmux:<server>:<pane>`, `iterm:<session uuid>` or
-  `term:<TERM_SESSION_ID>`). A job renders only in a status line whose session
-  or terminal pane matches, so it follows the pane across `/clear` and new
-  sessions and stays off every other pane. A job with neither shows everywhere.
-  `REMOTE_JOBS_SHOW_ALL=1` lists every job and marks this pane's own with
-  `← this session`.
-- **Recently finished jobs stay visible for half an hour**, showing their state
-  and age, then drop off. A `held` job stays on screen however long the hold
-  lasts — it has not finished — and reads `held · resumes 10:20pm PDT` in the
-  reader's own time zone. `REMOTE_JOB_NAME_MAX` (default 20) caps the name so a
-  long branch cannot widen the table.
-
-### Being told the session was moved
-
-A cross-account move stops the running process and relaunches it on `--resume`.
-Claude Code adds "Continue from where you left off." only when the transcript
-ends mid-turn, so a session that was idle between turns never learns it moved —
-and any in-process workflow, subagent or background task died with the old
-process. `ACCOUNTS_HANDOFF_NOTICE=1` makes the relaunch carry a first message
-naming the accounts, the reason, and what was lost, so an unattended session can
-restart what was in flight. Off by default; a session with no transcript to
-resume never gets one. The prompt a session was launched with stays behind on a
-relaunch that resumes — it is already in the transcript, and a second prompt
-beside the notice makes the CLI submit neither.
-
----
-
----
-
-## Token Scanning and Redaction
-
-Two independent tools, both built on the same session JSONLs.
-
-**Token scanning** (`bin/scan_tokens_core.py` + the `bin/scan-tokens*.py`/`.sh` CLIs) attributes every request to work/personal and to a payer, incrementally, and feeds the `tokens`/`usage`/goal/`bounty` rows above plus the work-unit cap columns on the account board. `bin/derive-cap.py` fits those per-account caps from utilization history — it's a manual, unscheduled tool you re-run occasionally, not something cron or launchd calls. Full design, cache schema, and failure modes: [`bin/ARCHITECTURE.md`](bin/ARCHITECTURE.md).
-
-**Durable ledger & archival** (`bin/usage-ledger.py`, `bin/archive-transcripts.sh`, `bin/vault-snapshot.sh`) keep a permanent per-day/per-model token ledger at `~/.claude/usage-ledger.json` and mirror Claude Code session JSONLs nightly — rows never pruned, survives transcript cleanup.
-
----
-
-## macOS Native
-
-Three companion apps that read the same data files — no extra API calls.
-
-### Menu Bar App
-
-<img width="24" height="24" alt="green dot" src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'><circle cx='12' cy='12' r='8' fill='%2327ae60'/></svg>"> Color-coded icon: green = ok, yellow = rate limit 70%+, red = 90%+ or context critical.
-
-Click for a SwiftUI popover with full dashboard.
-
-```bash
-cd macos/ClaudeMenuBar
-./build.sh      # Compiles with swiftc — no Xcode needed
-./install.sh    # Copies to ~/Applications, auto-starts at login
-```
-
-### Raycast Extension
-
-Search "Claude Status" for a full metric list, or pin to menu bar for always-visible `$12.34 | 5hr: 45%`.
-
-```
-macos/claude-raycast/    # TypeScript — ready when Raycast is installed
-```
-
-### Widget Bridge
-
-Consolidates all status data into `~/.claude/widget-snapshot.json` with a 24-hour cost sparkline. Foundation for WidgetKit desktop/lock screen widgets.
-
-```bash
-swift macos/claude-widget/Bridge/claude-widget-bridge.swift
-```
-
-Run on a 30s launchd timer for auto-refresh. See [`macos/claude-widget/README.md`](macos/claude-widget/README.md) for setup.
-
----
-
-## How It Works
-
-Claude Code pipes a JSON status blob into the script via stdin on every tool call. The script:
-
-1. **Parses** model, cost, context, session metadata (single `jq` call)
-2. **Detects** credential changes and validates changed profile identity before any account-tagged ledger write
-3. **Resolves** the account label from the OAuth profile cache and updates the daily cost/token ledgers in `~/.claude/`
-4. **Scans** subagent JSONL files for the current session (cached 30s) and reads `token-scan-summary.json` (fallback: `token-scan-cache.json`) for the work/personal token split — kicks off a background `scan-tokens.py` rescan when that cache is stale (>180s)
-5. **Builds** the git/PR segment (branch, dirty, ahead/behind, `gh pr view` cached 90s) and the effort/fast-mode/focus badges
-6. **Refreshes** rate limits and profile from Anthropic's OAuth API in the background (usage cached 60s, profile cached 5min)
-7. **Interpolates** usage between polls — tracks velocity across consecutive API responses for smooth fractional percentages
-8. **Builds** the budget row (if `DAILY_BUDGET` is set) and the optional multi-account reset board (if `SHOW_ACCOUNT_RESETS=1`)
-9. **Sets** terminal tab title to repo + branch
-10. **Checks** notification thresholds when `STATUSLINE_NOTIFY=1` (fires once per crossing, deduped)
-11. **Renders** in your chosen format, falling back to `narrow` under `NARROW_THRESHOLD` columns
-
-### Architecture
-
-```
-Claude Code                    statusline.sh
-    │                              │
-    ├─ stdin JSON ────────────────►│ parse (jq)
-    │                              │
-    │                              ├─► changed credential: fetch profile (≤2s)
-    │                              ├─► resolve account label (profile cache)
-    │                              ├─► update daily-cost.json    (tagged w/ account)
-    │                              ├─► update daily-tokens.json  (tagged w/ account)
-    │                              ├─► scan subagent JSONL files (cached 30s)
-    │                              ├─► read token-scan-summary.json (fallback: token-scan-cache.json)
-    │                              ├─► background: fetch /api/oauth/usage (cached 60s)
-    │                              ├─► background: refresh /api/oauth/profile (cached 5min)
-    │                              ├─► check notification thresholds
-    │                              ├─► set terminal tab title (\033]0;repo (branch)\007)
-    │                              │
-    │  stdout ANSI ◄──────────────├─► render (default|compact|narrow|sigil|sparkline|rprompt|iterm2)
-    │                              │
-    ├─ /tmp/claude/*.json ────────►│ macOS apps read these
-```
-
-### Performance
-
-| Concern | How it's handled |
-|---------|-----------------|
-| Network latency | Background refreshes; a changed credential can block up to 2s for identity validation |
-| Concurrent sessions | Lock file with stale-PID detection (auto-cleanup at 30s) |
-| Git dirty check | `git diff-index --quiet HEAD` (faster than `git status`) |
-| PR status | Repository-scoped `gh` lookup cached 90s, background-refreshed |
-| Ledger writes | Atomic (mktemp + mv) |
-| Account switch | OAuth token hash + credential mtime tracking, synchronous identity validation before ledger writes |
-| Subagent scan | File-based cache with 30s TTL, scoped to current session |
-| Token bar | `jq` read from `token-scan-summary.json` (fallback: `token-scan-cache.json`); the actual JSONL rescan runs in the background via `scan-tokens.py`, never inline |
-| Shared account snapshot | One stable inode+mtime read; no credential/profile/usage calls or shared-ledger writes |
-
-### Files
-
-| File | Purpose | Lifetime |
-|------|---------|----------|
-| `~/.claude/statusline.sh` | The script (or symlink) | Permanent |
-| `~/.claude/statusline.conf` | Config | Permanent |
-| `~/.claude/daily-cost.json` | Daily cost ledger (account-tagged) | Resets daily |
-| `~/.claude/daily-tokens.json` | Daily token tracker (account-tagged) | Resets daily |
-| `~/.claude/token-scan-summary.json` | Small token-scan summary (preferred read) | Persistent |
-| `~/.claude/token-scan-cache.json` | Full token-scan cache (fallback read) | Persistent |
-| `~/.claude/account-resets.json` | Multi-account reset ledger (`SHOW_ACCOUNT_RESETS`) | Persistent |
-| `~/.claude/account-caps.json` | Per-account work-unit caps, written by `bin/derive-cap.py` | Persistent |
-| `~/.claude/utilization-history.jsonl` | Raw utilization samples backing the account board | Rolling |
-| `~/.claude/session-history.jsonl` | Sparkline history (account + subagent fields) | Rolling 100 entries |
-| `~/.claude/rprompt.txt` | Zsh RPROMPT (`rprompt` format) | Updated each render |
-| `~/.claude/usage-ledger.json` | Durable per-day/per-model token ledger (`bin/usage-ledger.py`) | Permanent |
-| `~/.claude/statusline-tz` | Optional timezone override for reset-time display | Permanent |
-| `~/.accounts/statusline-snapshot.json` | Private declared-label routing and quota snapshot (`SHARED_ACCOUNT_SNAPSHOT=1`) | Written only by explicit `accounts poll`/`accounts watch` |
-| `~/.accounts/remote/<name>/` | Another machine's pulled board: its snapshot, its Codex usage, and the pull's `meta.json` | Rewritten by `accounts poll` |
-| `~/.claude/.credentials.json` | Claude Code's own OAuth credential — read-only, mtime-tracked | Claude-Code-managed |
-| `/tmp/claude/statusline-usage-cache-<profile>.json` | Account-keyed rate-limit API cache | 60s TTL |
-| `/tmp/claude/statusline-profile-cache-<profile>.json` | Account-keyed profile API cache | 5min TTL |
-| `/tmp/claude/statusline-usage-prev-<profile>.json` | Account-keyed previous poll, for interpolation | Updated each poll |
-| `/tmp/claude/statusline-{usage,profile}-cache.json` | Current-profile aliases for companion apps | Updated each render |
-| `/tmp/claude/statusline-subagent-<sid>.txt` | Subagent token cache per session | 30s TTL |
-| `/tmp/claude/ctx-history-<sid>.txt` | Context-fill samples, for the fill-ETA calc | Rolling |
-| `/tmp/claude/statusline-pr-<repo-ref-key>.json` | PR status cache | 90s TTL |
-| `/tmp/claude/statusline-pr-<repo-ref-key>.json.lock` | PR refresh lock | Persistent file, transient lock |
-| `/tmp/claude/statusline-raw.json` | Raw status blob, for macOS apps | Updated each legacy render; not used in shared snapshot mode |
-| `/tmp/claude/statusline-notif-state.json` | Notification dedup state | Per-threshold |
-| `/tmp/claude/statusline-refresh-<profile>.lock` | Account-keyed background refresh lock | Transient |
-| `/tmp/claude/statusline-creds-mtime-<profile>` | Account-keyed credential mtime detector | Persistent |
-| `/tmp/claude/statusline-token-hash-<profile>` | Account-keyed OAuth token hash detector | Persistent |
-
----
+The step-by-step pipeline, cache TTLs and the list of files are in [docs/statusline.md](docs/statusline.md#how-it-works); the token-scan engine, remote boards and unattended jobs are in [`bin/ARCHITECTURE.md`](bin/ARCHITECTURE.md).
 
 ## Uninstall
 
@@ -767,19 +164,14 @@ Claude Code                    statusline.sh
 # curl install
 curl -fsSL https://raw.githubusercontent.com/AndrewTKent/statusline/main/uninstall.sh | bash
 
-# npm
+# npm install
 npx @andrewkent/claude-statusline uninstall
-
-# Manual
-rm ~/.claude/statusline.sh
-# Remove "statusLine" key from ~/.claude/settings.json
 
 # Codex monitor
 ./uninstall-codex.sh
-# Optionally: rm ~/.codex/statusline.conf
 ```
 
----
+For a manual install, delete `~/.claude/statusline.sh` and remove the `statusLine` key from `~/.claude/settings.json`. For Codex, optionally also `rm ~/.codex/statusline.conf`.
 
 ## License
 

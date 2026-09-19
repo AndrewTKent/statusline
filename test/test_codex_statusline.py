@@ -3145,7 +3145,7 @@ class CodexStatuslineTest(unittest.TestCase):
             approval_mode="",
             git_branch="",
             archived=0,
-            agent_path="/root/release_train/solei_local",
+            agent_path="/root/release_train/review_local",
         )
         stale = dataclasses.replace(base, id="stale", rollout_path="/tmp/stale.jsonl", updated_at=100)
         activity = codex_statusline.RolloutActivity(
@@ -3186,9 +3186,9 @@ class CodexStatuslineTest(unittest.TestCase):
                 "active": 1,
                 "active_tools": 1,
                 "active_shells": 1,
-                "running": ["release-train solei-local"],
+                "running": ["release-train review-local"],
                 "running_details": [
-                    {"label": "release-train solei-local", "elapsed_seconds": 100}
+                    {"label": "release-train review-local", "elapsed_seconds": 100}
                 ],
             },
         )
@@ -3223,9 +3223,9 @@ class CodexStatuslineTest(unittest.TestCase):
                 "active": 1,
                 "active_tools": 2,
                 "active_shells": 2,
-                "running": ["release-train solei-local"],
+                "running": ["release-train review-local"],
                 "running_details": [
-                    {"label": "release-train solei-local", "elapsed_seconds": 900}
+                    {"label": "release-train review-local", "elapsed_seconds": 900}
                 ],
             },
             "sandbox": "disabled",
@@ -3280,7 +3280,7 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(account_header.index("banked"), personal_row.index("—"))
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
-        self.assertEqual(lines[-1], "◯ release-train solei-local 0/1 agents done · 15m")
+        self.assertEqual(lines[-1], "◯ release-train review-local 0/1 agents done · 15m")
         expected_labels = [
             "model",
             "time",
