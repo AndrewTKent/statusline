@@ -3260,7 +3260,7 @@ class CodexStatuslineTest(unittest.TestCase):
 
         self.assertIn("model   GPT-5.6 · max", rendered)
         self.assertIn("time    ⏱ 3:00", rendered)
-        self.assertIn("session ●●●●●●●●●●○○○○○ 67%", rendered)
+        self.assertNotIn("session ●", rendered)
         self.assertTrue(rendered.splitlines()[-2].startswith("  ⏵⏵"))
         self.assertIn("account andrew · auto", rendered)
         self.assertNotIn("→", rendered)
@@ -3281,15 +3281,15 @@ class CodexStatuslineTest(unittest.TestCase):
         reset_text = codex_statusline.limit_display(board["rows"][0]["weekly"])[1]
         reset_value = reset_text.removeprefix("resets ")
         self.assertEqual(account_header.index("week") + 4, account_row.index("67%") + 3)
-        self.assertEqual(account_header.rindex("reset"), account_row.index(reset_value))
+        self.assertEqual(account_header.index("renews") + 6, account_row.index(reset_value) + len(reset_value))
         self.assertNotIn("resets", account_row)
         banked_text = codex_statusline.reset_credit_text(board["rows"][0]["reset_credits"])
         self.assertTrue(banked_text.startswith("2 exp "))
-        self.assertEqual(account_header.index("banked"), account_row.index(banked_text))
+        self.assertEqual(account_header.index("resets"), account_row.index(banked_text))
         personal_row = next(line for line in lines if line.startswith("  · Personal"))
-        self.assertEqual(account_header.index("banked"), personal_row.rindex("—"))
-        self.assertIn("5h", account_header)
-        self.assertIn("20%", account_row)
+        self.assertEqual(account_header.index("resets"), personal_row.rindex("—"))
+        self.assertNotIn("5h", account_header)
+        self.assertNotIn("20%", account_row)
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
         self.assertEqual(lines[-1], "◯ release-train review-local 0/1 agents done · 15m")
@@ -3300,7 +3300,6 @@ class CodexStatuslineTest(unittest.TestCase):
             "repo",
             "branch",
             "context",
-            "session",
             "weekly",
             "usage",
         ]
@@ -3346,7 +3345,7 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertIn(f"{palette.magenta}5.00k{palette.reset}", colored)
         self.assertIn(f"{palette.green}9.00k{palette.reset}", colored)
         self.assertIn(f"{palette.red}○{palette.reset}", colored)
-        self.assertIn(f"{palette.green} {'20%':>5}{palette.reset}", colored)
+        self.assertIn(f"{palette.green} {'13%':>5}{palette.reset}", colored)
         self.assertIn(
             f"  {palette.white}{'model':<7}{palette.reset} "
             f"{palette.blue}GPT-5.6{palette.reset}{palette.red} · max{palette.reset}",
