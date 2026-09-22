@@ -106,6 +106,29 @@ class TestRefreshBoard:
         assert meta["fetched_at"] == 2000.0
         assert json.loads((root / "devbox" / "statusline-snapshot.json").read_text()) == SNAPSHOT
 
+    def test_a_failed_pull_records_what_ssh_said(self, root):
+        board = remote_boards.Board("devbox", "devbox-host")
+        stderr = "Token has expired and refresh failed\nConnection closed by UNKNOWN port 65535\n"
+
+        remote_boards.refresh_board(
+            board, now=2000.0, runner=lambda argv, timeout: subprocess.CompletedProcess([], 255, "", stderr)
+        )
+
+        meta = json.loads((root / "devbox" / "meta.json").read_text())
+        assert meta["error"] == "ssh exit 255 \u00b7 Token has expired and refresh failed"
+
+    def test_a_long_reason_is_bounded_to_one_row(self, root):
+        board = remote_boards.Board("devbox", "devbox-host")
+        stderr = "x" * 200
+
+        remote_boards.refresh_board(
+            board, now=2000.0, runner=lambda argv, timeout: subprocess.CompletedProcess([], 255, "", stderr)
+        )
+
+        reason = json.loads((root / "devbox" / "meta.json").read_text())["error"]
+        assert reason.endswith("\u2026")
+        assert len(reason) == len("ssh exit 255 \u00b7 ") + remote_boards.REASON_MAX_CHARS
+
     def test_a_board_its_up_check_calls_down_is_never_contacted(self, root):
         board = remote_boards.Board("devbox", "devbox-host", "is-it-up")
         calls = []

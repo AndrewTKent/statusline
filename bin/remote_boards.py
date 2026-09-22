@@ -23,6 +23,9 @@ from pathlib import Path
 HOME = Path.home()
 REMOTE_ROOT = HOME / ".accounts" / "remote"
 
+# One statusline row holds the board name, its age and this; longer truncates in the terminal.
+REASON_MAX_CHARS = 60
+
 CLAUDE_SNAPSHOT = "statusline-snapshot.json"
 CODEX_USAGE = "codex-usage.json"
 JOBS = "jobs.json"
@@ -171,7 +174,7 @@ def refresh_board(board: Board, *, now: float, runner) -> dict:
     except OSError as exc:
         return _record_error(directory, meta, type(exc).__name__)
     if result.returncode != 0:
-        return _record_error(directory, meta, f"ssh exit {result.returncode}")
+        return _record_error(directory, meta, ssh_failure(result.returncode, result.stderr))
     try:
         documents = decode_payload(result.stdout)
     except ValueError as exc:
@@ -184,6 +187,16 @@ def refresh_board(board: Board, *, now: float, runner) -> dict:
     meta.update({"fetched_at": now, "error": None})
     write_json_0600(directory / META, meta)
     return meta
+
+
+def ssh_failure(returncode: int, stderr: str) -> str:
+    """255 is ssh's one code for every connection failure, so the reason is only in stderr."""
+    reason = next((line.strip() for line in (stderr or "").splitlines() if line.strip()), "")
+    if not reason:
+        return f"ssh exit {returncode}"
+    if len(reason) > REASON_MAX_CHARS:
+        reason = reason[: REASON_MAX_CHARS - 1].rstrip() + "\u2026"
+    return f"ssh exit {returncode} \u00b7 {reason}"
 
 
 def _record_error(directory: Path, meta: dict, error: str) -> dict:
