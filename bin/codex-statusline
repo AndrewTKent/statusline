@@ -87,10 +87,15 @@ if [[ ! "$HISTORY_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
     printf 'CODEX_STATUSLINE_HISTORY_LIMIT must be a positive integer\n' >&2
     exit 1
 fi
-command -v tmux >/dev/null 2>&1 || {
+TMUX_BIN="${CODEX_STATUSLINE_TMUX_BIN:-tmux}"
+command -v "$TMUX_BIN" >/dev/null 2>&1 || {
     printf 'tmux is required for the multi-line Codex statusline\n' >&2
     exit 1
 }
+tmux() {
+    command "$TMUX_BIN" "$@"
+}
+
 CODEX_ARGS=(--no-alt-screen -c 'tui.status_line=[]' ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
 
 WORKING_DIR="$(pwd -P)"

@@ -63,10 +63,12 @@ PATH="$test_root/bin:$PATH" "$repo_root/macos/launchd/install-accounts-poll.sh"
 python3 - "$HOME/Library/LaunchAgents/com.claude-accounts-poll.plist" \
     "$HOME/.local/bin/accounts" <<'PY'
 import plistlib
+import shutil
 import sys
 
 with open(sys.argv[1], "rb") as handle:
     plist = plistlib.load(handle)
 assert plist["ProgramArguments"][0] == sys.argv[2]
 assert plist["StartInterval"] == 60
+assert shutil.which("accounts", path=plist["EnvironmentVariables"]["PATH"]) == sys.argv[2]
 PY
