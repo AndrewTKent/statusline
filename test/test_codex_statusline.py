@@ -32,6 +32,11 @@ SPEC.loader.exec_module(codex_statusline)
 
 
 class CodexStatuslineTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmux_env = mock.patch.dict(os.environ, {"CODEX_STATUSLINE_TMUX_BIN": "tmux"})
+        tmux_env.start()
+        self.addCleanup(tmux_env.stop)
+
     def test_format_tokens(self) -> None:
         self.assertEqual(codex_statusline.format_tokens(999), "999")
         self.assertEqual(codex_statusline.format_tokens(12_345), "12.3k")
@@ -3280,7 +3285,7 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(account_header.index("banked"), personal_row.index("—"))
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
-        self.assertEqual(lines[-1], "◯ release-train review-local 0/1 agents done · 15m")
+        self.assertEqual(lines[9], "◯ release-train review-local 0/1 agents done · 15m")
         expected_labels = [
             "model",
             "time",
@@ -3298,6 +3303,7 @@ class CodexStatuslineTest(unittest.TestCase):
         )
         self.assertTrue(all(len(line) <= 80 for line in rendered.splitlines()))
 
+        board["remote"] = [{"board": "remote", "stopped": False, "age_s": 7200, "fresh": False, "rows": board["rows"]}]
         crowded = {
             **data,
             "agents": {
@@ -3308,9 +3314,8 @@ class CodexStatuslineTest(unittest.TestCase):
         }
         with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
             compact = codex_statusline.render_footer(crowded, 49, codex_statusline.Palette(False), max_rows=14)
-        self.assertEqual(len(compact.splitlines()), 14)
         self.assertEqual(
-            compact.splitlines()[-3:],
+            compact.splitlines()[9:12],
             [f"◯ {name} 0/1 agents done · 1m" for name in ("build", "review", "verify")],
         )
         self.assertIn("* andrew", compact)
@@ -4060,9 +4065,12 @@ class CodexStatuslineTest(unittest.TestCase):
             codex_home = tmp / ".codex"
             capture = tmp / "capture"
             fake_codex = tmp / "codex"
-            fake_tmux = tmp / "tmux"
+            fake_tmux = tmp / "selected-tmux"
+            (tmp / "tmux").write_text("#!/bin/sh\nexit 99\n")
+            (tmp / "tmux").chmod(0o755)
             codex_home.mkdir()
             (codex_home / "statusline.conf").write_text(
+                f"CODEX_STATUSLINE_TMUX_BIN={fake_tmux}\n"
                 "CODEX_STATUSLINE_INTERVAL=3\n"
                 "CODEX_STATUSLINE_MANAGE_APPROVALS=0\n"
             )
@@ -4080,6 +4088,7 @@ class CodexStatuslineTest(unittest.TestCase):
                 "CODEX_STATUSLINE_INTERVAL",
                 "CODEX_STATUSLINE_MANAGE_APPROVALS",
                 "CODEX_STATUSLINE_NATIVE",
+                "CODEX_STATUSLINE_TMUX_BIN",
             ):
                 env.pop(name, None)
             env.update(

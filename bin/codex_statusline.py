@@ -3951,12 +3951,18 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
     lines.append(row("mode", permissions, solid(p.dim)))
 
     workflows = (data.get("agents") or {}).get("running_details", [])
+    for workflow in workflows:
+        status = short_text(
+            f"◯ {workflow['label']} 0/1 agents done · {format_duration(workflow['elapsed_seconds'])}",
+            width,
+        )
+        lines.append(f"{p.dim}{status}{p.reset}")
     board_rows = account_board.get("rows") or []
     if board_rows and width >= 40:
         def clip_board_line(value: str) -> str:
             return value if len(value) <= width else f"{value[: width - 1]}…"
 
-        if max_rows is None or len(lines) + len(board_rows) + len(workflows) < max_rows:
+        if max_rows is None or len(lines) + len(board_rows) < max_rows:
             lines.append(clip_board_line(f"    {'acct':<16} {'week':>6}  {'reset':<18} banked"))
         for account in board_rows:
             marker = "*" if account["label"] == account_board.get("current_label") else "·"
@@ -3975,12 +3981,6 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
                     trailer = f"{age} ago"
                 row_text = clip_board_line(codex_board_row(account, "·", trailer))
                 lines.append(row_text if board["fresh"] else f"{p.dim}{row_text}{p.reset}")
-    for workflow in workflows:
-        status = short_text(
-            f"◯ {workflow['label']} 0/1 agents done · {format_duration(workflow['elapsed_seconds'])}",
-            width,
-        )
-        lines.append(f"{p.dim}{status}{p.reset}")
     return "\n".join(lines)
 
 

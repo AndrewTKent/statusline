@@ -23,8 +23,8 @@ for subscription limits; the footer reports exact quota percentage remaining
 instead of inventing a token estimate. It binds each
 footer to the rollout file opened by its owning Codex process, so concurrent and
 resumed sessions do not exchange context values. The footer stays 14 rows high
-by default; workflow updates never resize the conversation pane. Workflows take
-priority over the account table when space is tight; overflow is counted on the
+by default; workflow updates never resize the conversation pane. Workflows appear
+above the account table so account rows cannot hide them; overflow is counted on the
 last row, and `codex-statusline --footer` shows all rows.
 
 ## Scrolling and tmux
@@ -33,13 +33,17 @@ Tmux mouse handling is enabled: scroll over the conversation to enter its histor
 and press `q` to return to live output. In iTerm2, enable mouse reporting and
 wheel reporting, and disable saving alternate-screen lines to scrollback. Otherwise
 scrolling can expose stale input bars and blank redraws from the outer terminal.
-Hold Option for iTerm2's ordinary text selection. Pane
+For ordinary drag-selection and Cmd+C in iTerm2, keep mouse and wheel reporting
+enabled but disable reporting of clicks and drags in the profile. Pane
 scrollback keeps a 100,000-line history; tune it with
 `CODEX_STATUSLINE_HISTORY_LIMIT`. When launched inside an existing
 tmux pane, that pane keeps the history depth it was created with; the session
 `mouse` and window `history-limit` options are restored when the launcher exits.
 When launched outside tmux, detaching (prefix d) leaves Codex running — reattach with
 `tmux attach -t codex-statusline-<pid>`; the session ends when Codex exits.
+
+Set `CODEX_STATUSLINE_TMUX_BIN` to use a specific tmux executable or wrapper.
+It applies to launcher commands; existing tmux servers keep their running version.
 
 ## Native mode
 
