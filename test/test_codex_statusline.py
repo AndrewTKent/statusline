@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import fcntl
+import hashlib
 import importlib.util
 import io
 import json
@@ -3243,6 +3244,7 @@ class CodexStatuslineTest(unittest.TestCase):
             "rows": [
                 {
                     "label": "andrew",
+                    "session": {"used_percent": 20.0, "resets_at": 1_901_000_000},
                     "weekly": {"used_percent": 67.0, "resets_at": 1_900_000_000},
                     "reset_credits": [1_900_000_000, 1_902_000_000],
                 },
@@ -3257,6 +3259,9 @@ class CodexStatuslineTest(unittest.TestCase):
             rendered = codex_statusline.render_footer(data, 80, codex_statusline.Palette(False))
 
         self.assertIn("model   GPT-5.6 · max", rendered)
+        self.assertIn("time    ⏱ 3:00", rendered)
+        self.assertIn("session ●●●●●●●●●●○○○○○ 67%", rendered)
+        self.assertTrue(rendered.splitlines()[-2].startswith("  ⏵⏵"))
         self.assertIn("account andrew · auto", rendered)
         self.assertNotIn("→", rendered)
         self.assertIn("repo    statusline", rendered)
@@ -3265,27 +3270,29 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertIn("  weekly  ●●●○○○○○○○○○○○○ 24%", rendered)
         self.assertNotIn("450/1.0k", rendered)
         self.assertNotIn("5-hour", rendered)
-        self.assertIn("usage   today 4.0k · session 5.0k · lifetime 9.0k", rendered)
+        self.assertIn("usage   today 4.00k · session 5.00k · lifetime 9.00k", rendered)
         self.assertIn("acct", rendered)
-        self.assertIn("* andrew", rendered)
-        self.assertIn("· personal", rendered)
-        self.assertIn("mode    ⏵⏵ bypass permissions on", rendered)
+        self.assertIn("* Andrew", rendered)
+        self.assertIn("· Personal", rendered)
+        self.assertIn("  ⏵⏵ bypass permissions on", rendered)
         lines = rendered.splitlines()
         account_header = next(line for line in lines if line.strip().startswith("acct"))
-        account_row = next(line for line in lines if line.startswith("  * andrew"))
+        account_row = next(line for line in lines if line.startswith("  * Andrew"))
         reset_text = codex_statusline.limit_display(board["rows"][0]["weekly"])[1]
         reset_value = reset_text.removeprefix("resets ")
         self.assertEqual(account_header.index("week") + 4, account_row.index("67%") + 3)
-        self.assertEqual(account_header.index("reset"), account_row.index(reset_value))
+        self.assertEqual(account_header.rindex("reset"), account_row.index(reset_value))
         self.assertNotIn("resets", account_row)
         banked_text = codex_statusline.reset_credit_text(board["rows"][0]["reset_credits"])
         self.assertTrue(banked_text.startswith("2 exp "))
         self.assertEqual(account_header.index("banked"), account_row.index(banked_text))
-        personal_row = next(line for line in lines if line.startswith("  · personal"))
-        self.assertEqual(account_header.index("banked"), personal_row.index("—"))
+        personal_row = next(line for line in lines if line.startswith("  · Personal"))
+        self.assertEqual(account_header.index("banked"), personal_row.rindex("—"))
+        self.assertIn("5h", account_header)
+        self.assertIn("20%", account_row)
         self.assertNotIn("left", account_header)
         self.assertNotIn("33%", account_row)
-        self.assertEqual(lines[9], "◯ release-train review-local 0/1 agents done · 15m")
+        self.assertEqual(lines[-1], "◯ release-train review-local 0/1 agents done · 15m")
         expected_labels = [
             "model",
             "time",
@@ -3293,9 +3300,9 @@ class CodexStatuslineTest(unittest.TestCase):
             "repo",
             "branch",
             "context",
+            "session",
             "weekly",
             "usage",
-            "mode",
         ]
         self.assertEqual(
             [line.strip().split(maxsplit=1)[0] for line in lines[: len(expected_labels)]],
@@ -3303,7 +3310,13 @@ class CodexStatuslineTest(unittest.TestCase):
         )
         self.assertTrue(all(len(line) <= 80 for line in rendered.splitlines()))
 
-        board["remote"] = [{"board": "remote", "stopped": False, "age_s": 7200, "fresh": False, "rows": board["rows"]}]
+        board["remote"] = [{
+            "board": "remote", "stopped": False, "age_s": 7200, "fresh": False,
+            "rows": board["rows"], "jobs": {"remote-review": {
+                "state": "running", "workflows": [{"name": "remote-panel", "running": True,
+                "agents_done": 2, "agents_started": 3, "started_at": 1_900_000_000}],
+            }},
+        }]
         crowded = {
             **data,
             "agents": {
@@ -3315,23 +3328,33 @@ class CodexStatuslineTest(unittest.TestCase):
         with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
             compact = codex_statusline.render_footer(crowded, 49, codex_statusline.Palette(False), max_rows=14)
         self.assertEqual(
-            compact.splitlines()[9:12],
+            compact.splitlines()[-3:],
             [f"◯ {name} 0/1 agents done · 1m" for name in ("build", "review", "verify")],
         )
-        self.assertIn("* andrew", compact)
-        self.assertIn("· personal", compact)
+        self.assertIn("* Andrew", compact)
+        self.assertIn("· Personal", compact)
+        self.assertLess(compact.index("· remote ·"), compact.index("remote-review"))
+        self.assertLess(compact.index("remote-review"), compact.index("remote-panel"))
+        self.assertLess(compact.index("remote-panel"), compact.index("⏵⏵"))
+        self.assertLess(compact.index("⏵⏵"), compact.index("◯ build"))
+        self.assertIn("2/3 agents", compact)
 
         palette = codex_statusline.Palette(True)
         with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
             colored = codex_statusline.render_footer(data, 80, palette)
+        self.assertIn(f"{palette.cyan}4.00k{palette.reset}", colored)
+        self.assertIn(f"{palette.magenta}5.00k{palette.reset}", colored)
+        self.assertIn(f"{palette.green}9.00k{palette.reset}", colored)
+        self.assertIn(f"{palette.red}○{palette.reset}", colored)
+        self.assertIn(f"{palette.green} {'20%':>5}{palette.reset}", colored)
         self.assertIn(
             f"  {palette.white}{'model':<7}{palette.reset} "
             f"{palette.blue}GPT-5.6{palette.reset}{palette.red} · max{palette.reset}",
             colored,
         )
         self.assertIn(
-            f"  {palette.white}{'account':<7}{palette.reset} "
-            f"{palette.orange}andrew · auto{palette.reset}",
+            f"{palette.white}  account {palette.reset}"
+            f"{palette.orange}andrew{palette.reset}{palette.dim} · auto{palette.reset}",
             colored,
         )
 
@@ -3350,8 +3373,8 @@ class CodexStatuslineTest(unittest.TestCase):
                 unavailable, 80, codex_statusline.Palette(False)
             ).splitlines()
         self.assertEqual(
-            [line.strip().split(maxsplit=1)[0] for line in unavailable_lines],
-            expected_labels,
+            [line.strip().split(maxsplit=1)[0] for line in unavailable_lines[:-1]],
+            [label for label in expected_labels if label != "session"],
         )
         self.assertEqual(
             next(line for line in unavailable_lines if line.startswith("  context")),
@@ -3361,7 +3384,7 @@ class CodexStatuslineTest(unittest.TestCase):
             next(line for line in unavailable_lines if line.startswith("  weekly")),
             "  weekly  -",
         )
-        self.assertEqual(unavailable_lines[-1], "  mode    ⏵⏵ bypass permissions on")
+        self.assertEqual(unavailable_lines[-1], "  ⏵⏵ bypass permissions on")
 
         with mock.patch.object(codex_statusline, "codex_account_board", return_value=board):
             wide_lines = codex_statusline.render_footer(data, 140, codex_statusline.Palette(False)).splitlines()
@@ -3375,7 +3398,7 @@ class CodexStatuslineTest(unittest.TestCase):
             tiny_lines = codex_statusline.render_footer(data, 8, codex_statusline.Palette(False)).splitlines()
         self.assertTrue(all(len(line) <= 8 for line in tiny_lines))
 
-    def test_footer_shows_weekly_without_reset_while_default_keeps_it(self) -> None:
+    def test_footer_shows_weekly_reset_in_local_time(self) -> None:
         data = {
             "model_display": "GPT-5.6",
             "reasoning_effort": "max",
@@ -3409,8 +3432,9 @@ class CodexStatuslineTest(unittest.TestCase):
             rendered = codex_statusline.render_footer(data, 100, codex_statusline.Palette(False))
 
         weekly_line = next(line for line in rendered.splitlines() if line.startswith("  weekly"))
-        self.assertEqual(weekly_line, "  weekly  ●●●●●●●●●●●●●●○ 96%")
-        self.assertNotIn("reset", weekly_line)
+        reset_at = datetime.fromtimestamp(1_900_000_000).astimezone()
+        reset_text = f"{reset_at.strftime('%b').lower()} {reset_at.day}, {codex_statusline.format_clock(reset_at)}"
+        self.assertEqual(weekly_line, f"  weekly  ●●●●●●●●●●●●●●○ 96%     resets {reset_text}")
         self.assertNotIn("5-hour", rendered)
         lines = rendered.splitlines()
         self.assertEqual(len(lines), 9)
@@ -3473,7 +3497,8 @@ class CodexStatuslineTest(unittest.TestCase):
                         "work": {
                             "fetched_at": time.time(),
                             "rate_limits": {
-                                "primary": {"used_percent": 40, "window_duration_mins": 10_080}
+                                "primary": {"used_percent": 40, "window_duration_mins": 10_080},
+                                "secondary": {"used_percent": 80, "window_duration_mins": 300},
                             },
                             "reset_credits": {"count": 2, "expires_at": [1_600_000_000, 1_900_000_000]},
                         },
@@ -3495,6 +3520,8 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(board["selected"], "personal")
         self.assertEqual(board["rows"][0]["label"], "work")
         self.assertEqual(board["rows"][0]["weekly"]["used_percent"], 40)
+        self.assertEqual(board["rows"][0]["session"]["used_percent"], 80)
+        self.assertIsNone(board["rows"][1]["session"])
         self.assertEqual(board["rows"][0]["reset_credits"], [1_900_000_000])
         self.assertEqual(board["rows"][1]["reset_credits"], [])
 
@@ -3732,27 +3759,28 @@ class CodexStatuslineTest(unittest.TestCase):
 
         run.assert_not_called()
 
-    def test_owned_footer_keeps_the_conversation_size_when_workflows_change(self) -> None:
+    def test_owned_footer_grows_for_workflows_without_shrinking_afterward(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1"])
         args.footer_min_height = 14
         long_body = "model\n" + "\n".join(f"workflow {i}" for i in range(17))
         output = io.StringIO()
         with (
             mock.patch.dict(os.environ, {"TMUX_PANE": "%42"}),
-            mock.patch.object(codex_statusline, "terminal_size", return_value=os.terminal_size((80, 14))),
+            mock.patch.object(codex_statusline, "terminal_size", side_effect=[os.terminal_size((80, 14)), os.terminal_size((80, 18)), os.terminal_size((80, 18))]),
             mock.patch.object(codex_statusline, "snapshot", return_value={}),
             mock.patch.object(codex_statusline, "render", side_effect=[long_body, "model\nmode"]),
-            mock.patch.object(codex_statusline.subprocess, "run") as run,
+            mock.patch.object(codex_statusline.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="60")) as run,
             mock.patch.object(codex_statusline.sys, "stdout", output),
             mock.patch.object(codex_statusline.time, "sleep", side_effect=[None, KeyboardInterrupt]),
         ):
             self.assertEqual(codex_statusline.watch_loop(args, codex_statusline.Palette(False)), 0)
 
-        run.assert_not_called()
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[-1].args[0], ["tmux", "resize-pane", "-t", "%42", "-y", "18"])
         frames = output.getvalue().split("\033[2J\033[H")[1:]
         self.assertEqual(len(frames), 2)
-        self.assertTrue(all(len(frame.splitlines()) <= 14 for frame in frames))
-        self.assertIn("more", frames[0])
+        self.assertEqual(frames[0], long_body)
+        self.assertNotIn("more", frames[0])
         self.assertEqual(frames[1].splitlines(), ["model", "mode"])
 
     def test_footer_render_does_not_scroll_past_mode(self) -> None:
@@ -4590,6 +4618,41 @@ class RemoteCodexBoardTest(unittest.TestCase):
             [(board["fresh"], [row["label"] for row in board["rows"]]) for board in boards],
             [(False, ["team-1"])],
         )
+
+    def test_remote_jobs_follow_claude_origin_and_recency_filters(self) -> None:
+        jobs = {
+            "mine": {"state": "running", "origin_session": "current", "workflows": [
+                {"name": "live-panel", "running": True, "agents_done": 1, "agents_started": 3,
+                 "agents_failed": 1, "started_at": 4900},
+                {"name": "finished-panel", "running": False},
+            ]},
+            "same-pane": {"state": "held", "origin_session": "previous", "origin_pane": "pane", "held_until": 6000},
+            "unowned": {"state": "done", "updated_at": 4900},
+            "foreign": {"state": "running", "origin_session": "other"},
+            "old": {"state": "done", "updated_at": 1},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            self._board(tmp, {"fetched_at": 5000, "error": None, "up": True})
+            (Path(tmp) / "devbox" / "jobs.json").write_text(json.dumps({"jobs": jobs}))
+            (Path(tmp) / "devbox" / "codex-usage.json").unlink()
+            with mock.patch.dict(os.environ, {"REMOTE_BOARDS_DIR": tmp}):
+                board = codex_statusline.remote_codex_boards(now=5000)[0]
+        text = "\n".join(codex_statusline.remote_job_lines(board, "current", "pane", False, 120, codex_statusline.Palette(False), now=5000))
+        for included in ("mine", "same-pane", "unowned", "live-panel", "1/3 agents", "1 failed", "resumes"):
+            self.assertIn(included, text)
+        for excluded in ("foreign", "old", "finished-panel"):
+            self.assertNotIn(excluded, text)
+        all_text = "\n".join(codex_statusline.remote_job_lines(board, "current", "pane", True, 120, codex_statusline.Palette(False), now=5000))
+        self.assertIn("foreign", all_text)
+        self.assertNotIn("old", all_text)
+
+    def test_remote_job_origin_uses_main_pane_not_footer(self) -> None:
+        codex_statusline.remote_job_origin_pane.cache_clear()
+        panes = "%1\tbash runner.sh /tmp/owned/owner.pid\n%2\tpython3 codex_statusline.py --footer --owner-pid-file /tmp/owned/owner.pid\n"
+        with mock.patch.object(codex_statusline.subprocess, "check_output", return_value=panes):
+            origin = codex_statusline.remote_job_origin_pane("/tmp/owned/owner.pid", "/tmp/socket,1,0", "%2")
+        self.assertEqual(origin, hashlib.sha256(b"tmux:/tmp/socket:%1").hexdigest()[:12])
+        codex_statusline.remote_job_origin_pane.cache_clear()
 
     def test_a_board_reported_down_carries_no_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
