@@ -22,10 +22,22 @@ Codex does not expose a fixed token balance
 for subscription limits; the footer reports exact quota percentage remaining
 instead of inventing a token estimate. It binds each
 footer to the rollout file opened by its owning Codex process, so concurrent and
-resumed sessions do not exchange context values. The footer stays 14 rows high
-by default; workflow updates never resize the conversation pane. Workflows appear
-above the account table so account rows cannot hide them; overflow is counted on the
-last row, and `codex-statusline --footer` shows all rows.
+resumed sessions do not exchange context values. The footer starts at 14 rows
+by default and grows to show workflows and account rows, keeping at least ten
+rows for the conversation in the standard two-pane layout. It does not shrink
+when workflows finish. Local workflows appear below permissions at the bottom. Remote jobs and their
+running workflows appear beneath their machine’s account rows. Like Claude,
+remote jobs are limited to this session or pane, unowned jobs, and recent results;
+set `REMOTE_JOBS_SHOW_ALL=1` to include other sessions’ jobs. If the terminal
+is too short for every row, overflow is counted on the last row;
+`codex-statusline --footer` shows all rows.
+
+The footer uses the Claude statusline palette: a context range marked in green
+and red, percentage-colored limit bars and account cells, and colored usage
+totals. Session limits appear when the account publishes a five-hour window;
+weekly resets use local dates and times. The account table shows five-hour and
+weekly windows, with banked resets only when present. Permissions sit below the
+table, and linked checkouts have a separate tree row.
 
 ## Scrolling and tmux
 

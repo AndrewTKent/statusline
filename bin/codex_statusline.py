@@ -121,7 +121,7 @@ class Palette:
         self.yellow = self._c("38;2;230;200;0")
         self.white = self._c("38;2;220;220;220")
         self.magenta = self._c("38;2;180;140;255")
-        self.dim = self._c("38;2;120;120;120")
+        self.dim = self._c("38;2;220;220;220")
         self.reset = "\033[0m" if enabled else ""
 
     def _c(self, code: str) -> str:
@@ -155,6 +155,7 @@ class GitInfo:
     root: str
     branch_name: str
     head: str
+    worktree: str = ""
 
 
 @dataclass
@@ -3039,6 +3040,7 @@ def git_info(cwd: str, fallback_branch: str, bucket: int) -> GitInfo:
         root,
         branch_name,
         head,
+        Path(root).name if common.name == ".git" and Path(root) != common.parent else "",
     )
 
 
@@ -3228,13 +3230,13 @@ def build_pct_bar(pct: float, width: int, p: Palette) -> str:
     return f"{color_for_pct(pct, p)}{'●' * filled}{p.dim}{'○' * empty}{p.reset}"
 
 
-def format_tokens(value: int) -> str:
+def format_tokens(value: int, precision: int = 1) -> str:
     if value >= 1_000_000_000:
-        return f"{value / 1_000_000_000:.1f}B"
+        return f"{value / 1_000_000_000:.{precision}f}B"
     if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
+        return f"{value / 1_000_000:.{precision}f}M"
     if value >= 1_000:
-        return f"{value / 1_000:.1f}k"
+        return f"{value / 1_000:.{precision}f}k"
     return str(value)
 
 
@@ -3388,7 +3390,7 @@ def labeled_rate_limits(rate_limits: dict[str, Any]) -> list[tuple[str, dict[str
         limit = rate_limits.get(key)
         if not isinstance(limit, dict) or limit.get("used_percent") is None:
             continue
-        label = rate_limit_window_label(limit.get("window_minutes"), fallback_label)
+        label = rate_limit_window_label(limit.get("window_minutes", limit.get("window_duration_mins")), fallback_label)
         if label in seen_labels:
             continue
         seen_labels.add(label)
@@ -3409,6 +3411,10 @@ def credit_balance_text(rate_limits: dict[str, Any]) -> str:
     if not balance.is_finite():
         return ""
     return format(balance, ",.0f")
+
+
+def session_rate_limit(rate_limits: dict[str, Any]) -> dict[str, Any] | None:
+    return next((limit for label, limit in labeled_rate_limits(rate_limits) if label == "5-hour"), None)
 
 
 def weekly_rate_limit(rate_limits: dict[str, Any]) -> dict[str, Any] | None:
@@ -3505,13 +3511,15 @@ def remote_codex_boards(now: float | None = None) -> list[dict[str, Any]]:
             rows.append(
                 {
                     "label": label,
+                    "session": session_rate_limit(rate_limits),
                     "weekly": weekly_rate_limit(rate_limits),
                     "reset_credits": unexpired_reset_credits(account_usage),
                     "binding_usage": account_binding_usage(rate_limits),
                     "error": str(account_usage.get("error") or ""),
                 }
             )
-        if not rows:
+        jobs = read_json(directory / "jobs.json").get("jobs") or {}
+        if not rows and not jobs:
             continue
         boards.append(
             {
@@ -3520,21 +3528,116 @@ def remote_codex_boards(now: float | None = None) -> list[dict[str, Any]]:
                 "age_s": max(0, int(now - fetched_at)),
                 "fresh": not meta.get("error") and (now - fetched_at) <= max_age,
                 "rows": rows,
+                "jobs": jobs,
             }
         )
     return boards
 
 
-def codex_board_row(account: dict[str, Any], marker: str, trailer: str) -> str:
-    weekly = account.get("weekly")
-    if weekly:
-        used, reset = limit_display(weekly)
-        reset_value = "now" if reset == "reset" else reset.removeprefix("resets ").removeprefix("reset ")
-        detail = f"{format_pct(used):>6}  {reset_value:<18}"
+def footer_spans(parts: list[tuple[str, str]], width: int, p: Palette) -> str:
+    output = []
+    remaining = width
+    for color, text in parts:
+        if remaining <= 0:
+            break
+        clipped = text[:remaining - 1] + "…" if len(text) > remaining else text
+        output.append(f"{color}{clipped}{p.reset}")
+        remaining -= len(clipped)
+    return "".join(output)
+
+
+def codex_board_row(
+    account: dict[str, Any], marker: str, trailer: str,
+    name_width: int, width: int, p: Palette,
+) -> str:
+    label = str(account["label"])
+    label = short_text(label[:1].upper() + label[1:], name_width)
+    parts = [(p.white, f"  {marker} {label:<{name_width}}")]
+    for key in ("session", "weekly"):
+        limit = account.get(key)
+        used, reset = limit_display(limit) if limit else (None, "reset n/a")
+        percent = format_pct(used) if used is not None else "—"
+        reset_text = reset.removeprefix("resets ").removeprefix("reset ")
+        reset_text = "—" if reset_text == "n/a" else "now" if reset_text == "reset" else reset_text
+        parts.extend([
+            (color_for_pct(used, p) if used is not None else p.dim, f" {percent:>5}"),
+            (p.dim, f" {reset_text:>6}"),
+        ])
+    if trailer:
+        parts.append((p.dim, f" {trailer}"))
+    return footer_spans(parts, width, p)
+
+
+@lru_cache(maxsize=64)
+def remote_job_origin_pane(owner_pid_file: str, tmux: str, pane: str) -> str:
+    if tmux and pane:
+        if owner_pid_file:
+            try:
+                panes = subprocess.check_output(
+                    ["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_start_command}"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=1,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            pane = next((line.split("\t", 1)[0] for line in panes.splitlines()
+                         if owner_pid_file in line and "codex_statusline.py --footer" not in line), "")
+            if not pane:
+                return ""
+        raw = f"tmux:{tmux.split(',')[0]}:{pane}"
+    elif os.environ.get("ITERM_SESSION_ID"):
+        raw = "iterm:" + os.environ["ITERM_SESSION_ID"].split(":", 1)[-1]
+    elif os.environ.get("TERM_SESSION_ID"):
+        raw = "term:" + os.environ["TERM_SESSION_ID"]
     else:
-        detail = f"{'—':>6}  {'unavailable':<18}"
-    label = short_text(str(account["label"]), 16)
-    return f"  {marker} {label:<16} {detail} {trailer}"
+        return ""
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+def remote_job_lines(
+    board: dict[str, Any], thread_id: str, pane_id: str, show_all: bool,
+    width: int, p: Palette, *, now: float | None = None,
+) -> list[str]:
+    now = time.time() if now is None else now
+    lines = []
+    for name, job in (board.get("jobs") or {}).items():
+        state = job.get("state", "")
+        if state not in {"running", "held"} and job.get("updated_at", 0) < now - 1800:
+            continue
+        origin_session, origin_pane = job.get("origin_session"), job.get("origin_pane")
+        mine = bool(thread_id and origin_session == thread_id) or bool(pane_id and origin_pane == pane_id)
+        if not (show_all or mine or (not origin_session and not origin_pane)):
+            continue
+        color = p.green if state == "running" else p.red if state == "blocked" else p.dim
+        color = color if board["fresh"] else p.dim
+        detail = ""
+        if state == "running":
+            if job.get("account"):
+                detail += f" · {job['account']}"
+            handoffs = job.get("handoffs", 0)
+            if handoffs:
+                detail += f" · {handoffs} handoff{'s' if handoffs != 1 else ''}"
+        elif state == "held" and job.get("held_until"):
+            detail = f" · resumes {format_clock(datetime.fromtimestamp(job['held_until']).astimezone())}"
+        else:
+            detail = f" · {remote_board_age_text(now - job.get('updated_at', 0))} ago"
+        if show_all and mine:
+            detail += " ← this session"
+        lines.append(footer_spans([(p.dim, f"  · ▸ {short_text(name, 20)} "),
+                                   (color, state), (p.dim, detail)], width, p))
+        if state != "running":
+            continue
+        for workflow in job.get("workflows") or []:
+            if not workflow.get("running"):
+                continue
+            counts = f"{workflow.get('agents_done', 0)}/{workflow.get('agents_started', 0)}"
+            age = remote_board_age_text(now - workflow.get("started_at", 0))
+            failed = workflow.get("agents_failed", 0)
+            lines.append(footer_spans([
+                (p.dim, f"  ·     {workflow.get('name', '')} "),
+                (p.cyan if board["fresh"] else p.dim, counts), (p.dim, f" agents · {age}"),
+                (p.red, f" · {failed} failed" if failed else ""),
+            ], width, p))
+    return lines
 
 
 def codex_account_board(current_account: str) -> dict[str, Any]:
@@ -3560,6 +3663,7 @@ def codex_account_board(current_account: str) -> dict[str, Any]:
         rows.append(
             {
                 "label": label,
+                "session": session_rate_limit(rate_limits),
                 "weekly": weekly_rate_limit(rate_limits),
                 "reset_credits": unexpired_reset_credits(account_usage),
                 "binding_usage": account_binding_usage(rate_limits),
@@ -3617,6 +3721,7 @@ def snapshot_for_thread(
         "context_window": window,
         "account": account_label(thread.id),
         "repo": git.repo,
+        "tree": git.worktree,
         "branch": git.display_branch,
         "pull_request": (
             pull_request_info(git.root, git.branch_name, git.head)
@@ -3716,6 +3821,10 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
             "lifetime": int_setting("LIFETIME_TOKEN_GOAL", config, 100_000_000),
         }
         data["goals"] = goals
+        data["remote_jobs_show_all"] = setting("REMOTE_JOBS_SHOW_ALL", config, "0") == "1"
+        data["origin_pane"] = remote_job_origin_pane(
+            args.owner_pid_file, os.environ.get("TMUX", ""), os.environ.get("TMUX_PANE", ""),
+        )
         return data
 
 
@@ -3888,59 +3997,89 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
         return f"  {p.white}{label:<7}{p.reset} {styled}"
 
     route_mode = account_board.get("mode", "auto")
-    account_text = f"{account_board.get('current_label') or data['account']} · {route_mode}"
-
+    account_label_text = account_board.get("current_label") or data["account"]
+    elapsed = max(0, data["session_age_seconds"])
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    elapsed_text = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
     lines = [
         row("model", f"{data['model_display']}{effort}", model_style),
-        row("time", f"⏱ {format_duration(data['session_age_seconds'])}"),
-        row("account", account_text, solid(p.orange)),
+        row("time", f"⏱ {elapsed_text}"),
+        footer_spans([(p.white, "  account "), (p.orange, account_label_text),
+                      (p.dim, f" · {route_mode}")], width, p),
         row("repo", data["repo"], solid(p.cyan)),
-        row(
-            "branch",
-            data["branch"],
-            solid(p.orange if "*" in data["branch"] else p.green),
-        ),
+        row("branch", data["branch"], solid(p.orange if "*" in data["branch"] else p.green)),
     ]
+    if data.get("tree"):
+        lines.insert(4, row("tree", f"⌥ {data['tree']}", solid(p.magenta)))
     if usage["context_window"] > 0:
+        pct = min(100.0, max(0.0, usage["context_used"] * 100.0 / usage["context_window"]))
+        color = p.red if pct >= 85 else p.yellow if pct > 70 else p.green if pct >= 30 else p.blue
+        parts = [(p.white, "  context ")]
         if width >= 30:
-            lines.append(
-                render_goal_row(
-                    "context",
-                    usage["context_used"],
-                    usage["context_window"],
-                    DEFAULT_BAR_WIDTH,
-                    p,
-                    2,
-                    include_detail=False,
-                )
-            )
-        else:
-            context_pct = usage["context_used"] * 100.0 / usage["context_window"]
-            lines.append(row("context", format_pct(context_pct), solid(color_for_pct(context_pct, p))))
+            filled = int(pct * DEFAULT_BAR_WIDTH / 100)
+            for index in range(DEFAULT_BAR_WIDTH):
+                track = p.red if index >= 12 else p.green if 4 <= index < 10 else p.dim
+                parts.append((color if index < filled else track, "●" if index < filled else "○"))
+            parts.append((p.white, " "))
+        parts.append((color, format_pct(pct)))
+        lines.append(footer_spans(parts, width, p))
     else:
         lines.append(row("context", "-"))
 
-    weekly = weekly_rate_limit(rate_limits)
-    if weekly:
-        weekly_used, _ = limit_display(weekly)
+    for label, limit in (("session", session_rate_limit(rate_limits)), ("weekly", weekly_rate_limit(rate_limits))):
+        if not limit:
+            if label == "weekly":
+                lines.append(row(label, "-"))
+            continue
+        used, reset = limit_display(limit)
+        parts = [(p.white, f"  {label:<7} ")]
         if width >= 30:
-            lines.append(
-                render_rate_limit_row(
-                    "weekly", weekly, DEFAULT_BAR_WIDTH, p, 2, include_reset=False
-                )
-            )
+            filled = int(min(100, max(0, used)) * DEFAULT_BAR_WIDTH / 100)
+            parts.extend([(color_for_pct(used, p), "●" * filled),
+                          (p.dim, "○" * (DEFAULT_BAR_WIDTH - filled)), (p.white, " ")])
+        parts.append((color_for_pct(used, p), format_pct(used).ljust(7)))
+        if reset.startswith("resets "):
+            reset_at = datetime.fromtimestamp(int(limit["resets_at"])).astimezone()
+            date = f"{reset_at.strftime('%b').lower()} {reset_at.day}, " if label == "weekly" else ""
+            reset = f"resets {date}{format_clock(reset_at)}"
         else:
-            lines.append(row("weekly", format_pct(weekly_used), solid(color_for_pct(weekly_used, p))))
-    else:
-        lines.append(row("weekly", "-"))
+            reset = "resets —" if reset == "reset n/a" else "resets now"
+        parts.append((p.dim, f" {reset}"))
+        lines.append(footer_spans(parts, width, p))
 
-    lines.append(
-        row(
-            "usage",
-            f"today {format_tokens(tokens['today'])} · session {format_tokens(usage['session_total'])} · "
-            f"lifetime {format_tokens(tokens['lifetime'])}",
-        )
-    )
+    lines.append(footer_spans([
+        (p.white, "  usage   "), (p.dim, "today "), (p.cyan, format_tokens(tokens["today"], 2)),
+        (p.dim, " · session "), (p.magenta, format_tokens(usage["session_total"], 2)),
+        (p.dim, " · lifetime "), (p.green, format_tokens(tokens["lifetime"], 2)),
+    ], width, p))
+    board_rows = account_board.get("rows") or []
+    remote_boards = account_board.get("remote") or []
+    all_rows = board_rows + [account for board in remote_boards for account in board["rows"]]
+    if (all_rows or remote_boards) and width >= 40:
+        name_width = min(16, max([9] + [len(str(account["label"])) for account in all_rows]))
+        show_credits = any(account.get("reset_credits") for account in all_rows)
+        header = f"    {'acct':<{name_width}} {'5h':>5} {'reset':>6} {'week':>5} {'reset':>6}"
+        if show_credits:
+            header += " banked"
+        if all_rows:
+            lines.append(footer_spans([(p.dim, header)], width, p))
+        for account in board_rows:
+            marker = "*" if account["label"] == account_board.get("current_label") else "·"
+            trailer = reset_credit_text(account.get("reset_credits") or []) if show_credits else ""
+            lines.append(codex_board_row(account, marker, trailer, name_width, width, p))
+        for board in remote_boards:
+            state = "stopped" if board["stopped"] else f"{remote_board_age_text(board['age_s'])} ago"
+            lines.append(footer_spans([(p.dim, f"  · {board['board']} · {state}")], width, p))
+            for account in board["rows"]:
+                trailer = reset_credit_text(account.get("reset_credits") or []) if show_credits else ""
+                if not board["fresh"]:
+                    trailer = f"{state} · stale"
+                lines.append(codex_board_row(account, "·", trailer, name_width, width, p))
+            lines.extend(remote_job_lines(
+                board, data.get("thread_id", ""), data.get("origin_pane", ""),
+                data.get("remote_jobs_show_all", False), width, p,
+            ))
     sandbox = data.get("sandbox", "-")
     approvals = data.get("approval_mode", "-")
     permissions = (
@@ -3948,39 +4087,13 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
         if sandbox == "disabled" and approvals == "never"
         else f"sandbox {sandbox} · approvals {approvals}"
     )
-    lines.append(row("mode", permissions, solid(p.dim)))
-
+    lines.append(footer_spans([(p.dim, f"  {permissions}")], width, p))
     workflows = (data.get("agents") or {}).get("running_details", [])
     for workflow in workflows:
-        status = short_text(
-            f"◯ {workflow['label']} 0/1 agents done · {format_duration(workflow['elapsed_seconds'])}",
-            width,
-        )
-        lines.append(f"{p.dim}{status}{p.reset}")
-    board_rows = account_board.get("rows") or []
-    if board_rows and width >= 40:
-        def clip_board_line(value: str) -> str:
-            return value if len(value) <= width else f"{value[: width - 1]}…"
-
-        if max_rows is None or len(lines) + len(board_rows) < max_rows:
-            lines.append(clip_board_line(f"    {'acct':<16} {'week':>6}  {'reset':<18} banked"))
-        for account in board_rows:
-            marker = "*" if account["label"] == account_board.get("current_label") else "·"
-            banked = reset_credit_text(account.get("reset_credits") or [])
-            lines.append(clip_board_line(codex_board_row(account, marker, banked)))
-        for board in account_board.get("remote") or []:
-            board_name = board["board"]
-            if board["stopped"]:
-                lines.append(f"{p.dim}  · {board_name} · stopped{p.reset}")
-                continue
-            age = remote_board_age_text(board["age_s"])
-            lines.append(f"{p.dim}  · {board_name} · {age} ago{p.reset}")
-            for account in board["rows"]:
-                trailer = reset_credit_text(account.get("reset_credits") or [])
-                if not board["fresh"]:
-                    trailer = f"{age} ago"
-                row_text = clip_board_line(codex_board_row(account, "·", trailer))
-                lines.append(row_text if board["fresh"] else f"{p.dim}{row_text}{p.reset}")
+        lines.append(footer_spans([
+            (p.cyan, f"◯ {workflow['label']}"),
+            (p.dim, f" 0/1 agents done · {format_duration(workflow['elapsed_seconds'])}"),
+        ], width, p))
     return "\n".join(lines)
 
 
@@ -4299,6 +4412,21 @@ def watch_loop(args: argparse.Namespace, p: Palette) -> int:
             body = render(data, args, p)
             if args.footer:
                 rows = body.splitlines()
+                pane = os.environ.get("TMUX_PANE")
+                if args.footer_min_height > 0 and pane and len(rows) > size.lines:
+                    window = subprocess.run(
+                        ["tmux", "display-message", "-p", "-t", pane, "#{window_height}"],
+                        capture_output=True, text=True, check=True, timeout=2,
+                    )
+                    height = min(len(rows), int(window.stdout.strip()) - 11)
+                    if height > size.lines:
+                        subprocess.run(
+                            ["tmux", "resize-pane", "-t", pane, "-y", str(height)],
+                            capture_output=True, text=True, check=True, timeout=2,
+                        )
+                        size = terminal_size()
+                        if size.lines < height:
+                            continue
                 if len(rows) > size.lines:
                     hidden = len(rows) - size.lines + 1
                     more = short_text(f"… {hidden} more rows · codex-statusline --footer", args.width)
