@@ -2146,6 +2146,10 @@ def _live_blob(atok, future_ms=3_000_000_000_000):
                                          "expiresAt": future_ms, "refreshTokenExpiresAt": future_ms}})
 
 
+def _mcp_login(server):
+    return {f"{server}|0123456789abcdef": {"serverName": server, "accessToken": f"{server}-a", "refreshToken": f"{server}-r"}}
+
+
 class TestLockedReentrant:
     def test_nested_locked_does_not_deadlock(self, tmp_path, monkeypatch):
         monkeypatch.setattr(accounts, "LOCK_PATH", tmp_path / "accounts.lock")
@@ -2507,6 +2511,7 @@ class TestNativeProfiles:
         monkeypatch.setattr(accounts, "PROFILES_PATH", tmp_path / "profiles")
         monkeypatch.setattr(accounts, "CLAUDE_HOME", tmp_path / "claude")
         monkeypatch.setattr(accounts, "CLAUDE_STATE_PATH", tmp_path / ".claude.json")
+        monkeypatch.setattr(accounts, "MIRROR_LOG", tmp_path / "accounts-mirror.log")
         accounts.CLAUDE_HOME.mkdir()
         (accounts.CLAUDE_HOME / "projects").mkdir()
         (accounts.CLAUDE_HOME / "settings.json").write_text("{}")
@@ -2568,7 +2573,8 @@ class TestNativeProfiles:
                     "accessToken": "",
                     "refreshToken": "",
                     "refreshTokenExpiresAt": 3_000_000_000_000,
-                }
+                },
+                "mcpOAuth": _mcp_login("linear"),
             }
         )
         service = accounts.profile_keychain_service("gmail")
@@ -2598,8 +2604,28 @@ class TestNativeProfiles:
 
         assert accounts.sync_profile_credentials(blobs, persist=False) == set()
         assert deleted == [service]
-        assert (profile / ".credentials.json").read_text() == stored
+        assert json.loads((profile / ".credentials.json").read_text()) == {
+            **json.loads(stored),
+            "mcpOAuth": _mcp_login("linear"),
+        }
         assert "auth_dead_at" not in blobs["accounts"]["gmail"]
+
+    def test_reset_without_mcp_logins_leaves_the_profile_file_alone(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        self._paths(tmp_path, monkeypatch)
+        stored = _live_blob("stored")
+        profile = accounts.ensure_native_profile("gmail", {"blob": stored})
+        service = accounts.profile_keychain_service("gmail")
+        deleted = []
+        monkeypatch.setattr(accounts, "kc_read", lambda requested, account=None: _live_blob("item"))
+        monkeypatch.setattr(accounts, "kc_delete", lambda requested: deleted.append(requested) or True)
+
+        assert accounts.reset_profile_keychain("gmail") is True
+        assert deleted == [service]
+        assert (profile / ".credentials.json").read_text() == stored
 
     def test_syncs_claude_rotated_profile_credential(self, tmp_path, monkeypatch):
         self._paths(tmp_path, monkeypatch)
@@ -2822,7 +2848,9 @@ class TestNativeProfiles:
             "target",
             {"blob": expired_target},
         )
-        accounts._write_0600(current_profile / ".credentials.json", login_blob)
+        source_login = json.dumps({**json.loads(login_blob), "mcpOAuth": _mcp_login("notion")})
+        accounts._write_0600(current_profile / ".credentials.json", source_login)
+        target_item = json.dumps({**json.loads(expired_target), "mcpOAuth": _mcp_login("linear")})
         blobs = {
             "accounts": {
                 "current": {
@@ -2844,7 +2872,7 @@ class TestNativeProfiles:
             accounts,
             "kc_read",
             lambda service, account=None: (
-                expired_target if service == target_service and not deleted else None
+                target_item if service == target_service and not deleted else None
             ),
         )
         monkeypatch.setattr(
@@ -2869,12 +2897,14 @@ class TestNativeProfiles:
 
         assert accounts.sync_profile_credentials(blobs, persist=False) == set()
         assert accounts.load_mode() == {"mode": "set", "label": "target"}
+        target_login = {**json.loads(login_blob), "mcpOAuth": _mcp_login("linear")}
         assert deleted == [target_service]
-        assert blobs["accounts"]["target"]["blob"] == login_blob
+        assert json.loads(blobs["accounts"]["target"]["blob"]) == target_login
         assert "auth_dead_at" not in blobs["accounts"]["target"]
-        assert accounts.load_blobs()["accounts"]["target"]["blob"] == login_blob
-        assert (current_profile / ".credentials.json").read_text() == current_blob
-        assert (target_profile / ".credentials.json").read_text() == login_blob
+        assert json.loads(accounts.load_blobs()["accounts"]["target"]["blob"]) == target_login
+        current_file = json.loads((current_profile / ".credentials.json").read_text())
+        assert current_file["claudeAiOauth"] == json.loads(current_blob)["claudeAiOauth"]
+        assert json.loads((target_profile / ".credentials.json").read_text()) == target_login
 
     def test_removes_only_the_mismatched_profile_keychain_item(
         self,
@@ -2883,7 +2913,7 @@ class TestNativeProfiles:
     ):
         self._paths(tmp_path, monkeypatch)
         old = _live_blob("old")
-        new = _live_blob("new")
+        new_item = json.dumps({**json.loads(_live_blob("new")), "mcpOAuth": _mcp_login("linear")})
         profile = accounts.ensure_native_profile("gmail", {"blob": old})
         (profile / ".claude.json").write_text(
             json.dumps(
@@ -2910,7 +2940,7 @@ class TestNativeProfiles:
             accounts,
             "kc_read",
             lambda requested, account=None: (
-                new if requested == service and not deleted else None
+                new_item if requested == service and not deleted else None
             ),
         )
         monkeypatch.setattr(
@@ -2935,7 +2965,10 @@ class TestNativeProfiles:
         assert accounts.sync_profile_credentials(blobs, persist=False) == set()
         assert deleted == [service]
         assert "auth_dead_at" not in blobs["accounts"]["gmail"]
-        assert accounts.profile_live_blob("gmail") == old
+        assert json.loads(accounts.profile_live_blob("gmail")) == {
+            **json.loads(old),
+            "mcpOAuth": _mcp_login("linear"),
+        }
         state = json.loads((profile / ".claude.json").read_text())
         assert "oauthAccount" not in state
         assert "userID" not in state
