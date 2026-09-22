@@ -925,7 +925,8 @@ remote_board_lines() {
         [ -n "$board_error" ] && suffix=" · ${board_error}"
         printf '%b\n' "${dim}· ${board_name} · $(remote_age_text "$age") ago${suffix}${reset}"
         rows=$(jq -r '
-            (.accounts // {}) | to_entries[] |
+            (.accounts // {}) | to_entries
+            | sort_by(.key | ascii_downcase | [scan("[0-9]+|[^0-9]+") | tonumber? // .]) | .[] |
             ((.value.scoped // [] | map(select((.label // "" | ascii_downcase) == "fable")) | first) // {}) as $fable |
             [.key, (.value.five_hour.used_pct // ""), (.value.five_hour.resets_at // ""),
              (.value.seven_day.used_pct // ""), ($fable.used_pct // ""), ($fable.resets_at // ""),
@@ -1319,10 +1320,10 @@ render_shared_account_snapshot() {
             account_label_is_hidden "$row_label" && [ "$row_label" != "$routed_label" ] && continue
             row_display="$(printf '%s' "${row_label:0:1}" | tr '[:lower:]' '[:upper:]')${row_label:1}"
             [ "${#row_display}" -gt "$name_width" ] && name_width=${#row_display}
-            sort_key="${row_five_reset:-9999}"
+            sort_key="$row_label"
             sorted_rows+="${sort_key}"$'\t'"${row_label}"$'\037'"${row_five}"$'\037'"${row_five_reset}"$'\037'"${row_five_stale}"$'\037'"${row_five_pending}"$'\037'"${row_seven}"$'\037'"${row_seven_reset}"$'\037'"${row_seven_stale}"$'\037'"${row_seven_pending}"$'\037'"${row_scoped}"$'\037'"${row_scoped_label}"$'\037'"${row_scoped_reset}"$'\037'"${row_scoped_stale}"$'\037'"${row_scoped_pending}"$'\037'"${row_expired}"$'\037'"${row_leases}"$'\n'
         done <<< "$shared_rows"
-        rows=$(printf '%s' "$sorted_rows" | sort | cut -f2-)
+        rows=$(printf '%s' "$sorted_rows" | sort -f -V | cut -f2-)
         local board_scoped_label
         board_scoped_label=$(printf '%s' "${scoped_label:-scoped}" | tr '[:upper:]' '[:lower:]' | cut -c1-7)
         _shared_pad() {

@@ -146,6 +146,8 @@ while IFS= read -r output_line; do
     [[ "$output_line" == *General* ]] && general_line="$output_line"
 done <<< "$plain_output"
 [[ -n "$general_line" && "$general_line" != *"~ stale"* ]] || { printf 'fresh account without a scoped limit rendered stale\n' >&2; exit 1; }
+local_order=$(awk '/^[·*] (General|Personal|Work) /{printf "%s ", $2}' <<< "$plain_output")
+[ "$local_order" = "General Personal Work " ] || { printf 'local accounts are not in name order: %s\n' "$local_order" >&2; exit 1; }
 REMOTE_ROOT_DIR="$SANDBOX/remote"
 mkdir -p "$REMOTE_ROOT_DIR/devbox"
 cat > "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" <<JSON
@@ -154,6 +156,18 @@ cat > "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" <<JSON
   "generated_at": $NOW,
   "health": {"last_success_at": $NOW, "error": null},
   "accounts": {
+    "team-10": {
+      "five_hour": {"used_pct": 55, "resets_at": "2099-01-01T12:00:00Z", "stale": false},
+      "seven_day": {"used_pct": 40, "resets_at": "2099-01-07T12:00:00Z", "stale": false},
+      "scoped": [],
+      "expired": false
+    },
+    "team-2": {
+      "five_hour": {"used_pct": 30, "resets_at": "2099-01-01T12:00:00Z", "stale": false},
+      "seven_day": {"used_pct": 35, "resets_at": "2099-01-07T12:00:00Z", "stale": false},
+      "scoped": [],
+      "expired": false
+    },
     "team-1": {
       "five_hour": {"used_pct": 8, "resets_at": "2099-01-01T12:00:00Z", "stale": false},
       "seven_day": {"used_pct": 21, "resets_at": "2099-01-07T12:00:00Z", "stale": false},
@@ -180,6 +194,8 @@ render_with_boards() {
 write_board_meta "$NOW" true
 board_output=$(render_with_boards)
 [[ "$board_output" == *$'\n'"· Team-1 "*"8%"* ]] || { printf 'a fresh board did not render its Claude rows\n' >&2; exit 1; }
+board_order=$(awk '/^· devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $2}' <<< "$board_output")
+[ "$board_order" = "Team-1 Team-2 Team-10 " ] || { printf 'board accounts are not in natural name order: %s\n' "$board_order" >&2; exit 1; }
 [[ "$board_output" != *"cx team-1"* ]] || { printf 'a board rendered its Codex row without being asked\n' >&2; exit 1; }
 codex_rows_output=$(REMOTE_BOARD_CODEX_ROWS=1 render_with_boards)
 [[ "$codex_rows_output" == *"cx team-1"*"37%"* ]] || { printf 'REMOTE_BOARD_CODEX_ROWS=1 did not render the Codex row\n' >&2; exit 1; }
