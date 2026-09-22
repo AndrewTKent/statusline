@@ -1225,10 +1225,13 @@ def test_running_supervisor_ignores_advisory_quota_changes(monkeypatch):
     assert len(launches) == 1
 
 
-def test_opt_in_hard_session_limit_stops_without_a_safe_account(
+@pytest.mark.parametrize("strict", [False, True])
+def test_hard_session_limit_keeps_ui_open_unless_strict(
     monkeypatch,
     capsys,
+    strict,
 ):
+    monkeypatch.setenv("ACCOUNTS_STRICT_QUOTA", "1" if strict else "0")
     session_id = str(uuid.uuid4())
     selected = {
         "profile": "/profiles/first",
@@ -1239,8 +1242,14 @@ def test_opt_in_hard_session_limit_stops_without_a_safe_account(
     stopped = []
 
     class Child:
+        polls = 0
+
         def poll(self):
-            return None
+            self.polls += 1
+            return None if self.polls <= 3 else 0
+
+        def wait(self):
+            return 0
 
     monkeypatch.setattr(
         claude_router,
@@ -1299,9 +1308,11 @@ def test_opt_in_hard_session_limit_stops_without_a_safe_account(
         lambda child: stopped.append(child),
     )
 
-    assert claude_router.run_supervised("/real/claude", []) == 1
-    assert len(stopped) == 1
-    assert "hard session limit" in capsys.readouterr().err
+    assert claude_router.run_supervised(
+        "/real/claude", ["--dangerously-skip-permissions"]
+    ) == (1 if strict else 0)
+    assert len(stopped) == int(strict)
+    assert ("hard session limit" in capsys.readouterr().err) == strict
 
 
 def test_opt_in_hard_session_limit_resumes_on_a_safe_account(monkeypatch):

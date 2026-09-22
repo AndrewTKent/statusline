@@ -401,7 +401,7 @@ def _conf_var(name: str) -> str:
 
 
 def hard_session_limit_enabled() -> bool:
-    """On unless set to 0: a session past a plan wall bills extra usage."""
+    """On unless set to 0: route away from accounts at a plan wall."""
     value = os.environ.get("ACCOUNTS_HARD_SESSION_LIMIT") or _conf_var(
         "ACCOUNTS_HARD_SESSION_LIMIT"
     )
