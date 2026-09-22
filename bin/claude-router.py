@@ -752,9 +752,7 @@ def session_limit_route(
 
 
 def hard_limit_kind_for(label: str, current_family: str) -> str | None:
-    """Which plan wall the active account has hit. A rate wall (5h or 7d) stops
-    any session; the Fable wall stops only a Fable session, since a general one
-    never bills it."""
+    """General models do not consume the separate Fable window."""
     if accounts.profile_session_limit_reached(label):
         return "session"
     if current_family == "fable" and accounts.profile_fable_limit_reached(label):
@@ -1086,6 +1084,8 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     )
                     last_heartbeat = now
                 if hard_limit_reached and (not session_id or limit_route is None):
+                    if not hold_for_reset and os.environ.get("ACCOUNTS_STRICT_QUOTA") != "1":
+                        continue
                     stop_for_handoff(child)
                     if hold_for_reset and session_id:
                         held = hold_for_route(

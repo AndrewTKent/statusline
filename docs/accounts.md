@@ -26,26 +26,26 @@ native Claude binaries under `~/.local/share/claude/versions`, installs both
 router toolsets under `~/.local/bin`, and prepends supervised launchers from
 `~/.accounts/bin` and `~/.codex-accounts/bin` in new zsh sessions.
 
-## Overage guard
+## Quota limits
 
-The overage guard is on by default. A supervised session resumes on another
+Hard-limit routing is on by default. A supervised session resumes on another
 safe account on the next supervisor check after its account reaches 100% of
-the five-hour or weekly window, or terminates when none is available. A Fable
-session is also moved at 100% Fable utilization, falling back to Opus on the
+the five-hour or weekly window. When none is available, Claude stays open so
+you can read the session and monitor reset times. The router keeps checking
+for a replacement account. `ACCOUNTS_STRICT_QUOTA=1` opts into terminating
+instead. A Fable session is also moved at 100% Fable utilization, falling back
+to Opus on the
 same account when its general windows still have headroom. That fallback
 happens inside the running process, whether the session launched on Fable or
 switched to it later (`ACCOUNTS_FABLE_FALLBACK_MODEL` changes the model), and
 the session returns to Fable on its own once the window resets; only a move to
-another account restarts it. Past any of those walls the plan stops paying and
-extra usage starts, which is what the guard prevents.
-`ACCOUNTS_HARD_SESSION_LIMIT=0` turns it off.
+another account restarts it. Claude's quota enforcement and extra-usage settings
+still govern model calls; leaving the interface open does not change them.
+`ACCOUNTS_HARD_SESSION_LIMIT=0` turns off proactive hard-limit routing.
 
-`ACCOUNTS_HOLD_FOR_RESET=1` changes what happens when that guard fires and no
-other account can take the session. By default the router stops the session and
-exits, which is right at a keyboard and wrong for an unattended job: the tmux
-session drops to a bare shell and nothing brings the work back when the windows
-reset. With the hold on, the router stops the child the same way, then sleeps
-until the soonest reset on the board plus two minutes, polls, and tries to route
+`ACCOUNTS_HOLD_FOR_RESET=1` changes what happens at a hard limit when no
+other account can take the session. With the hold on, the router stops the
+child, then sleeps until the soonest reset on the board plus two minutes, polls, and tries to route
 again, re-holding if there is still no room. No sleep runs longer than 15
 minutes, which is also how often it rechecks a board that names no reset at all:
 once a five-hour reset slips into the past on a row the poll has not advanced,
