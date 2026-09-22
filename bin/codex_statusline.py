@@ -4257,13 +4257,13 @@ def render(data: dict[str, Any], args: argparse.Namespace, p: Palette) -> str:
 
 def watch(args: argparse.Namespace, p: Palette) -> int:
     if args.footer:
-        print("\033[?1049h", end="")
+        print("\033[?1049h\033[?25l", end="")
         sys.stdout.flush()
     try:
         return watch_loop(args, p)
     finally:
         if args.footer:
-            print("\033[?1049l", end="")
+            print("\033[?25h\033[?1049l", end="")
             sys.stdout.flush()
 
 

@@ -3849,8 +3849,8 @@ class CodexStatuslineTest(unittest.TestCase):
         ):
             self.assertEqual(codex_statusline.watch(args, codex_statusline.Palette(False)), 0)
 
-        self.assertTrue(output.getvalue().startswith("\033[?1049h"))
-        self.assertTrue(output.getvalue().endswith("\033[?1049l"))
+        self.assertTrue(output.getvalue().startswith("\033[?1049h\033[?25l"))
+        self.assertTrue(output.getvalue().endswith("\033[?25h\033[?1049l"))
 
     def test_watch_renders_waiting_footer_before_bound_thread_exists(self) -> None:
         args = codex_statusline.parse_args(["--footer", "--watch", "1", "--bind-after-ms", "150000"])
