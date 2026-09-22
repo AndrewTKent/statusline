@@ -185,6 +185,7 @@ recent_session_checkout() {
     fi
 
     local activity selected="$launch_root" selected_line=0 worktree_line candidate candidate_alias line
+    local matched=0
     activity=$(tail -n 300 "$session_file" 2>/dev/null | jq -r '
         select(.type == "assistant")
         | .message.content[]?
@@ -203,11 +204,17 @@ recent_session_checkout() {
             index($0, needle) || index($0, alias) { found = NR }
             END { if (found) print found }
         ' <<< "$activity")
+        if [ -n "$line" ] && [ "$candidate" != "$launch_root" ]; then
+            matched=$((matched + 1))
+        fi
         if [ -n "$line" ] && [ "$line" -ge "$selected_line" ] 2>/dev/null; then
             selected="$candidate"
             selected_line="$line"
         fi
     done < <(git -C "$launch_root" worktree list --porcelain 2>/dev/null)
+    # Several worktrees in one session's recent work means it is bound to none of them, and
+    # naming the last one touched claims a checkout the session does not have.
+    [ "$matched" -gt 1 ] && selected="$launch_root"
 
     mkdir -p "${cache%/*}" 2>/dev/null
     local cache_tmp="${cache}.tmp.$$"
