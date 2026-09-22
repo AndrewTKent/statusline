@@ -538,11 +538,12 @@ def locked(blocking: bool = True):
         handle.close()
 
 
-def log_line(msg: str) -> None:
+def log_line(msg: str, *, echo: bool = True) -> None:
     stamp = now_utc().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     line = f"[{stamp}] {msg}\n"
-    sys.stdout.write(line)
-    sys.stdout.flush()
+    if echo:
+        sys.stdout.write(line)
+        sys.stdout.flush()
     try:
         if MIRROR_LOG.exists() and MIRROR_LOG.stat().st_size > 1_000_000:
             MIRROR_LOG.rename(MIRROR_LOG.with_suffix(".log.1"))
@@ -920,10 +921,63 @@ def ensure_native_profile(label: str, entry: dict) -> Path:
     return profile
 
 
+def _mcp_oauth(text: str) -> dict | None:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    mcp_oauth = data.get("mcpOAuth")
+    if not isinstance(mcp_oauth, dict) or not mcp_oauth:
+        return None
+    return mcp_oauth
+
+
+def _write_profile_credentials_file(credentials: Path, blob: str) -> None:
+    # cc keeps the profile's MCP logins beside claudeAiOauth; a router blob must not erase them.
+    try:
+        kept = _mcp_oauth(credentials.read_text())
+    except OSError:
+        kept = None
+    if kept:
+        try:
+            data = json.loads(blob)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            blob = json.dumps({**data, "mcpOAuth": kept})
+    _write_0600(credentials, blob)
+
+
 def write_profile_credentials(label: str, blob: str) -> None:
     profile = native_profile_path(label)
     if profile.exists():
-        _write_0600(profile / ".credentials.json", blob)
+        _write_profile_credentials_file(profile / ".credentials.json", blob)
+
+
+def reset_profile_keychain(label: str) -> bool:
+    """Delete the profile's keychain item so cc falls back to .credentials.json.
+    cc reads the item or the file whole, so the item's MCP logins move to the file first."""
+    service = profile_keychain_service(label)
+    item = kc_read(service)
+    if not item:
+        return True
+    mcp_oauth = _mcp_oauth(item)
+    if mcp_oauth:
+        credentials = native_profile_path(label) / ".credentials.json"
+        try:
+            current = json.loads(credentials.read_text())
+        except (OSError, json.JSONDecodeError):
+            current = {}
+        if not isinstance(current, dict):
+            current = {}
+        _write_0600(credentials, json.dumps({**current, "mcpOAuth": mcp_oauth}))
+    if not kc_delete(service):
+        return False
+    carried = "carried" if mcp_oauth else "none to carry"
+    log_line(f"{label}: reset profile keychain item; MCP logins {carried}", echo=False)
+    return True
 
 
 def _token_matches_entry_identity(token: str | None, entry: dict) -> bool:
@@ -954,8 +1008,7 @@ def _pin_known_profile_login(
         return None, False
     transferred = False
     if entry_needs_login(target, time.time()):
-        keychain_service = profile_keychain_service(target_label)
-        if kc_read(keychain_service) and not kc_delete(keychain_service):
+        if not reset_profile_keychain(target_label):
             return None, False
         clear_profile_account_state(target_label)
         set_entry_blob(target, login_blob)
@@ -989,13 +1042,12 @@ def sync_profile_credentials(blobs: dict, *, persist: bool) -> set[str]:
                 mark_auth_dead(label, entry, time.time())
                 changed = True
                 continue
-            keychain_service = profile_keychain_service(label)
-            if kc_read(keychain_service) and not kc_delete(keychain_service):
+            if not reset_profile_keychain(label):
                 blocked_labels.add(label)
                 mark_auth_dead(label, entry, time.time())
                 changed = True
                 continue
-            _write_0600(credentials, stored_blob)
+            _write_profile_credentials_file(credentials, stored_blob)
             clear_profile_account_state(label)
             set_entry_blob(entry, stored_blob)
             changed = True
@@ -1042,8 +1094,7 @@ def sync_profile_credentials(blobs: dict, *, persist: bool) -> set[str]:
                 )
                 changed = True
                 continue
-            keychain_service = profile_keychain_service(label)
-            if kc_read(keychain_service) and not kc_delete(keychain_service):
+            if not reset_profile_keychain(label):
                 blocked_labels.add(label)
                 mark_auth_dead(label, entry, time.time())
                 print(
@@ -1053,7 +1104,7 @@ def sync_profile_credentials(blobs: dict, *, persist: bool) -> set[str]:
                 )
                 changed = True
                 continue
-            _write_0600(credentials, stored_blob)
+            _write_profile_credentials_file(credentials, stored_blob)
             clear_profile_account_state(label)
             set_entry_blob(entry, stored_blob)
             entry["email"] = expected_email
