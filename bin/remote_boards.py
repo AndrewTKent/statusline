@@ -173,6 +173,7 @@ def refresh_board(board: Board, *, now: float, runner) -> dict:
     up = board_up(status)
     meta["up"] = up
     meta["probe"] = "auth" if status == UP_CHECK_AUTH_EXPIRED else None
+    meta["up_check"] = status
     if up is False:
         meta["error"] = None
         write_json_0600(directory / META, meta)
@@ -200,11 +201,18 @@ def refresh_board(board: Board, *, now: float, runner) -> dict:
     return meta
 
 
+# What ssh prints when a ProxyCommand exits before the handshake: on a Session Manager
+# host that is a stopped instance or an expired login, and the reason went to the proxy's stderr.
+PROXY_CLOSED = "Connection closed by UNKNOWN port 65535"
+
+
 def ssh_failure(returncode: int, stderr: str) -> str:
     """255 is ssh's one code for every connection failure, so the reason is only in stderr."""
     reason = next((line.strip() for line in (stderr or "").splitlines() if line.strip()), "")
     if not reason:
         return f"ssh exit {returncode}"
+    if reason == PROXY_CLOSED:
+        reason = "proxy closed early: box stopped or login expired"
     if len(reason) > REASON_MAX_CHARS:
         reason = reason[: REASON_MAX_CHARS - 1].rstrip() + "\u2026"
     return f"ssh exit {returncode} \u00b7 {reason}"
