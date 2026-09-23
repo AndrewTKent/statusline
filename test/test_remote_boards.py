@@ -117,6 +117,17 @@ class TestRefreshBoard:
         meta = json.loads((root / "devbox" / "meta.json").read_text())
         assert meta["error"] == "ssh exit 255 \u00b7 Token has expired and refresh failed"
 
+    def test_a_proxy_that_closed_before_connecting_is_named_in_plain_words(self, root):
+        board = remote_boards.Board("devbox", "devbox-host")
+        stderr = "Connection closed by UNKNOWN port 65535\n"
+
+        remote_boards.refresh_board(
+            board, now=2000.0, runner=lambda argv, timeout: subprocess.CompletedProcess([], 255, "", stderr)
+        )
+
+        meta = json.loads((root / "devbox" / "meta.json").read_text())
+        assert meta["error"] == "ssh exit 255 \u00b7 proxy closed early: box stopped or login expired"
+
     def test_a_long_reason_is_bounded_to_one_row(self, root):
         board = remote_boards.Board("devbox", "devbox-host")
         stderr = "x" * 200
