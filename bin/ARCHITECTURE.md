@@ -181,9 +181,11 @@ board machine                          this machine
 - Exactly the three files above are read from a board, and every document is
   scrubbed of token-shaped keys before it is written.
 - `meta.json` carries `fetched_at` (last *success*), the last `error`, and the
-  up-check verdict, so a stale or failed pull keeps the previous numbers and
+  up-check verdict (`up`: true, false or null; `probe: "auth"` when the check's
+  own login expired), so a stale or failed pull keeps the previous numbers and
   states its age instead of rendering zeros.
-- A board whose up-check exits non-zero is not contacted at all.
+- Only a board whose up-check exits 1 is not contacted at all; any other
+  failure of the check leaves the pull as the probe.
 - A board with a running job is pulled every 30s instead of the configured
   interval, so a job's progress is not a minute stale.
 

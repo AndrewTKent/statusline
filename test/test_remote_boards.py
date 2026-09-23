@@ -141,6 +141,22 @@ class TestRefreshBoard:
 
         assert [argv[0] for argv in calls] == ["bash"]
 
+    @pytest.mark.parametrize("status, up", [(0, True), (1, False), (2, None), (3, None), (None, None)])
+    def test_only_exit_1_calls_a_board_down(self, status, up):
+        assert remote_boards.board_up(status) is up
+
+    def test_an_up_check_that_exits_2_records_an_expired_login(self, root):
+        board = remote_boards.Board("devbox", "devbox-host", "is-it-up")
+
+        def runner(argv, timeout):
+            if argv[0] == "bash":
+                return subprocess.CompletedProcess(argv, 2, "", "")
+            return ok(encoded(SNAPSHOT, CODEX_USAGE, None))
+
+        meta = remote_boards.refresh_board(board, now=2000.0, runner=runner)
+
+        assert meta["probe"] == "auth"
+
 
 class TestRefreshAll:
     def test_a_board_polled_within_the_interval_is_left_alone(self, root):

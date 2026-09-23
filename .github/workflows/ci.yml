@@ -66,6 +66,8 @@ jobs:
         run: bash test/test_unsupervised_badge.sh
       - name: Test shared account snapshot renderer
         run: bash test/test_shared_snapshot.sh
+      - name: Test stable status line height
+        run: bash test/test_stable_height.sh
       - name: Test Agent Metrics launcher
         run: bash test/test_agent_metrics_wrapper.sh
       - name: Test transcript backups

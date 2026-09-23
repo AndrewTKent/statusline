@@ -884,7 +884,7 @@ remote_board_lines() {
     [ -d "$root" ] || return 0
     case "$max_age" in ''|*[!0-9]*|0) max_age=900 ;; esac
     now_epoch=$(date +%s)
-    local board_dir board_name fetched_at board_error board_up age fresh
+    local board_dir board_name fetched_at board_error board_up board_probe board_state age fresh
     local rows codex_rows row_label row_five row_five_reset row_seven row_fable row_fable_reset row_expired
     local cx_label cx_five cx_five_reset cx_week cx_week_reset cx_error
     local pad_name five_color seven_color fable_color suffix
@@ -902,19 +902,23 @@ remote_board_lines() {
     for board_dir in "${board_dirs[@]}"; do
         [ -d "$board_dir" ] || continue
         board_name="${board_dir%/}"; board_name="${board_name##*/}"
-        fetched_at=0; board_error=""; board_up="null"
+        fetched_at=0; board_error=""; board_up="null"; board_probe=""
         eval "$(jq -r '
             "fetched_at=" + (((.fetched_at // 0) | floor) | tostring | @sh),
             "board_error=" + ((.error // "") | tostring | @sh),
-            "board_up=" + ((.up | tostring) | @sh)
+            "board_up=" + ((.up | tostring) | @sh),
+            "board_probe=" + ((.probe // "") | tostring | @sh)
         ' "$board_dir/meta.json" 2>/dev/null)"
         if [ "$board_up" = "false" ]; then
             printf '%b\n' "${dim}· ${board_name} · stopped${reset}"
             continue
         fi
+        # The up-check's own login expired: the machine's state is unknown, not stopped.
+        board_state=""
+        [ "$board_probe" = "auth" ] && board_state="${yellow}login expired${reset}${dim} · "
         case "$fetched_at" in ''|*[!0-9]*) fetched_at=0 ;; esac
         if [ "$fetched_at" -le 0 ]; then
-            printf '%b\n' "${dim}· ${board_name} · no data${board_error:+ · $board_error}${reset}"
+            printf '%b\n' "${dim}· ${board_name} · ${board_state}no data${board_error:+ · $board_error}${reset}"
             continue
         fi
         age=$(( now_epoch - fetched_at ))
@@ -923,7 +927,7 @@ remote_board_lines() {
         { [ -n "$board_error" ] || [ "$age" -gt "$max_age" ]; } && fresh=false
         suffix=""
         [ -n "$board_error" ] && suffix=" · ${board_error}"
-        printf '%b\n' "${dim}· ${board_name} · $(remote_age_text "$age") ago${suffix}${reset}"
+        printf '%b\n' "${dim}· ${board_name} · ${board_state}$(remote_age_text "$age") ago${suffix}${reset}"
         rows=$(jq -r '
             (.accounts // {}) | to_entries
             | sort_by(.key | ascii_downcase | [scan("[0-9]+|[^0-9]+") | tonumber? // .]) | .[] |
@@ -980,6 +984,55 @@ remote_board_lines() {
             [ -n "$cx_error" ] && suffix=" ${dim}~ ${cx_error}${reset}"
             printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$cx_five" 4)${reset}  ${dim}$(_rb_ralign "$cx_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$cx_week" 4)${reset}   ${dim}$(_rb_ralign "—" 5)${reset}  ${dim}$(_rb_ralign "$cx_week_reset" 6)${reset}${suffix}"
         done <<< "$codex_rows"
+    done
+}
+
+# Claude Code's inline TUI keeps the rows a shorter status line vacates as blank
+# space, so within one session and format a multi-line render never shrinks.
+stable_height_key() {
+    local who="${SESSION_ID:-}"
+    [ -z "$who" ] && who=$(remote_job_pane_id)
+    [ -n "$who" ] || return 0
+    printf '%s' "${who//[!A-Za-z0-9._-]/_}.${1//[!A-Za-z0-9._-]/_}"
+}
+
+# stable_height_rows ROWS KEY — ROWS raised to KEY's high-water mark, raising the mark past it.
+stable_height_rows() {
+    local rows="$1" key="$2" mark_dir="$HOME/.accounts/statusline-height" mark_file mark=""
+    if [ "${STATUSLINE_STABLE_HEIGHT:-1}" = "0" ] || [ -z "$key" ]; then
+        printf '%s' "$rows"
+        return
+    fi
+    mark_file="$mark_dir/$key"
+    [ -r "$mark_file" ] && IFS= read -r mark < "$mark_file"
+    case "$mark" in ''|*[!0-9]*) mark=0 ;; esac
+    if [ "$rows" -le "$mark" ]; then
+        printf '%s' "$mark"
+        return
+    fi
+    mkdir -p "$mark_dir" 2>/dev/null && chmod 700 "$mark_dir" 2>/dev/null
+    ( umask 077; printf '%s\n' "$rows" > "$mark_file.$$" ) 2>/dev/null &&
+        mv -f "$mark_file.$$" "$mark_file" 2>/dev/null
+    # Sessions end without saying so; a mark untouched for days belongs to a dead one.
+    find "$mark_dir" -type f -mtime +3 -delete 2>/dev/null
+    printf '%s' "$rows"
+}
+
+# emit_stable_height TEXT KEY — TEXT, then reset-only rows up to KEY's mark.
+# A bare reset, not an empty line: Claude Code drops whitespace-only status rows.
+emit_stable_height() {
+    local text="$1" key="$2" newlines rows target pad_format='\n%b'
+    printf '%s' "$text"
+    newlines="${text//[!$'\n']/}"
+    rows=${#newlines}
+    if [ "${text: -1}" = $'\n' ]; then
+        pad_format='%b\n'
+    elif [ -n "$text" ]; then
+        rows=$(( rows + 1 ))
+    fi
+    target=$(stable_height_rows "$rows" "$key")
+    for ((; rows<target; rows++)); do
+        printf "$pad_format" "$reset"
     done
 }
 
@@ -1393,12 +1446,15 @@ render_shared_account_snapshot() {
     fi
     [ "$terminal_width" -gt 3 ] 2>/dev/null && usable_width=$(( terminal_width - 3 ))
     [ "$usable_width" -gt "$max_width" ] && left_pad=$(( (usable_width - max_width) / 2 ))
+    local centered="" centered_line
     for ((index=0; index<${#rendered_lines[@]}; index++)); do
         right_pad=0
         [ "$index" -eq 0 ] && [ "$usable_width" -ge "$max_width" ] && \
             right_pad=$(( usable_width - left_pad - ${#plain_lines[$index]} ))
-        printf '%*s%b%*s\n' "$left_pad" '' "${rendered_lines[$index]}" "$right_pad" ''
+        printf -v centered_line '%*s%b%*s\n' "$left_pad" '' "${rendered_lines[$index]}" "$right_pad" ''
+        centered+="$centered_line"
     done
+    emit_stable_height "$centered" "$(stable_height_key "$format")"
 }
 
 if [ "${SHARED_ACCOUNT_SNAPSHOT:-0}" = "1" ]; then
@@ -3759,22 +3815,32 @@ SESSION_TOPIC=$(session_topic "$SESSION_ID" "$CWD")
 [ -n "$SESSION_TOPIC" ] && TAB_TITLE="${SESSION_TOPIC} — ${TAB_TITLE}"
 printf '\033]0;%s\007' "$TAB_TITLE"
 
+render_multiline() {
+    case "$FORMAT" in
+        compact)   render_compact ;;
+        narrow)    render_narrow ;;
+        sparkline) render_sparkline ;;
+        *)
+            # Default format wraps badly under a narrow status panel. Fall through
+            # to the narrow renderer when we detect (or are told) the panel is
+            # tight. NARROW_THRESHOLD is configurable in statusline.conf.
+            if [ "$COLS" -lt "$NARROW_THRESHOLD" ] 2>/dev/null; then
+                render_narrow
+            else
+                render_default
+            fi
+            ;;
+    esac
+}
+
 case "$FORMAT" in
     sigil)     render_sigil ;;
-    compact)   render_compact ;;
-    narrow)    render_narrow ;;
     rprompt)   render_rprompt ;;
-    sparkline) render_sparkline ;;
     iterm2)    render_iterm2 ;;
     *)
-        # Default format wraps badly under a narrow status panel. Fall through
-        # to the narrow renderer when we detect (or are told) the panel is
-        # tight. NARROW_THRESHOLD is configurable in statusline.conf.
-        if [ "$COLS" -lt "$NARROW_THRESHOLD" ] 2>/dev/null; then
-            render_narrow
-        else
-            render_default
-        fi
+        # The trailing x survives command substitution, so a trailing newline does too.
+        rendered=$(render_multiline; printf x)
+        emit_stable_height "${rendered%x}" "$(stable_height_key "$FORMAT")"
         ;;
 esac
 

@@ -44,6 +44,10 @@ MAX_STRING_LEN = 512
 CONNECT_TIMEOUT_S = 5
 FETCH_TIMEOUT_S = 25
 UP_CHECK_TIMEOUT_S = 20
+# The up-check's exit status; anything else means it could not tell.
+UP_CHECK_UP = 0
+UP_CHECK_DOWN = 1
+UP_CHECK_AUTH_EXPIRED = 2
 DEFAULT_PULL_INTERVAL_S = 120.0
 RUNNING_JOB_PULL_INTERVAL_S = 30.0
 
@@ -142,8 +146,8 @@ def decode_payload(stdout: str) -> list[dict | None]:
     return documents
 
 
-def board_up(board: Board, runner) -> bool | None:
-    """None when the board declares no up-check — then a pull is the only probe."""
+def up_check_status(board: Board, runner) -> int | None:
+    """None when the board declares no up-check or it could not run."""
     if not board.up_command:
         return None
     try:
@@ -151,7 +155,12 @@ def board_up(board: Board, runner) -> bool | None:
         result = runner(["bash", "-lc", board.up_command], UP_CHECK_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.returncode == 0
+    return result.returncode
+
+
+def board_up(status: int | None) -> bool | None:
+    """Only 0 and 1 are answers; any other status leaves the pull as the only probe."""
+    return {UP_CHECK_UP: True, UP_CHECK_DOWN: False}.get(status)
 
 
 def refresh_board(board: Board, *, now: float, runner) -> dict:
@@ -160,8 +169,10 @@ def refresh_board(board: Board, *, now: float, runner) -> dict:
     if not isinstance(meta, dict):
         meta = {}
     meta.update({"name": board.name, "attempted_at": now})
-    up = board_up(board, runner)
+    status = up_check_status(board, runner)
+    up = board_up(status)
     meta["up"] = up
+    meta["probe"] = "auth" if status == UP_CHECK_AUTH_EXPIRED else None
     if up is False:
         meta["error"] = None
         write_json_0600(directory / META, meta)

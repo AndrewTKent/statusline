@@ -10,6 +10,7 @@ Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated vers
 | `STATUSLINE_NOTIFY` | `1` | Opt in to macOS Notification Center threshold alerts (default off) |
 | `FORMAT` | `default` | `default \| compact \| narrow \| sigil \| sparkline \| rprompt \| iterm2`; the `STATUSLINE_FORMAT` env var also sets it. See [formats.md](formats.md) |
 | `NARROW_THRESHOLD` | `60` | Terminal width below which `default` falls through to `narrow` |
+| `STATUSLINE_STABLE_HEIGHT` | `0` | Stop padding a multi-line render to the tallest it has been this session (default on: Claude Code never reclaims the rows a shorter status line leaves behind). The high-water mark per session and format lives in `~/.accounts/statusline-height/`; a mark last raised more than three days ago is pruned |
 
 ## Branch display
 
