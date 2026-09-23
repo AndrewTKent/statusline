@@ -10,6 +10,10 @@
 # Render format: default | compact | narrow | sigil | sparkline | rprompt | iterm2
 # FORMAT=default
 
+# Claude Code never reclaims rows a shorter status line leaves behind, so a
+# multi-line render is padded to the tallest it has been this session. 0 turns it off.
+# STATUSLINE_STABLE_HEIGHT=1
+
 # ─── Branch display ────────────────────────────────────────────────────────
 # Long branch names overflow the status area on narrow terminals and hide
 # subsequent statusline rows. Tunable cap + optional prefix strip.
@@ -97,11 +101,12 @@
 # REMOTE_ACCOUNT_BOARDS="devbox:devbox"
 
 # Optional per-board liveness check, one variable per board name (uppercased,
-# non-alphanumerics become "_"). Exit 0 means up. A board that reports down is
-# never contacted, so a stopped machine is neither woken nor waited on.
+# non-alphanumerics become "_"). Exit 0 means up, 1 down, 2 the check's own login
+# expired, anything else unknown. Only a board that reports down is never
+# contacted, so a stopped machine is neither woken nor waited on.
 # It runs as `bash -lc` under the poller's own environment, which is not your
 # interactive shell — spell out the path to anything outside the system PATH.
-# REMOTE_BOARD_UP_DEVBOX='"$HOME/.local/bin/devbox-cli" status | grep -q running'
+# REMOTE_BOARD_UP_DEVBOX='out=$("$HOME/.local/bin/devbox-cli" status 2>&1); case "$out" in *"state: running"*) exit 0;; *"state: "*) exit 1;; *credentials*|*"sso login"*) exit 2;; *) exit 3;; esac'
 
 # Seconds between pulls, and the age past which a board's numbers render dimmed
 # with their age instead of as current. Defaults: 120 and 900.

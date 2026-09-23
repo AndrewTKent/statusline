@@ -161,7 +161,7 @@ On the machine doing the watching, name the boards in `~/.claude/statusline.conf
 
 ```bash
 REMOTE_ACCOUNT_BOARDS="devbox:devbox"                        # <name>:<ssh-host>
-REMOTE_BOARD_UP_DEVBOX='"$HOME/.local/bin/devbox-cli" status | grep -q running'
+REMOTE_BOARD_UP_DEVBOX='out=$("$HOME/.local/bin/devbox-cli" status 2>&1); case "$out" in *"state: running"*) exit 0;; *"state: "*) exit 1;; *credentials*|*"sso login"*) exit 2;; *) exit 3;; esac'
 ```
 
 Mechanics, and the reason they are worth knowing:
@@ -177,9 +177,21 @@ Mechanics, and the reason they are worth knowing:
   `REMOTE_BOARD_MAX_AGE` (default 900s) render as current; older or failed pulls
   keep the last numbers, dimmed, with their age. Nothing is ever shown as zero
   because a pull failed.
-- **A stopped machine is left alone.** When a board's up-check exits non-zero it
-  is not contacted at all, and the row reads `<name> · stopped`. The check runs
-  as `bash -lc` under the poller's environment, so give it absolute paths.
+- **The up-check's exit status is a four-way answer.** The check runs as
+  `bash -lc` under the poller's environment, so give it absolute paths.
+
+  | Exit | Meaning | Poller | Row |
+  |------|---------|--------|-----|
+  | `0` | up | pulls | `<name> · <age> ago` |
+  | `1` | down | never contacts the machine | `<name> · stopped` |
+  | `2` | the check's own login expired | pulls anyway | `<name> · login expired · <age> ago` |
+  | other, or a timeout | the check could not tell | pulls anyway | `<name> · <age> ago` |
+
+  Only `1` stops the pull, so a check that fails for any other reason never
+  reports a running machine as stopped. `cmd | grep -q running` does not meet
+  this contract: it exits 1 when `cmd` failed and printed nothing. Match the
+  output instead, as in the example above: a line that says running is `0`, any
+  other state line is `1`, a login error is `2`, anything else is `3`.
 - **Codex rides along, in its own place.** The same pull carries the remote
   Codex quota rows, which appear in this machine's Codex statusline and
   `codex-top`. `REMOTE_BOARD_CODEX_ROWS=1` also lists them, as `cx <label>`,

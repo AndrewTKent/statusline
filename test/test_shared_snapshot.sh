@@ -181,8 +181,8 @@ cat > "$REMOTE_ROOT_DIR/devbox/codex-usage.json" <<JSON
 {"team-1": {"fetched_at": $NOW, "rate_limits": {"primary": {"resets_at": 4070000000, "used_percent": 37, "window_duration_mins": 10080}, "secondary": null}}}
 JSON
 write_board_meta() {
-    printf '{"name":"devbox","fetched_at":%s,"attempted_at":%s,"error":null,"up":%s}\n' \
-        "$1" "$NOW" "$2" > "$REMOTE_ROOT_DIR/devbox/meta.json"
+    printf '{"name":"devbox","fetched_at":%s,"attempted_at":%s,"error":null,"up":%s,"probe":%s}\n' \
+        "$1" "$NOW" "$2" "${3:-null}" > "$REMOTE_ROOT_DIR/devbox/meta.json"
 }
 render_with_boards() {
     HOME="$TEST_HOME" PATH="$STUBS:$PATH" SHARED_TEST_VIOLATIONS="$VIOLATIONS" \
@@ -277,6 +277,10 @@ stopped_board_output=$(render_with_boards)
 [[ "$stopped_board_output" == *"devbox · stopped"* ]] || { printf 'a stopped board did not say so\n' >&2; exit 1; }
 [[ "$stopped_board_output" != *"· Team-1 "* ]] || { printf 'a stopped board still rendered rows\n' >&2; exit 1; }
 [[ "$stopped_board_output" != *"demo-job"* ]] || { printf 'a stopped board still rendered its jobs\n' >&2; exit 1; }
+
+write_board_meta "$NOW" null '"auth"'
+auth_board_output=$(render_with_boards)
+[[ "$auth_board_output" == *"devbox · login expired"* ]] || { printf 'a board whose up-check login expired did not say so\n' >&2; exit 1; }
 rm -f "$REMOTE_ROOT_DIR/devbox/jobs.json"
 
 mkdir -p "$SANDBOX/empty-remote"
