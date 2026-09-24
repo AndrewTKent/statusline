@@ -220,6 +220,21 @@ def last_change(directory: Path, session: Path | None) -> int:
     return int(max((mtime(path) for path in paths), default=0.0))
 
 
+def codex_in(worktree: str) -> bool:
+    """Codex runs unrouted, so a live codex process working in the worktree stands in for a router."""
+    prefix = worktree.rstrip("/") + "/"
+    for process in children(Path("/proc")):
+        try:
+            if (process / "comm").read_text().strip() != "codex":
+                continue
+            cwd = os.readlink(process / "cwd")
+        except OSError:
+            continue
+        if cwd == worktree or cwd.startswith(prefix):
+            return True
+    return False
+
+
 def session_state(tmux_alive: bool, worktree: str, router: dict) -> str:
     """A tmux session left at a bare shell after its router exited is not running.
     A job naming no worktree cannot be matched to a router, so tmux is all there is."""
@@ -227,7 +242,7 @@ def session_state(tmux_alive: bool, worktree: str, router: dict) -> str:
         return "gone"
     if router.get("held_until"):
         return "held"
-    if worktree and not router:
+    if worktree and not router and not codex_in(worktree):
         return "gone"
     return "running"
 
