@@ -125,6 +125,7 @@ accounts status
 | `accounts pane set <label>` | Pin only the current terminal pane |
 | `accounts fable` | Switch live supervised sessions to Fable while headroom is available |
 | `accounts poll` | Refresh dormant stored/native profiles, then poll every routable account |
+| `accounts move <label> --to <host>` | Move an account to another machine (`--from <host>` pulls one here) |
 
 Reference: [docs/accounts.md](docs/accounts.md) (all commands, Codex setup, the overage guard, Fable fallback, remote boards, unattended jobs, the handoff notice).
 

@@ -17,6 +17,8 @@ Router commands:
   mint / tokens   mint a long-lived token for an account / list minted tokens
   sync            converge the minted-token vault with the sync host
   pick-env        emit env exports for the best routable account
+  move LABEL      move an account to (--to HOST) or from (--from HOST) another machine
+  export / import / forget   the pieces move is built from
 """
 
 from __future__ import annotations
@@ -456,6 +458,40 @@ def resolve_label(email: str | None, org_uuid: str | None, pairs) -> str:
 def excluded_labels() -> set[str]:
     raw = os.environ.get("ACCOUNTS_EXCLUDE") or _conf_var("ACCOUNTS_EXCLUDE")
     return set(raw.split())
+
+
+def declared_labels(blobs: dict | None = None) -> set[str]:
+    if blobs is None:
+        blobs = load_blobs()
+    conf_labels = {label for label, _, _ in load_label_pairs()}
+    return conf_labels | set(blobs.get("accounts") or {})
+
+
+def set_conf_label_token(label: str, token: str | None) -> None:
+    """Put TOKEN in place of LABEL's token on the ACCOUNT_LABELS line, or drop
+    LABEL's token when TOKEN is None. Every other byte of the file is kept."""
+    try:
+        lines = CONF_PATH.read_text().splitlines(keepends=True)
+    except FileNotFoundError:
+        lines = []
+    for index, line in enumerate(lines):
+        if not line.startswith("ACCOUNT_LABELS="):
+            continue
+        match = re.match(r'ACCOUNT_LABELS="([^"]*)"', line)
+        if not match:
+            raise AccountsError(f"ACCOUNT_LABELS in {CONF_PATH} is not a double-quoted list")
+        tokens = [t for t in match.group(1).split() if not t.startswith(f"{label}:")]
+        if token is not None:
+            tokens.append(token)
+        lines[index] = f'ACCOUNT_LABELS="{" ".join(tokens)}"' + line[match.end():]
+        CONF_PATH.write_text("".join(lines))
+        return
+    if token is None:
+        return
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(f'ACCOUNT_LABELS="{token}"\n')
+    CONF_PATH.write_text("".join(lines))
 
 
 # ── headroom ──────────────────────────────────────────────────────────────
@@ -1359,8 +1395,7 @@ def save_mode(mode: str, label: str | None) -> None:
 
 
 def save_pane_pin(label: str) -> None:
-    declared = {declared_label for declared_label, _, _ in load_label_pairs()}
-    if label not in declared:
+    if label not in declared_labels():
         raise AccountsError(f"'{label}' is not a declared account label")
 
     _save_pane_pin(label)
@@ -2016,7 +2051,7 @@ def write_statusline_snapshot(blobs: dict, *, error: str | None) -> dict:
     now_ts = int(time.time())
     _migrate_mode_store()
     mode, global_generation = _load_global_mode_snapshot()
-    declared = {label for label, _, _ in load_label_pairs()}
+    declared = declared_labels(blobs)
     mode_label = mode.get("label")
     if mode_label not in declared:
         mode_label = None
@@ -2035,7 +2070,7 @@ def write_statusline_snapshot(blobs: dict, *, error: str | None) -> dict:
         else {}
     )
     for label, entry in (blobs.get("accounts") or {}).items():
-        if label not in declared or not isinstance(entry, dict):
+        if not isinstance(entry, dict):
             continue
         email = entry.get("email")
         org_uuid = entry.get("org_uuid")
@@ -2419,6 +2454,166 @@ def sync_with_remote(quiet: bool = False) -> bool:
 def cmd_sync(_args) -> None:
     """Converge ~/.accounts/vault.json between this machine and the sync host."""
     sync_with_remote()
+
+
+# ── moving an account between machines ────────────────────────────────────
+
+# `accounts` is not on a non-interactive ssh login's PATH; the router shims are.
+REMOTE_ACCOUNTS = 'PATH="$HOME/.accounts/bin:$HOME/.local/bin:$PATH" accounts'
+
+
+def label_token(label: str, entry: dict) -> str:
+    return f"{label}:{entry['email']}|{entry['org_uuid']}"
+
+
+def export_payload(label: str) -> dict:
+    with locked():
+        blobs = load_blobs()
+        sync_profile_credentials(blobs, persist=True)
+    entry = (blobs.get("accounts") or {}).get(label)
+    if not entry:
+        raise AccountsError(f"'{label}' has no stored account")
+    if not entry.get("email") or not entry.get("org_uuid"):
+        raise AccountsError(f"'{label}' has no recorded identity")
+    return {"label": label, "entry": entry, "label_line": label_token(label, entry)}
+
+
+def import_account(payload: dict) -> str:
+    label = payload["label"]
+    entry = payload["entry"]
+    identity = (entry["email"], entry["org_uuid"])
+    with locked():
+        blobs = load_blobs()
+        stored = blobs.setdefault("accounts", {})
+        for other, existing in stored.items():
+            same_identity = (existing.get("email"), existing.get("org_uuid")) == identity
+            if other != label and same_identity:
+                raise AccountsError(f"'{other}' already holds this account")
+            if other == label and not same_identity:
+                raise AccountsError(f"'{label}' already holds a different account")
+        # A Keychain item left from an earlier tenancy would shadow the new file.
+        if not reset_profile_keychain(label):
+            raise AccountsError(f"could not remove the '{label}' profile keychain item")
+        stored[label] = entry
+        save_blobs(blobs)
+        set_conf_label_token(label, payload["label_line"])
+        ensure_native_profile(label, entry)
+        write_profile_credentials(label, entry["blob"])
+        clear_profile_account_state(label)
+    _repaint_board()
+    return label
+
+
+def _refuse_if_in_use(label: str) -> None:
+    if _load_global_mode_snapshot()[0].get("label") == label:
+        raise AccountsError(f"'{label}' is the pinned account; `accounts auto` first")
+    if any(lease.get("label") == label for lease in load_session_leases()):
+        raise AccountsError(f"'{label}' has a live session")
+
+
+def _strip_profile_login(label: str) -> None:
+    credentials = native_profile_path(label) / ".credentials.json"
+    try:
+        mcp_oauth = _mcp_oauth(credentials.read_text())
+    except OSError:
+        return
+    if mcp_oauth:
+        _write_0600(credentials, json.dumps({"mcpOAuth": mcp_oauth}))
+    else:
+        credentials.unlink()
+
+
+def forget_account(label: str) -> None:
+    with locked():
+        _refuse_if_in_use(label)
+        if not reset_profile_keychain(label):
+            raise AccountsError(f"could not remove the '{label}' profile keychain item")
+        blobs = load_blobs()
+        (blobs.get("accounts") or {}).pop(label, None)
+        save_blobs(blobs)
+        _strip_profile_login(label)
+        clear_profile_account_state(label)
+        set_conf_label_token(label, None)
+    _repaint_board()
+
+
+def _repaint_board() -> None:
+    try:
+        poll_and_write_snapshot()
+    except AccountsError as exc:
+        # A running watcher repaints on its own next cycle.
+        if "collector is already running" not in str(exc):
+            raise
+
+
+def _remote_accounts(host: str, command: str, payload: str | None = None):
+    return subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", host, f"{REMOTE_ACCOUNTS} {command}"],
+        input=payload,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _remote_error(host: str, step: str, result) -> AccountsError:
+    return AccountsError(f"{host} {step} failed: {result.stderr.strip()[:200]}")
+
+
+def move_to(label: str, host: str) -> None:
+    _refuse_if_in_use(label)
+    payload = json.dumps(export_payload(label))
+    result = _remote_accounts(host, "import", payload)
+    print(result.stdout, end="")
+    if result.returncode != 0:
+        raise _remote_error(host, "import", result)
+    forget_account(label)
+    print(f"forgot {label}")
+
+
+def move_from(label: str, host: str) -> None:
+    exported = _remote_accounts(host, f"export {shlex.quote(label)}")
+    if exported.returncode != 0:
+        raise _remote_error(host, "export", exported)
+    try:
+        payload = json.loads(exported.stdout)
+    except json.JSONDecodeError as exc:
+        raise AccountsError(f"{host} export did not return an account") from exc
+    import_account(payload)
+    print(f"imported {label}")
+    forgotten = _remote_accounts(host, f"forget {shlex.quote(label)}")
+    print(forgotten.stdout, end="")
+    if forgotten.returncode != 0:
+        raise _remote_error(host, "forget", forgotten)
+
+
+def cmd_export(args) -> None:
+    """Write one account as JSON for `accounts import` on another machine."""
+    if sys.stdout.isatty():
+        die("export writes a credential; pipe it, never print it to a terminal")
+    print(json.dumps(export_payload(args.label)))
+
+
+def cmd_import(_args) -> None:
+    """Install an account from `accounts export` JSON on stdin."""
+    try:
+        payload = json.loads(sys.stdin.read())
+    except json.JSONDecodeError as exc:
+        raise AccountsError("import expects the JSON `accounts export` writes") from exc
+    print(f"imported {import_account(payload)}")
+
+
+def cmd_forget(args) -> None:
+    """Remove an account from this machine, keeping its profile directory."""
+    forget_account(args.label)
+    print(f"forgot {args.label}")
+
+
+def cmd_move(args) -> None:
+    """Move an account to or from another machine: import there, then forget here."""
+    if args.to:
+        move_to(args.label, args.to)
+    else:
+        move_from(args.label, args.from_host)
 
 
 def cmd_mint(args) -> None:
@@ -2995,8 +3190,7 @@ def _fable_rank(r: dict) -> tuple:
 
 
 def cmd_pane_set(args) -> None:
-    declared = {label for label, _, _ in load_label_pairs()}
-    if args.label not in declared:
+    if args.label not in declared_labels():
         raise AccountsError(f"'{args.label}' is not a declared account label")
     with locked():
         blobs = load_blobs()
@@ -3243,6 +3437,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_refresh.set_defaults(fn=cmd_refresh)
 
     sub.add_parser("sync", help="converge the token vault with the sync host").set_defaults(fn=cmd_sync)
+
+    p_move = sub.add_parser("move", help="move an account to or from another machine")
+    p_move.add_argument("label")
+    direction = p_move.add_mutually_exclusive_group(required=True)
+    direction.add_argument("--to", metavar="HOST")
+    direction.add_argument("--from", dest="from_host", metavar="HOST")
+    p_move.set_defaults(fn=cmd_move)
+
+    p_export = sub.add_parser("export", help="write one account as JSON to a pipe")
+    p_export.add_argument("label")
+    p_export.set_defaults(fn=cmd_export)
+
+    sub.add_parser("import", help="install an account from export JSON on stdin").set_defaults(
+        fn=cmd_import
+    )
+
+    p_forget = sub.add_parser("forget", help="remove an account from this machine")
+    p_forget.add_argument("label")
+    p_forget.set_defaults(fn=cmd_forget)
 
     p_pick_env = sub.add_parser(
         "pick-env", help="emit env exports for the best routable account"

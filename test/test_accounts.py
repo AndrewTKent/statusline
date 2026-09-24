@@ -1,6 +1,7 @@
 """Unit tests for bin/accounts.py — pure logic only (no keychain, no network)."""
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -2764,6 +2765,7 @@ class TestNativeProfiles:
     ):
         self._paths(tmp_path, monkeypatch)
         monkeypatch.setattr(accounts, "LOCK_PATH", tmp_path / "accounts.lock")
+        monkeypatch.setattr(accounts, "BLOBS_PATH", tmp_path / "blobs.json")
         monkeypatch.setattr(accounts, "MODE_PATH", tmp_path / "mode.json")
         monkeypatch.setattr(accounts, "PANE_PINS_PATH", tmp_path / "pane-pins")
         monkeypatch.setattr(accounts, "PANE_SALT_PATH", tmp_path / "pane-salt")
@@ -3158,6 +3160,7 @@ class TestLoadModeFable:
 class TestPanePolicy:
     def _paths(self, tmp_path, monkeypatch):
         monkeypatch.setattr(accounts, "LOCK_PATH", tmp_path / "accounts.lock")
+        monkeypatch.setattr(accounts, "BLOBS_PATH", tmp_path / "blobs.json")
         monkeypatch.setattr(accounts, "MODE_PATH", tmp_path / "mode.json")
         monkeypatch.setattr(accounts, "PANE_PINS_PATH", tmp_path / "pane-pins")
         monkeypatch.setattr(accounts, "PANE_SALT_PATH", tmp_path / "pane-salt")
@@ -3204,7 +3207,8 @@ class TestPanePolicy:
 
     def test_pin_survives_relaunch_and_isolated_by_pane(self, tmp_path, monkeypatch):
         self._paths(tmp_path, monkeypatch)
-        monkeypatch.setattr(accounts, "load_label_pairs", lambda: [("work", "*", None)])
+        monkeypatch.setattr(accounts, "load_label_pairs", list)
+        accounts.save_blobs({"accounts": {"work": {}}})
         monkeypatch.setattr(accounts, "pane_key", lambda env=None: "a" * 64)
         accounts.save_mode("auto", None)
         accounts.save_pane_pin("work")
@@ -3273,7 +3277,11 @@ class TestStatuslineSnapshot:
         monkeypatch.setattr(accounts.time, "time", lambda: now.timestamp())
         monkeypatch.setattr(accounts, "now_utc", lambda: now)
         monkeypatch.setattr(accounts, "load_label_pairs", lambda: [("work", "secret@example.com", "org-secret")])
-        monkeypatch.setattr(accounts, "load_session_leases", lambda now_ts=None: [{"label": "work"}])
+        monkeypatch.setattr(
+            accounts,
+            "load_session_leases",
+            lambda now_ts=None: [{"label": "work"}, {"label": "blobs-only"}],
+        )
         accounts.save_mode("auto", None)
         accounts.RESETS_PATH.write_text(json.dumps({
             "secret@example.com|org-secret": {
@@ -3296,7 +3304,7 @@ class TestStatuslineSnapshot:
             "email": "secret@example.com",
             "org_uuid": "org-secret",
             "account_uuid": "account-secret",
-        }, "undeclared": {"blob": "credential-body"}}}
+        }, "blobs-only": {"blob": "credential-body"}}}
 
         snapshot = accounts.write_statusline_snapshot(blobs, error=None)
         encoded = accounts.SNAPSHOT_PATH.read_text()
@@ -3311,7 +3319,7 @@ class TestStatuslineSnapshot:
         }
         assert snapshot["accounts"]["work"]["scoped"][0]["label"] == "Model X"
         assert snapshot["accounts"]["work"]["live_leases"] == 1
-        assert "undeclared" not in snapshot["accounts"]
+        assert snapshot["accounts"]["blobs-only"]["live_leases"] == 1
         for secret in ("token-secret", "secret@example.com", "org-secret", "account-secret"):
             assert secret not in encoded
         assert (accounts.SNAPSHOT_PATH.stat().st_mode & 0o777) == 0o600
@@ -5041,3 +5049,279 @@ class TestMismatchIsVisible:
         accounts.sync_profile_credentials(blobs, persist=True)
         assert "auth_dead_at" not in blobs["accounts"]["gmail"]
         assert notified == []
+
+
+CONF_TEXT = (
+    "# Accounts\n"
+    '# ACCOUNT_LABELS="work:*@example.com"\n'
+    'ACCOUNT_LABELS="other:o@example.com|o-org work:w@example.com|w-org"  # keep\n'
+    "STATUSLINE_NOTIFY=0"
+)
+WORK_TOKEN = "work:w@example.com|w-org"
+REMOTE = 'PATH="$HOME/.accounts/bin:$HOME/.local/bin:$PATH" accounts'
+
+
+class TestConfLabelEdit:
+    def test_replaces_only_the_label_token(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+        accounts.CONF_PATH.write_text(CONF_TEXT)
+
+        accounts.set_conf_label_token("work", "work:new@example.com|n-org")
+
+        assert accounts.CONF_PATH.read_text() == CONF_TEXT.replace(
+            "other:o@example.com|o-org work:w@example.com|w-org",
+            "other:o@example.com|o-org work:new@example.com|n-org",
+        )
+        assert accounts.load_label_pairs() == [
+            ("other", "o@example.com", "o-org"),
+            ("work", "new@example.com", "n-org"),
+        ]
+
+    def test_appends_the_line_when_the_conf_has_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+        accounts.CONF_PATH.write_text("STATUSLINE_NOTIFY=0")
+
+        accounts.set_conf_label_token("work", WORK_TOKEN)
+
+        assert accounts.CONF_PATH.read_text() == f'STATUSLINE_NOTIFY=0\nACCOUNT_LABELS="{WORK_TOKEN}"\n'
+
+
+class TestMoveAccount:
+    WORK = {"blob": _live_blob("work-token"), "email": "w@example.com", "org_uuid": "w-org"}
+    OTHER = {"blob": _live_blob("other-token"), "email": "o@example.com", "org_uuid": "o-org"}
+
+    def _paths(self, tmp_path, monkeypatch, accounts_map):
+        for name, leaf in (
+            ("LOCK_PATH", "accounts.lock"),
+            ("MODE_PATH", "mode.json"),
+            ("BLOBS_PATH", "blobs.json"),
+            ("CONF_PATH", "statusline.conf"),
+            ("PROFILES_PATH", "profiles"),
+            ("CLAUDE_HOME", "claude"),
+            ("CLAUDE_STATE_PATH", ".claude.json"),
+            ("LEASES_PATH", "leases.json"),
+            ("MIRROR_LOG", "accounts-mirror.log"),
+        ):
+            monkeypatch.setattr(accounts, name, tmp_path / leaf)
+        monkeypatch.setattr(accounts, "_lock_depth", 0)
+        monkeypatch.setattr(accounts, "fetch_profile", lambda _token: None)
+        accounts.CLAUDE_HOME.mkdir()
+        accounts.CONF_PATH.write_text(CONF_TEXT)
+        accounts.save_blobs({"version": 1, "accounts": accounts_map})
+        self.keychain: dict[str, str] = {}
+        self.deleted: list[str] = []
+        self.polls = 0
+
+        def kc_delete(service):
+            self.deleted.append(service)
+            self.keychain.pop(service, None)
+            return True
+
+        def poll():
+            self.polls += 1
+            return 0
+
+        monkeypatch.setattr(accounts, "kc_read", lambda service, account=None: self.keychain.get(service))
+        monkeypatch.setattr(accounts, "kc_delete", kc_delete)
+        monkeypatch.setattr(accounts, "poll_and_write_snapshot", poll)
+
+    def _ssh(self, monkeypatch, *results):
+        calls: list[dict] = []
+        queue = list(results)
+        real_run = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[0] != "ssh":
+                return real_run(argv, **kwargs)
+            calls.append({"argv": argv, "input": kwargs.get("input")})
+            return queue.pop(0)
+
+        monkeypatch.setattr(accounts.subprocess, "run", run)
+        return calls
+
+    @staticmethod
+    def _done(returncode=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    @staticmethod
+    def _stored():
+        return accounts.load_blobs()["accounts"]
+
+    def _payload(self, entry=None):
+        return {"label": "work", "entry": entry or self.WORK, "label_line": WORK_TOKEN}
+
+    def test_export_refuses_a_terminal(self, tmp_path, monkeypatch, capsys):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+        with pytest.raises(SystemExit):
+            accounts.cmd_export(types.SimpleNamespace(label="work"))
+
+        assert capsys.readouterr().out == ""
+
+    def test_export_ships_the_profile_login_and_a_label_line_from_its_identity(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        accounts.CONF_PATH.write_text('ACCOUNT_LABELS="work:stale@example.com|stale-org"\n')
+        rotated = _live_blob("rotated-token")
+        accounts.ensure_native_profile("work", {"blob": rotated})
+        monkeypatch.setattr(
+            accounts,
+            "fetch_profile",
+            lambda _token: {"account": {"email": "w@example.com"}, "organization": {"uuid": "w-org"}},
+        )
+
+        accounts.cmd_export(types.SimpleNamespace(label="work"))
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["label"] == "work"
+        assert payload["entry"]["blob"] == rotated
+        assert payload["label_line"] == WORK_TOKEN
+
+    def test_import_installs_the_account_over_an_earlier_tenancy(self, tmp_path, monkeypatch, capsys):
+        self._paths(tmp_path, monkeypatch, {"other": self.OTHER})
+        accounts.CONF_PATH.write_text(CONF_TEXT.replace(f" {WORK_TOKEN}", ""))
+        profile = accounts.ensure_native_profile("work", {"blob": _live_blob("earlier-token")})
+        (profile / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "old@example.com"}}))
+        self.keychain[accounts.profile_keychain_service("work")] = _live_blob("earlier-token")
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(self._payload())))
+
+        accounts.cmd_import(types.SimpleNamespace())
+
+        assert capsys.readouterr().out == "imported work\n"
+        assert self._stored()["work"] == self.WORK
+        assert ("work", "w@example.com", "w-org") in accounts.load_label_pairs()
+        assert self.deleted == [accounts.profile_keychain_service("work")]
+        assert (profile / ".credentials.json").read_text() == self.WORK["blob"]
+        assert "oauthAccount" not in json.loads((profile / ".claude.json").read_text())
+        assert self.polls == 1
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            {"other": {"blob": "b", "email": "w@example.com", "org_uuid": "w-org"}},
+            {"work": {"blob": "b", "email": "someone@example.com", "org_uuid": "s-org"}},
+        ],
+        ids=["identity-under-another-label", "label-holds-another-identity"],
+    )
+    def test_import_refuses_an_identity_collision(self, tmp_path, monkeypatch, stored):
+        self._paths(tmp_path, monkeypatch, stored)
+
+        with pytest.raises(accounts.AccountsError):
+            accounts.import_account(self._payload())
+
+        assert self._stored() == stored
+        assert accounts.CONF_PATH.read_text() == CONF_TEXT
+
+    def test_import_replaces_the_login_of_the_same_account(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        fresh = {**self.WORK, "blob": _live_blob("fresh-token")}
+
+        accounts.import_account(self._payload(fresh))
+
+        assert self._stored()["work"] == fresh
+
+    @pytest.mark.parametrize("hold", ["pinned", "leased"])
+    def test_forget_refuses_a_label_in_use(self, tmp_path, monkeypatch, hold):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        if hold == "pinned":
+            accounts.save_mode("set", "work")
+        else:
+            accounts.save_session_leases([{"pid": os.getpid(), "label": "work", "updated_at": time.time()}])
+
+        with pytest.raises(accounts.AccountsError):
+            accounts.forget_account("work")
+
+        assert self._stored()["work"] == self.WORK
+
+    def test_forget_removes_the_login_and_keeps_the_profile(self, tmp_path, monkeypatch, capsys):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK, "other": self.OTHER})
+        profile = accounts.ensure_native_profile("work", self.WORK)
+        credentials = {**json.loads(self.WORK["blob"]), "mcpOAuth": _mcp_login("linear")}
+        (profile / ".credentials.json").write_text(json.dumps(credentials))
+        (profile / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "w@example.com"}}))
+        self.keychain[accounts.profile_keychain_service("work")] = self.WORK["blob"]
+
+        accounts.cmd_forget(types.SimpleNamespace(label="work"))
+
+        assert capsys.readouterr().out == "forgot work\n"
+        assert self._stored() == {"other": self.OTHER}
+        assert self.deleted == [accounts.profile_keychain_service("work")]
+        assert profile.is_dir()
+        assert json.loads((profile / ".credentials.json").read_text()) == {"mcpOAuth": _mcp_login("linear")}
+        assert "oauthAccount" not in json.loads((profile / ".claude.json").read_text())
+        assert [pair[0] for pair in accounts.load_label_pairs()] == ["other"]
+
+    def test_forget_removes_a_credentials_file_with_no_mcp_logins(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        profile = accounts.ensure_native_profile("work", self.WORK)
+
+        accounts.forget_account("work")
+
+        assert not (profile / ".credentials.json").exists()
+
+    def test_forget_completes_while_the_collector_runs(self, tmp_path, monkeypatch, capsys):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+
+        def collector_running():
+            raise accounts.AccountsError("account collector is already running")
+
+        monkeypatch.setattr(accounts, "poll_and_write_snapshot", collector_running)
+
+        accounts.cmd_forget(types.SimpleNamespace(label="work"))
+
+        assert capsys.readouterr().out == "forgot work\n"
+
+    def test_move_to_imports_there_then_forgets_here(self, tmp_path, monkeypatch, capsys):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        calls = self._ssh(monkeypatch, self._done(stdout="imported work\n"))
+        forgotten: list[str] = []
+        monkeypatch.setattr(accounts, "forget_account", forgotten.append)
+
+        accounts.cmd_move(types.SimpleNamespace(label="work", to="remote-host", from_host=None))
+
+        assert [call["argv"] for call in calls] == [
+            ["ssh", "-o", "BatchMode=yes", "remote-host", f"{REMOTE} import"]
+        ]
+        assert json.loads(calls[0]["input"])["entry"] == self.WORK
+        assert forgotten == ["work"]
+        assert capsys.readouterr().out == "imported work\nforgot work\n"
+
+    def test_failed_remote_import_leaves_the_account_here(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        profile = accounts.ensure_native_profile("work", self.WORK)
+        self._ssh(monkeypatch, self._done(returncode=1, stderr="accounts: 'work' already holds a different account"))
+
+        with pytest.raises(accounts.AccountsError, match="already holds a different account"):
+            accounts.cmd_move(types.SimpleNamespace(label="work", to="remote-host", from_host=None))
+
+        assert self._stored()["work"] == self.WORK
+        assert accounts.CONF_PATH.read_text() == CONF_TEXT
+        assert (profile / ".credentials.json").read_text() == self.WORK["blob"]
+
+    def test_move_from_imports_here_then_forgets_there(self, tmp_path, monkeypatch, capsys):
+        self._paths(tmp_path, monkeypatch, {})
+        calls = self._ssh(
+            monkeypatch,
+            self._done(stdout=json.dumps(self._payload()) + "\n"),
+            self._done(stdout="forgot work\n"),
+        )
+
+        accounts.cmd_move(types.SimpleNamespace(label="work", to=None, from_host="remote-host"))
+
+        assert [call["argv"][-1].split()[-2:] for call in calls] == [["export", "work"], ["forget", "work"]]
+        assert self._stored()["work"] == self.WORK
+        assert (accounts.PROFILES_PATH / "work" / ".credentials.json").read_text() == self.WORK["blob"]
+        assert capsys.readouterr().out == "imported work\nforgot work\n"
+
+    def test_move_from_keeps_the_remote_account_when_the_local_import_fails(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch, {})
+        self.keychain[accounts.profile_keychain_service("work")] = _live_blob("earlier-token")
+        monkeypatch.setattr(accounts, "kc_delete", lambda _service: False)
+        calls = self._ssh(monkeypatch, self._done(stdout=json.dumps(self._payload())))
+
+        with pytest.raises(accounts.AccountsError):
+            accounts.cmd_move(types.SimpleNamespace(label="work", to=None, from_host="remote-host"))
+
+        assert [call["argv"][-1].split()[-2:] for call in calls] == [["export", "work"]]
