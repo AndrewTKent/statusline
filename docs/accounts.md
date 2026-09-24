@@ -80,6 +80,8 @@ count the status line shows.
 | `accounts mint <label>` | Mint + vault a 1-year token for headless jobs |
 | `accounts tokens` | List minted tokens and expiry |
 | `accounts sync` | Converge the token vault with a second machine |
+| `accounts move <label> --to <host>` | Move an account to `<host>` over ssh (`--from <host>` pulls one here): import on the destination, then forget on the source; a failed import leaves the source untouched |
+| `accounts export <label>` / `import` / `forget <label>` | The pieces `move` is built from: `export` writes the account as JSON to a pipe (never a terminal), `import` installs it from stdin, `forget` removes it and keeps the profile directory |
 | `accounts pick-env` | Emit `CLAUDE_CONFIG_DIR` and account metadata |
 
 Codex uses its own command because the two CLIs expose different auth and quota
