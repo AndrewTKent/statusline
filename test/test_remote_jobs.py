@@ -91,6 +91,29 @@ def only_job(payload):
 
 
 class TestState:
+    @pytest.mark.parametrize("command,cwd,tmux,expected", [
+        ("codex", "/w", True, "running"),
+        ("bash", "/w", True, "gone"),
+        ("codex", "/elsewhere", True, "gone"),
+        ("codex", "/w", False, "gone"),
+        (None, "/w", True, "gone"),
+    ])
+    def test_codex_job_requires_its_live_process_and_tmux(
+        self, box, monkeypatch, command, cwd, tmux, expected
+    ):
+        write_job(box)
+        process = box / "proc" / "123"
+        process.mkdir(parents=True)
+        if command:
+            (process / "comm").write_text(command + "\n")
+        (process / "cwd").symlink_to(cwd)
+        original_children = remote_jobs.children
+        monkeypatch.setattr(remote_jobs, "children", lambda p:
+            [process] if p == Path("/proc") else original_children(p))
+        live(monkeypatch, *( ["demo"] if tmux else []))
+
+        assert only_job(remote_jobs.build(2000.0))["state"] == expected
+
     def test_a_job_whose_session_and_router_are_alive_and_has_no_report_is_running(
         self, box, monkeypatch
     ):
@@ -228,4 +251,3 @@ def test_a_directory_without_a_job_file_is_not_a_job(box):
     (box / "handoffs" / "scratch").mkdir()
 
     assert remote_jobs.build(2000.0)["jobs"] == {}
-
