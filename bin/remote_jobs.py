@@ -20,6 +20,7 @@ from pathlib import Path
 JOBS_FILE = "jobs.json"
 JOB_FILE = "job.json"
 REPORT_FILE = "report.md"
+SENT_FILES = {"brief.md", "launch.sh"}
 ROUTER_STATE_GLOB = "account-router-*.json"
 ROUTER_PID = re.compile(r"account-router-(\d+)\.json$")
 WORKFLOW_NAME = re.compile(r"name:\s*['\"]([^'\"]+)['\"]")
@@ -216,8 +217,9 @@ def workflows_for(session: Path | None, alive: bool) -> list[dict]:
 
 
 def last_change(directory: Path, session: Path | None) -> int:
-    paths = [directory, *children(directory), *journals(session)]
-    return int(max((mtime(path) for path in paths), default=0.0))
+    """What the job wrote, not what it was sent: a sweep over every launcher is not activity."""
+    written = [path for path in children(directory) if path.name not in SENT_FILES]
+    return int(max((mtime(path) for path in [*written, *journals(session)]), default=0.0))
 
 
 def codex_in(worktree: str) -> bool:
