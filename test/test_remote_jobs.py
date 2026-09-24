@@ -186,6 +186,20 @@ class TestReport:
         assert remote_jobs.report_status(tmp_path / "report.md") is None
 
 
+class TestUpdatedAt:
+    def test_a_rewritten_launcher_does_not_move_the_clock(self, box):
+        directory = write_job(box)
+        report = directory / "report.md"
+        report.write_text("branch pushed\n")
+        os.utime(report, (1500, 1500))
+        os.utime(directory / "job.json", (1000, 1000))
+        launcher = directory / "launch.sh"
+        launcher.write_text("exec bash\n")
+        os.utime(launcher, (1900, 1900))
+
+        assert only_job(remote_jobs.build(2000.0))["updated_at"] == 1500
+
+
 class TestRouterState:
     def test_the_account_and_move_count_come_from_the_state_sharing_the_worktree(self, box):
         write_job(box)
