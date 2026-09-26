@@ -178,7 +178,7 @@ cat > "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" <<JSON
 }
 JSON
 cat > "$REMOTE_ROOT_DIR/devbox/codex-usage.json" <<JSON
-{"team-1": {"fetched_at": $NOW, "rate_limits": {"primary": {"resets_at": 4070000000, "used_percent": 37, "window_duration_mins": 10080}, "secondary": null}}}
+{"seat-1": {"fetched_at": $NOW, "rate_limits": {"primary": {"resets_at": $(( NOW + 3 * 86400 + 3600 )), "used_percent": 37, "window_duration_mins": 10080}, "secondary": {"resets_at": $(( NOW + 3600 )), "used_percent": 12, "window_duration_mins": 300}}}}
 JSON
 write_board_meta() {
     printf '{"name":"devbox","fetched_at":%s,"attempted_at":%s,"error":null,"up":%s,"probe":%s}\n' \
@@ -196,9 +196,8 @@ board_output=$(render_with_boards)
 [[ "$board_output" == *$'\n'"· Team-1 "*"8%"* ]] || { printf 'a fresh board did not render its Claude rows\n' >&2; exit 1; }
 board_order=$(awk '/^· devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $2}' <<< "$board_output")
 [ "$board_order" = "Team-1 Team-2 Team-10 " ] || { printf 'board accounts are not in natural name order: %s\n' "$board_order" >&2; exit 1; }
-[[ "$board_output" != *"cx team-1"* ]] || { printf 'a board rendered its Codex row without being asked\n' >&2; exit 1; }
-codex_rows_output=$(REMOTE_BOARD_CODEX_ROWS=1 render_with_boards)
-[[ "$codex_rows_output" == *"cx team-1"*"37%"* ]] || { printf 'REMOTE_BOARD_CODEX_ROWS=1 did not render the Codex row\n' >&2; exit 1; }
+codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")
+[ "$codex_line" = "· Seat-1-codex — — 37% — 3d" ] || { printf 'the Codex row is not its label, dashed 5h, week and weekly reset: %s\n' "$codex_line" >&2; exit 1; }
 [[ "$board_output" != *$'\u25b8'* ]] || { printf 'a board without a jobs file rendered a job line\n' >&2; exit 1; }
 PANE_TEST_ID=$({ printf 'iterm:PANE-TEST' | shasum -a 256 2>/dev/null || printf 'iterm:PANE-TEST' | sha256sum; } | cut -c1-12)
 cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
