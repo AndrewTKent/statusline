@@ -194,10 +194,10 @@ Mechanics, and the reason they are worth knowing:
   this contract: it exits 1 when `cmd` failed and printed nothing. Match the
   output instead, as in the example above: a line that says running is `0`, any
   other state line is `1`, a login error is `2`, anything else is `3`.
-- **Codex rides along, in its own place.** The same pull carries the remote
-  Codex quota rows, which appear in this machine's Codex statusline and
-  `codex-top`. `REMOTE_BOARD_CODEX_ROWS=1` also lists them, as `cx <label>`,
-  under the board's Claude rows.
+- **Codex rides along.** The same pull carries the remote Codex quota rows,
+  which appear in this machine's Codex statusline and `codex-top`, and under the
+  board's Claude rows as `<Label>-codex`: the weekly figure and its reset, with
+  dashes in the 5h and fable columns.
 
 ## Unattended jobs on a board
 

@@ -113,10 +113,6 @@
 # REMOTE_BOARD_PULL_INTERVAL=120
 # REMOTE_BOARD_MAX_AGE=900
 
-# A board's Codex accounts render in the Codex statusline only. Set to 1 to
-# also list them under the board's Claude rows here.
-# REMOTE_BOARD_CODEX_ROWS=0
-
 # Unattended jobs a board is running render under its account rows, from the
 # jobs.json its publisher writes. A board with a running job is pulled every 30s
 # instead of REMOTE_BOARD_PULL_INTERVAL. Job names are cut to this many chars so

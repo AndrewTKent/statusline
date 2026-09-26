@@ -803,8 +803,7 @@ remote_board_labels() {
         jq -r '(.accounts // {}) | keys[]' \
             "$board_dir/statusline-snapshot.json" 2>/dev/null
         remote_job_slugs "$board_dir" "$now_epoch"
-        [ "${REMOTE_BOARD_CODEX_ROWS:-0}" = "1" ] || continue
-        jq -r 'keys[] | "cx " + .' "$board_dir/codex-usage.json" 2>/dev/null
+        jq -r 'keys[] | . + "-codex"' "$board_dir/codex-usage.json" 2>/dev/null
     done
 }
 
@@ -886,7 +885,7 @@ remote_board_lines() {
     now_epoch=$(date +%s)
     local board_dir board_name fetched_at board_error board_up board_probe board_state age fresh
     local rows codex_rows row_label row_five row_five_reset row_seven row_fable row_fable_reset row_expired
-    local cx_label cx_five cx_five_reset cx_week cx_week_reset cx_error
+    local cx_label cx_week cx_week_reset cx_error
     local pad_name five_color seven_color fable_color suffix
     _rb_ralign() {
         local value="$1" width="$2" padding
@@ -956,34 +955,28 @@ remote_board_lines() {
             [ "$row_expired" = "true" ] && suffix=" ${red}⚠ needs reauth${reset}"
             printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$row_five" 4)${reset}  ${dim}$(_rb_ralign "$row_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$row_seven" 4)${reset}   ${fable_color}$(_rb_ralign "$row_fable" 5)${reset}  ${dim}$(_rb_ralign "$row_fable_reset" 6)${reset}${suffix}"
         done <<< "$rows"
-        remote_job_lines "$board_dir" "$name_width" "$fresh" "$now_epoch"
-        # Codex accounts belong to the Codex footer unless the user asks for both here.
-        [ "${REMOTE_BOARD_CODEX_ROWS:-0}" = "1" ] || continue
+        # The board shows the box's whole account set, Codex included. Codex has no
+        # 5h window: its 5h columns stay dashes even if one is ever reported.
         codex_rows=$(jq -r '
             to_entries[] | .key as $label | ((.value.rate_limits // {})) as $limits |
             ([$limits.primary, $limits.secondary] | map(select(type == "object" and .used_percent != null))) as $windows |
             (($windows | map(select(((.window_duration_mins // .window_minutes) // 0) >= 1440)) | first) // {}) as $week |
-            (($windows | map(select(((.window_duration_mins // .window_minutes) // 0) < 1440)) | first) // {}) as $five |
-            [$label, ($five.used_percent // ""), ($five.resets_at // ""),
-             ($week.used_percent // ""), ($week.resets_at // ""), (.value.error // "")] |
-            map(tostring) | join("")
+            [$label, ($week.used_percent // ""), ($week.resets_at // ""), (.value.error // "")] |
+            map(tostring) | join("\u001f")
         ' "$board_dir/codex-usage.json" 2>/dev/null)
-        while IFS=$RB_SEP read -r cx_label cx_five cx_five_reset cx_week cx_week_reset cx_error; do
+        while IFS=$RB_SEP read -r cx_label cx_week cx_week_reset cx_error; do
             [ -z "$cx_label" ] && continue
-            [ -z "$cx_five" ] && cx_five="—" || printf -v cx_five '%.0f%%' "$cx_five"
             [ -z "$cx_week" ] && cx_week="—" || printf -v cx_week '%.0f%%' "$cx_week"
-            cx_five_reset=$(remote_epoch_relative "$cx_five_reset")
             cx_week_reset=$(remote_epoch_relative "$cx_week_reset")
-            five_color="$dim"; seven_color="$dim"
-            if $fresh; then
-                [ "$cx_five" != "—" ] && five_color=$(color_for_pct "${cx_five%\%}")
-                [ "$cx_week" != "—" ] && seven_color=$(color_for_pct "${cx_week%\%}")
-            fi
-            printf -v pad_name '%-*s' "$name_width" "cx ${cx_label}"
+            seven_color="$dim"
+            $fresh && [ "$cx_week" != "—" ] && seven_color=$(color_for_pct "${cx_week%\%}")
+            cx_label="$(printf '%s' "${cx_label:0:1}" | tr '[:lower:]' '[:upper:]')${cx_label:1}-codex"
+            printf -v pad_name '%-*s' "$name_width" "$cx_label"
             suffix=""
             [ -n "$cx_error" ] && suffix=" ${dim}~ ${cx_error}${reset}"
-            printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$cx_five" 4)${reset}  ${dim}$(_rb_ralign "$cx_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$cx_week" 4)${reset}   ${dim}$(_rb_ralign "—" 5)${reset}  ${dim}$(_rb_ralign "$cx_week_reset" 6)${reset}${suffix}"
+            printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${dim}$(_rb_ralign "—" 4)${reset}  ${dim}$(_rb_ralign "—" 6)${reset}   ${seven_color}$(_rb_ralign "$cx_week" 4)${reset}   ${dim}$(_rb_ralign "—" 5)${reset}  ${dim}$(_rb_ralign "$cx_week_reset" 6)${reset}${suffix}"
         done <<< "$codex_rows"
+        remote_job_lines "$board_dir" "$name_width" "$fresh" "$now_epoch"
     done
 }
 
