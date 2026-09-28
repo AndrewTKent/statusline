@@ -169,6 +169,20 @@ class CodexAccountsTest(unittest.TestCase):
         self.assertEqual(row["reset_credits"], {"count": 2, "expires_at": [2_090_000_000, 2_100_000_000]})
         self.assertNotIn("home", row)
 
+    def test_poll_account_refuses_a_home_holding_another_account(self) -> None:
+        auth = {"tokens": {"id_token": jwt({"email": "other@example.invalid"}), "account_id": "other"}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            (home / "auth.json").write_text(json.dumps(auth))
+            with mock.patch.object(codex_accounts, "read_rate_limits") as read:
+                row = codex_accounts.poll_account(
+                    "work", {"home": str(home), "account_id": "work"}, "/usr/bin/codex"
+                )
+
+        read.assert_not_called()
+        self.assertEqual(row["error"], "home holds other@example.invalid, not this one")
+        self.assertNotIn("rate_limits", row)
+
     def test_session_hook_binds_thread_to_routed_label(self) -> None:
         hook = MODULE_PATH.with_name("codex-account-session.py")
         with tempfile.TemporaryDirectory() as tmpdir:
