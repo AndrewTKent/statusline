@@ -980,72 +980,6 @@ remote_board_lines() {
     done
 }
 
-# An agent's transcript stays silent through one long tool call, and a Bash call runs up to 10 minutes.
-LOCAL_WORKFLOW_IDLE_MIN=15
-LOCAL_WORKFLOW_NAME_MAX=32
-
-# local_workflow_launch TRANSCRIPT RUN_ID — "epoch<US>name" from the Workflow tool's launch result.
-# Cached per run: the transcript can be tens of megabytes and is scanned once.
-local_workflow_launch() {
-    local transcript="$1" run_id="$2" cache_file cached launch launched_at name
-    local US=$'\037'
-    cache_file="/tmp/claude/statusline-workflows-${SESSION_ID//[!A-Za-z0-9._-]/_}.txt"
-    cached=$(grep -F -m1 "${run_id}${US}" "$cache_file" 2>/dev/null)
-    if [ -n "$cached" ]; then
-        printf '%s' "${cached#*"$US"}"
-        return
-    fi
-    launch=$(grep -F -m1 "\"runId\":\"${run_id}\"" "$transcript" 2>/dev/null |
-        jq -r '[(.timestamp // ""), (.toolUseResult.workflowName // "")] | join("\u001f")' 2>/dev/null)
-    IFS=$US read -r launched_at name <<< "$launch"
-    launched_at=$(iso_to_epoch "$launched_at")
-    if [ -z "$launched_at" ] || [ -z "$name" ]; then
-        printf '%s%s' "$US" "$run_id"
-        return
-    fi
-    mkdir -p /tmp/claude
-    printf '%s%s%s%s%s\n' "$run_id" "$US" "$launched_at" "$US" "$name" >> "$cache_file"
-    printf '%s%s%s' "$launched_at" "$US" "$name"
-}
-
-# Workflows this session launched that are still out. A resume reuses the run id,
-# so a journal written after the run's end file is running again.
-local_workflow_lines() {
-    local transcript="$1" now_epoch="$2" session_dir run_dir run_id journal rows=""
-    local done_count started_count failed_count launched_at name age detail row
-    local US=$'\037'
-    session_dir="${transcript%.jsonl}"
-    [ -n "$transcript" ] && [ -d "$session_dir/subagents/workflows" ] || return 0
-    local -a run_dirs
-    set +f
-    run_dirs=( "$session_dir"/subagents/workflows/*/ )
-    set -f
-    for run_dir in "${run_dirs[@]}"; do
-        run_dir="${run_dir%/}"
-        run_id="${run_dir##*/}"
-        journal="$run_dir/journal.jsonl"
-        [ "$journal" -nt "$session_dir/workflows/$run_id.json" ] || continue
-        # A session that died mid-run never writes the end file; its run dir goes quiet instead.
-        [ -n "$(find "$run_dir" -type f -mmin "-$LOCAL_WORKFLOW_IDLE_MIN" 2>/dev/null | head -1)" ] || continue
-        IFS=$US read -r done_count started_count failed_count <<< "$(jq -Rrn '
-            reduce (inputs | fromjson? | select(type == "object" and .agentId)) as $event
-                ({}; .[$event.type][$event.agentId] = true)
-            | [(.result // {} | length), (.started // {} | length), (.failed // {} | length)]
-            | map(tostring) | join("\u001f")
-        ' "$journal" 2>/dev/null)"
-        IFS=$US read -r launched_at name <<< "$(local_workflow_launch "$transcript" "$run_id")"
-        age=""
-        [ -n "$launched_at" ] && age=" · $(remote_age_text "$(( now_epoch - launched_at ))")"
-        detail=""
-        [ "${failed_count:-0}" -gt 0 ] 2>/dev/null && detail=" ${dim}· ${reset}${red}${failed_count} failed${reset}"
-        printf -v row '%b' "${dim}·     ${name:0:$LOCAL_WORKFLOW_NAME_MAX}${reset} ${cyan}${done_count:-0}/${started_count:-0}${reset} ${dim}agents${age}${reset}${detail}"
-        rows+="$row"$'\n'
-    done
-    [ -n "$rows" ] || return 0
-    printf '%b\n' "${dim}· local${reset}"
-    printf '%s' "$rows"
-}
-
 # Claude Code's inline TUI keeps the rows a shorter status line vacates as blank
 # space, so within one session and format a multi-line render never shrinks.
 stable_height_key() {
@@ -1484,10 +1418,6 @@ render_shared_account_snapshot() {
             [ -n "$remote_line" ] && _shared_emit '%b' "$remote_line"
         done <<< "$(remote_board_lines "$remote_root" "${REMOTE_BOARD_MAX_AGE:-900}" "$name_width")"
     fi
-    local workflow_line
-    while IFS= read -r workflow_line; do
-        [ -n "$workflow_line" ] && _shared_emit '%s' "$workflow_line"
-    done <<< "$(local_workflow_lines "$TRANSCRIPT_PATH" "$now_epoch")"
 
     local rendered="${shared_output%$'\n'}" plain max_width=0 line width
     local terminal_width="${MAX_COLS:-0}" usable_width=0 left_pad=0 right_pad=0 index=0
