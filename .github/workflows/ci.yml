@@ -68,6 +68,8 @@ jobs:
         run: bash test/test_shared_snapshot.sh
       - name: Test stable status line height
         run: bash test/test_stable_height.sh
+      - name: Test local workflow rows
+        run: bash test/test_local_workflows.sh
       - name: Test Agent Metrics launcher
         run: bash test/test_agent_metrics_wrapper.sh
       - name: Test transcript backups
