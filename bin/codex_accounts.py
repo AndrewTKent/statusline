@@ -291,6 +291,11 @@ def poll_account(label: str, account: dict[str, str], binary: str) -> dict[str, 
     if not (home / "auth.json").is_file():
         return {"fetched_at": time.time(), "error": "login required"}
     try:
+        # A home re-logged as another account would publish that account's limits under this label.
+        if account.get("account_id"):
+            held = account_identity(home)
+            if held.account_id != account["account_id"]:
+                raise AccountsError(f"home holds {held.email or 'another account'}, not this one")
         result = read_rate_limits(home, binary)
         limits = result.get("rateLimits") or result.get("rate_limits") or result
         if not isinstance(limits, dict):
