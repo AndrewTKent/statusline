@@ -227,15 +227,17 @@ else
 fi
 
 SETUP_DONE=0
+HUNG_UP=0
 cleanup_session() {
-    # Preserve a detached session while Codex is still running inside it.
-    if [[ "$SETUP_DONE" == "1" && ! -s "$STATUS_FILE" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
+    # A deliberate detach keeps Codex running. A lost terminal ends it, or the orphan holds the thread open.
+    if [[ "$HUNG_UP" == "0" && "$SETUP_DONE" == "1" && ! -s "$STATUS_FILE" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
         return 0
     fi
     tmux kill-session -t "=$SESSION" 2>/dev/null || true
     rm -rf "$RUNTIME_DIR"
 }
-trap cleanup_session EXIT HUP INT TERM
+trap cleanup_session EXIT INT TERM
+trap 'HUNG_UP=1; exit 129' HUP
 
 bootstrap_pane="$(tmux new-session -d -s "$SESSION" -x "$TERMINAL_WIDTH" -y "$TERMINAL_HEIGHT" -c "$WORKING_DIR" -P -F '#{pane_id}' "sleep 86400")"
 tmux set-option -t "$SESSION" status off

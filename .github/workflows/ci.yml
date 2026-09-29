@@ -74,6 +74,10 @@ jobs:
         run: bash test/test_backup_scripts.sh
       - name: Test Codex monitor
         run: python3 test/test_codex_statusline.py
+      - name: Test Codex statusline hangup
+        run: |
+          command -v tmux >/dev/null || { if [ "$RUNNER_OS" = Linux ]; then sudo apt-get install -y tmux; else brew install tmux; fi; }
+          bash test/test_codex_statusline_hangup.sh
       - name: Set up Python 3.9
         if: runner.os == 'Linux'
         uses: actions/setup-python@v7
