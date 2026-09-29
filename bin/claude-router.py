@@ -446,6 +446,39 @@ def handoff_notice(old_label: str, new_label: str, limit_kind: str | None) -> st
     return HANDOFF_NOTICE.format(old=old_label, new=new_label, reason=reason)
 
 
+def handoff_brief_path(session_id: str) -> Path:
+    return accounts.HANDOFF_BRIEFS_PATH / f"{session_id}.json"
+
+
+def take_handoff_brief(session_id: str | None) -> tuple[str | None, str | None]:
+    """The prompt and model a session left for its next relaunch; each brief is used once."""
+    if not session_id:
+        return None, None
+    path = handoff_brief_path(session_id)
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None, None
+    path.unlink(missing_ok=True)
+    try:
+        brief = json.loads(raw)
+    except ValueError:
+        print(f"accounts: ignored an unreadable handoff brief for {session_id}", file=sys.stderr)
+        return None, None
+    if not isinstance(brief, dict):
+        return None, None
+    prompt = brief.get("prompt")
+    model = brief.get("model")
+    prompt = " ".join(prompt.split()) if isinstance(prompt, str) and prompt.strip() else None
+    model = model if isinstance(model, str) and model.strip() else None
+    return prompt, model
+
+
+def relaunch_message(notice: str | None, brief_prompt: str | None) -> str | None:
+    parts = [part for part in (notice, brief_prompt) if part]
+    return " ".join(parts) or None
+
+
 def prompt_arg_index(args: list[str]) -> int | None:
     """Index of the sole positional prompt, or None when the walk is unsure —
     dropping an option's value would be worse than keeping the prompt."""
@@ -904,7 +937,6 @@ def run_supervised(binary: str, args: list[str]) -> int:
     interval = float(os.environ.get("ACCOUNTS_ROUTER_INTERVAL", ROUTER_INTERVAL_S))
     mode, applied_mode_generation = accounts.load_mode_snapshot()
     hard_session_limit = accounts.hard_session_limit_enabled()
-    notice_on_handoff = accounts.handoff_notice_enabled()
     hold_for_reset = accounts.hold_for_reset_enabled()
     handoff_count = 0
     fallback_model = os.environ.get(
@@ -1102,13 +1134,17 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         if held is None:
                             return 1
                         next_profile, next_override, held_from = held
-                        next_model = next_override or current_model
+                        brief_prompt, brief_model = take_handoff_brief(session_id)
+                        next_model = brief_model or next_override or current_model
                         launch_args = handoff_session_args(
                             args,
                             session_id,
                             next_model,
                             current_effort,
-                            hold_notice(held_from, time.time(), hold_reason(hard_limit_kind)),
+                            relaunch_message(
+                                hold_notice(held_from, time.time(), hold_reason(hard_limit_kind)),
+                                brief_prompt,
+                            ),
                         )
                         selected = next_profile
                         model_override = next_override
@@ -1339,14 +1375,19 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     continue
                 stop_for_handoff(child)
                 moved_by = hard_limit_kind if hard_limit_reached else limit_rejected
+                brief_prompt, brief_model = take_handoff_brief(session_id)
+                next_model = brief_model or next_model
                 launch_args = handoff_session_args(
                     args,
                     session_id,
                     next_model,
                     current_effort,
-                    handoff_notice(selected["label"], next_profile["label"], moved_by)
-                    if notice_on_handoff
-                    else None,
+                    relaunch_message(
+                        handoff_notice(selected["label"], next_profile["label"], moved_by)
+                        if accounts.handoff_notice_enabled()
+                        else None,
+                        brief_prompt,
+                    ),
                 )
                 selected = next_profile
                 model_override = next_override
@@ -1410,17 +1451,21 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 if not limit_rejected or limit_route is None:
                     return child.wait()
                 next_profile, next_override = limit_route
-                next_model = next_override or current_model
+                brief_prompt, brief_model = take_handoff_brief(session_id)
+                next_model = brief_model or next_override or current_model
                 launch_args = handoff_session_args(
                     args,
                     session_id,
                     next_model,
                     current_effort,
-                    handoff_notice(
-                        selected["label"], next_profile["label"], limit_rejected
-                    )
-                    if notice_on_handoff
-                    else None,
+                    relaunch_message(
+                        handoff_notice(
+                            selected["label"], next_profile["label"], limit_rejected
+                        )
+                        if accounts.handoff_notice_enabled()
+                        else None,
+                        brief_prompt,
+                    ),
                 )
                 selected = next_profile
                 model_override = next_override

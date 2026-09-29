@@ -76,10 +76,10 @@
 # ACCOUNTS_STRICT_QUOTA=1
 
 # A cross-account move stops the running process and relaunches it on --resume,
-# so any in-process workflow, subagent or background task dies with it. Set to 1
-# to have the relaunch carry a first message saying the session was moved and
-# what was lost, so an unattended session can restart what was in flight.
-# ACCOUNTS_HANDOFF_NOTICE=1
+# so any in-process workflow, subagent or background task dies with it. The
+# relaunch carries a first message saying the session was moved and what was
+# lost, so an unattended session can restart what was in flight. Set 0 to stop it.
+# ACCOUNTS_HANDOFF_NOTICE=0
 
 # When a routed session hits a plan wall and no account can take it, the router
 # stops the session and exits, which leaves an unattended job dead until someone

@@ -3794,6 +3794,119 @@ class TestHandoffNotice:
         ]
 
 
+class TestHandoffBrief:
+    def test_a_brief_is_read_once_and_removed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(claude_router.accounts, "HANDOFF_BRIEFS_PATH", tmp_path)
+        (tmp_path / "sid-1.json").write_text('{"prompt": "resume the loop", "model": "fable"}')
+
+        first = claude_router.take_handoff_brief("sid-1")
+        second = claude_router.take_handoff_brief("sid-1")
+
+        assert (first, second) == (("resume the loop", "fable"), (None, None))
+
+    def test_the_brief_follows_the_notice_in_one_message(self):
+        assert claude_router.relaunch_message("moved", "resume the loop") == "moved resume the loop"
+
+
+def test_a_set_switch_relaunches_with_the_sessions_brief_and_model(tmp_path):
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    accounts_dir = home / ".accounts"
+    claude_dir.mkdir(parents=True)
+    accounts_dir.mkdir()
+    (home / ".claude.json").write_text('{"hasCompletedOnboarding":true}')
+    (claude_dir / "settings.json").write_text('{"model":"opus"}')
+    (accounts_dir / "blobs.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "accounts": {
+                    label: {
+                        "blob": _blob(label),
+                        "email": f"{label}@example.com",
+                        "org_uuid": f"org-{label}",
+                    }
+                    for label in ("first", "second")
+                },
+            }
+        )
+    )
+    (accounts_dir / "mode.json").write_text(
+        '{"version":2,"mode":"set","label":"first","global_generation":1}'
+    )
+    (claude_dir / "account-resets.json").write_text(
+        json.dumps(
+            {
+                f"{label}@example.com|org-{label}": {
+                    "five_hour_pct": 10,
+                    "seven_day_pct": 10,
+                    "fable_pct": 10,
+                    "last_seen": time.time(),
+                }
+                for label in ("first", "second")
+            }
+        )
+    )
+    log_path = tmp_path / "launches.jsonl"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "sid = next(args[args.index(f) + 1] for f in ('--session-id', '--resume') if f in args)\n"
+        "model = args[args.index('--model') + 1] if '--model' in args else None\n"
+        "home = Path(os.environ['HOME'])\n"
+        "log = Path(os.environ['ROUTER_TEST_LOG'])\n"
+        "with log.open('a') as f:\n"
+        "    f.write(json.dumps({'label': os.environ['ACCOUNTS_ROUTED_LABEL'], 'model': model, 'last': args[-1]}) + '\\n')\n"
+        "Path(os.environ['ACCOUNTS_ROUTER_STATE']).write_text(\n"
+        "    json.dumps({'session_id': sid, 'model': 'Opus', 'effort': 'high'})\n"
+        ")\n"
+        "if len(log.read_text().splitlines()) >= 2:\n"
+        "    os.kill(os.getppid(), signal.SIGTERM)\n"
+        "    sys.exit(0)\n"
+        "transcript = home / '.claude' / 'projects' / 'p' / f'{sid}.jsonl'\n"
+        "transcript.parent.mkdir(parents=True, exist_ok=True)\n"
+        "transcript.write_text('{\"type\":\"user\"}\\n')\n"
+        "briefs = home / '.accounts' / 'handoff-briefs'\n"
+        "briefs.mkdir(parents=True, exist_ok=True)\n"
+        "(briefs / f'{sid}.json').write_text(json.dumps({'prompt': 'resume the loop', 'model': 'fable'}))\n"
+        "(home / '.accounts' / 'mode.json').write_text(\n"
+        "    json.dumps({'version': 2, 'mode': 'set', 'label': 'second', 'global_generation': 2})\n"
+        ")\n"
+        "time.sleep(20)\n"
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("ACCOUNTS_PIN", None)
+    env.update(
+        {
+            "HOME": str(home),
+            "CLAUDE_REAL_BIN": str(fake_claude),
+            "ACCOUNTS_ROUTER_INTERVAL": "0.2",
+            "ROUTER_TEST_LOG": str(log_path),
+            "PYTHONPATH": str(REPO / "bin"),
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(REPO / "bin" / "claude-router.py")],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    process.wait(timeout=30)
+    launches = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+    assert [(launch["label"], launch["model"]) for launch in launches] == [
+        ("first", None),
+        ("second", "fable"),
+    ]
+    assert launches[1]["last"] == "resume the loop"
+
+
 class TestLaunchPromptWalk:
     def test_two_positionals_leave_the_arguments_alone(self):
         args = ["--dangerously-skip-permissions", "one", "two"]

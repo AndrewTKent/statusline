@@ -142,6 +142,22 @@ def test_hard_session_limit_is_on_unless_disabled(tmp_path, monkeypatch):
     assert accounts.hard_session_limit_enabled() is False
 
 
+def test_the_handoff_notice_is_on_unless_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+    monkeypatch.delenv("ACCOUNTS_HANDOFF_NOTICE", raising=False)
+
+    assert accounts.handoff_notice_enabled() is True
+
+
+def test_a_brief_is_written_for_the_router_to_read(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(accounts, "HANDOFF_BRIEFS_PATH", tmp_path)
+    sid = "cff03c01-c3ba-44dd-9849-c474ebad0143"
+
+    accounts.main(["brief", sid, "--prompt", "resume the loop", "--model", "fable"])
+
+    assert json.loads((tmp_path / f"{sid}.json").read_text()) == {"prompt": "resume the loop", "model": "fable"}
+
+
 def test_hold_for_reset_is_off_unless_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
     monkeypatch.delenv("ACCOUNTS_HOLD_FOR_RESET", raising=False)

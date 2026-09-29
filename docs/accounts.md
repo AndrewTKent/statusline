@@ -246,10 +246,18 @@ A cross-account move stops the running process and relaunches it on `--resume`.
 Claude Code adds "Continue from where you left off." only when the transcript
 ends mid-turn, so a session that was idle between turns never learns it moved —
 and any in-process workflow, subagent or background task died with the old
-process. `ACCOUNTS_HANDOFF_NOTICE=1` makes the relaunch carry a first message
-naming the accounts, the reason, and what was lost, so an unattended session can
-restart what was in flight. Off by default; a session with no transcript to
-resume never gets one. The prompt a session was launched with stays behind on a
+process. The relaunch carries a first message naming the accounts, the reason,
+and what was lost, so an unattended session can restart what was in flight.
+`ACCOUNTS_HANDOFF_NOTICE=0` turns it off; the setting is read at each handoff. A
+session with no transcript to resume never gets one.
+
+`accounts brief <session-id> --prompt "<one line>" [--model <model>]` leaves a
+session its next relaunch's first message and model, written to
+`~/.accounts/handoff-briefs/<session-id>.json`. The supervisor uses it once, on
+the next handoff of any kind: the prompt follows the notice, and the model
+replaces the one the session was running. Write one before a planned switch
+(`accounts set`) so an unattended session resumes its work on the model you
+want, with nothing typed into the terminal. The prompt a session was launched with stays behind on a
 relaunch that resumes — it is already in the transcript, and a second prompt
 beside the notice makes the CLI submit neither.
 
