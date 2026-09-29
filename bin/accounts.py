@@ -39,6 +39,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,7 @@ SNAPSHOT_PATH = HOME / ".accounts" / "statusline-snapshot.json"
 WATCH_LOCK_PATH = HOME / ".accounts" / "watch.lock"
 MIN_WATCH_INTERVAL = 10.0
 PANE_PINS_PATH = HOME / ".accounts" / "pane-pins"
+HANDOFF_BRIEFS_PATH = HOME / ".accounts" / "handoff-briefs"
 PANE_SALT_PATH = HOME / ".accounts" / "pane-salt"
 NATIVE_REFRESH_LOCK_PATH = HOME / ".accounts" / "native-refresh.lock"
 CONFIRM_POLL_LOCK_PATH = HOME / ".accounts" / "confirm-poll.lock"
@@ -411,12 +413,12 @@ def hard_session_limit_enabled() -> bool:
 
 
 def handoff_notice_enabled() -> bool:
-    """Off unless set to 1: a relaunched session is told it was moved, so an
+    """On unless set to 0: a relaunched session is told it was moved, so an
     unattended one can restart the workflows the stopped process took with it."""
     value = os.environ.get("ACCOUNTS_HANDOFF_NOTICE") or _conf_var(
         "ACCOUNTS_HANDOFF_NOTICE"
     )
-    return value == "1"
+    return value != "0"
 
 
 def hold_for_reset_enabled() -> bool:
@@ -3212,6 +3214,21 @@ def cmd_pane_clear(_args) -> None:
     print("PANE → global policy")
 
 
+def cmd_brief(args) -> None:
+    """Leave a session the first message and model of its next handoff relaunch."""
+    try:
+        session_id = str(uuid.UUID(args.session_id))
+    except ValueError:
+        raise AccountsError(f"'{args.session_id}' is not a session id")
+    if "\n" in args.prompt:
+        raise AccountsError("the brief prompt must be one line")
+    _write_0600(
+        HANDOFF_BRIEFS_PATH / f"{session_id}.json",
+        json.dumps({"prompt": args.prompt, "model": args.model}) + "\n",
+    )
+    print(f"BRIEF → {session_id}")
+
+
 def cmd_set(args) -> None:
     """Force supervised sessions onto <label>."""
     with locked():
@@ -3392,6 +3409,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_set.add_argument("label")
     p_set.set_defaults(fn=cmd_set)
+
+    p_brief = sub.add_parser(
+        "brief",
+        help="set the first message (and model) a session relaunches with on its next handoff",
+    )
+    p_brief.add_argument("session_id")
+    p_brief.add_argument("--prompt", required=True)
+    p_brief.add_argument("--model")
+    p_brief.set_defaults(fn=cmd_brief)
 
     p_pane = sub.add_parser("pane", help="set or clear this terminal pane's account policy")
     pane_sub = p_pane.add_subparsers(dest="pane_command", required=True)
