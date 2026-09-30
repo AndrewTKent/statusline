@@ -41,7 +41,8 @@ PULLED_FILES = (
 BOARD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
 SECRET_KEY_PARTS = ("token", "secret", "password", "credential", "blob", "apikey", "email")
 MAX_STRING_LEN = 512
-CONNECT_TIMEOUT_S = 5
+# Session Manager proxies cost two AWS calls before the banner, about 3s cold; 5s tripped on slow ones.
+CONNECT_TIMEOUT_S = 15
 FETCH_TIMEOUT_S = 25
 UP_CHECK_TIMEOUT_S = 20
 # The up-check's exit status; anything else means it could not tell.
