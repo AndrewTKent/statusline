@@ -81,6 +81,10 @@
 # lost, so an unattended session can restart what was in flight. Set 0 to stop it.
 # ACCOUNTS_HANDOFF_NOTICE=0
 
+# A move that is not a plan wall waits for the session's in-flight Workflows to
+# finish, up to this many seconds, before stopping the process.
+# ACCOUNTS_HANDOFF_GRACE_S=1800
+
 # When a routed session hits a plan wall and no account can take it, the router
 # stops the session and exits, which leaves an unattended job dead until someone
 # restarts it. Set 1 to hold instead: wait for the soonest window reset on the

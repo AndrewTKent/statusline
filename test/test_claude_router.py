@@ -3907,6 +3907,162 @@ def test_a_set_switch_relaunches_with_the_sessions_brief_and_model(tmp_path):
     assert launches[1]["last"] == "resume the loop"
 
 
+class TestInFlightWorkflows:
+    def test_a_launch_is_read_from_the_transcript_with_its_script(self, tmp_path):
+        transcript = tmp_path / "sid-1.jsonl"
+        transcript.write_text(
+            json.dumps({"message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Workflow", "input": {"script": "…"}}]}})
+            + "\n"
+            + json.dumps({"message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": "Workflow launched.\nScript file: /w/a.js\nRun ID: wf_one\n"}]}})
+            + "\n"
+        )
+
+        assert claude_router.workflow_launches(transcript) == [
+            {"run_id": "wf_one", "script_path": "/w/a.js"}
+        ]
+
+    def test_the_hint_names_each_run_and_its_script(self):
+        hint = claude_router.resume_hint([{"run_id": "wf_one", "script_path": "/w/a.js"}])
+
+        assert hint == (
+            " Workflows in flight when it stopped: wf_one (script /w/a.js)."
+            " Resume each with Workflow({scriptPath, resumeFromRunId}); agents that finished replay from cache."
+        )
+
+
+def _two_account_home(tmp_path):
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    accounts_dir = home / ".accounts"
+    claude_dir.mkdir(parents=True)
+    accounts_dir.mkdir()
+    (home / ".claude.json").write_text('{"hasCompletedOnboarding":true}')
+    (claude_dir / "settings.json").write_text('{"model":"opus"}')
+    (accounts_dir / "blobs.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "accounts": {
+                    label: {
+                        "blob": _blob(label),
+                        "email": f"{label}@example.com",
+                        "org_uuid": f"org-{label}",
+                    }
+                    for label in ("first", "second")
+                },
+            }
+        )
+    )
+    (accounts_dir / "mode.json").write_text(
+        '{"version":2,"mode":"set","label":"first","global_generation":1}'
+    )
+    (claude_dir / "account-resets.json").write_text(
+        json.dumps(
+            {
+                f"{label}@example.com|org-{label}": {
+                    "five_hour_pct": 10,
+                    "seven_day_pct": 10,
+                    "fable_pct": 10,
+                    "last_seen": time.time(),
+                }
+                for label in ("first", "second")
+            }
+        )
+    )
+    return home
+
+
+# The first launch leaves one workflow in flight, switches the mode, and finishes
+# the workflow after a pause; the log records when each launch and the finish happened.
+_IN_FLIGHT_FAKE_CLAUDE = (
+    "#!/usr/bin/env python3\n"
+    "import json, os, signal, sys, time\n"
+    "from pathlib import Path\n"
+    "args = sys.argv[1:]\n"
+    "sid = next(args[args.index(f) + 1] for f in ('--session-id', '--resume') if f in args)\n"
+    "home = Path(os.environ['HOME'])\n"
+    "log = Path(os.environ['ROUTER_TEST_LOG'])\n"
+    "with log.open('a') as f:\n"
+    "    f.write(json.dumps({'event': 'launch', 'label': os.environ['ACCOUNTS_ROUTED_LABEL'], 'last': args[-1], 't': time.time()}) + '\\n')\n"
+    "Path(os.environ['ACCOUNTS_ROUTER_STATE']).write_text(\n"
+    "    json.dumps({'session_id': sid, 'model': 'Opus', 'effort': 'high'})\n"
+    ")\n"
+    "if sum(1 for l in log.read_text().splitlines() if 'launch' in l) >= 2:\n"
+    "    os.kill(os.getppid(), signal.SIGTERM)\n"
+    "    sys.exit(0)\n"
+    "project = home / '.claude' / 'projects' / 'p'\n"
+    "session = project / sid\n"
+    "(session / 'subagents' / 'workflows' / 'wf_one').mkdir(parents=True, exist_ok=True)\n"
+    "(session / 'workflows').mkdir(parents=True, exist_ok=True)\n"
+    "(project / f'{sid}.jsonl').write_text(json.dumps({'message': {'content': [\n"
+    "    {'type': 'tool_use', 'id': 't1', 'name': 'Workflow', 'input': {'scriptPath': '/w/one.js'}}]}}) + '\\n'\n"
+    "    + json.dumps({'message': {'content': [{'type': 'tool_result', 'tool_use_id': 't1',\n"
+    "    'content': 'Script file: /w/one.js\\nRun ID: wf_one'}]}}) + '\\n')\n"
+    "(home / '.accounts' / 'mode.json').write_text(\n"
+    "    json.dumps({'version': 2, 'mode': 'set', 'label': 'second', 'global_generation': 2})\n"
+    ")\n"
+    "time.sleep(float(os.environ['ROUTER_TEST_FINISH_AFTER']))\n"
+    "(session / 'workflows' / 'wf_one.json').write_text('{}')\n"
+    "with log.open('a') as f:\n"
+    "    f.write(json.dumps({'event': 'finished', 't': time.time()}) + '\\n')\n"
+    "time.sleep(20)\n"
+)
+
+
+def _run_router_with_in_flight_workflow(tmp_path, *, grace: str, finish_after: str):
+    home = _two_account_home(tmp_path)
+    log_path = tmp_path / "launches.jsonl"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(_IN_FLIGHT_FAKE_CLAUDE)
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("ACCOUNTS_PIN", None)
+    env.update(
+        {
+            "HOME": str(home),
+            "CLAUDE_REAL_BIN": str(fake_claude),
+            "ACCOUNTS_ROUTER_INTERVAL": "0.2",
+            "ACCOUNTS_HANDOFF_GRACE_S": grace,
+            "ACCOUNTS_HANDOFF_NOTICE": "1",
+            "ROUTER_TEST_LOG": str(log_path),
+            "ROUTER_TEST_FINISH_AFTER": finish_after,
+            "PYTHONPATH": str(REPO / "bin"),
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(REPO / "bin" / "claude-router.py")],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    process.wait(timeout=30)
+    return [json.loads(line) for line in log_path.read_text().splitlines()]
+
+
+def test_a_planned_move_waits_for_the_workflow_in_flight(tmp_path):
+    events = _run_router_with_in_flight_workflow(tmp_path, grace="60", finish_after="2")
+
+    launches = [e for e in events if e["event"] == "launch"]
+    finished = next(e for e in events if e["event"] == "finished")
+
+    assert [l["label"] for l in launches] == ["first", "second"]
+    assert launches[1]["t"] > finished["t"]
+    assert "wf_one" not in launches[1]["last"]
+
+
+def test_a_move_past_the_grace_names_the_workflow_it_killed(tmp_path):
+    events = _run_router_with_in_flight_workflow(tmp_path, grace="0", finish_after="10")
+
+    launches = [e for e in events if e["event"] == "launch"]
+
+    assert [l["label"] for l in launches] == ["first", "second"]
+    assert "wf_one" in launches[1]["last"]
+
+
 class TestLaunchPromptWalk:
     def test_two_positionals_leave_the_arguments_alone(self):
         args = ["--dangerously-skip-permissions", "one", "two"]

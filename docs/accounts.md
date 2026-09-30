@@ -251,6 +251,16 @@ and what was lost, so an unattended session can restart what was in flight.
 `ACCOUNTS_HANDOFF_NOTICE=0` turns it off; the setting is read at each handoff. A
 session with no transcript to resume never gets one.
 
+A move that is not a plan wall (an `accounts set`, a mode change, a Fable
+departure) waits while the session has a Workflow in flight: a run its
+transcript launched whose transcript directory exists and whose completed state
+file does not. The supervisor records the wait in its state file as
+`pending_handoff` (target label, since when, the run ids) and moves once the
+runs finish or `ACCOUNTS_HANDOFF_GRACE_S` (default 1800) has passed. A wall
+moves at once. Whenever a move does stop runs, the notice names each run id and
+script path and the `Workflow({scriptPath, resumeFromRunId})` call that resumes
+it, so the relaunched session picks the work up from the agents that finished.
+
 `accounts brief <session-id> --prompt "<one line>" [--model <model>]` leaves a
 session its next relaunch's first message and model, written to
 `~/.accounts/handoff-briefs/<session-id>.json`. The supervisor uses it once, on
