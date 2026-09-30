@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,11 @@ HANDOFF_NOTICE = (
     " The previous process was stopped: any in-process workflow, subagent or"
     " background task it owned is gone. Check what was in flight and relaunch"
     " it; if nothing was, reply in one line and wait."
+)
+HANDOFF_GRACE_S = 1800
+RESUME_HINT = (
+    " Workflows in flight when it stopped: {runs}. Resume each with"
+    " Workflow({{scriptPath, resumeFromRunId}}); agents that finished replay from cache."
 )
 HANDOFF_REASONS = {"session": "session limit", "fable": "fable limit"}
 HOLD_NOTICE = (
@@ -474,9 +480,83 @@ def take_handoff_brief(session_id: str | None) -> tuple[str | None, str | None]:
     return prompt, model
 
 
-def relaunch_message(notice: str | None, brief_prompt: str | None) -> str | None:
+def relaunch_message(
+    notice: str | None,
+    brief_prompt: str | None,
+    in_flight: list[dict] | None = None,
+) -> str | None:
+    if notice and in_flight:
+        notice += resume_hint(in_flight)
     parts = [part for part in (notice, brief_prompt) if part]
     return " ".join(parts) or None
+
+
+def resume_hint(in_flight: list[dict]) -> str:
+    runs = ", ".join(f"{run['run_id']} (script {run['script_path']})" for run in in_flight)
+    return RESUME_HINT.format(runs=runs)
+
+
+def workflow_launches(transcript: Path) -> list[dict]:
+    """Every Workflow the session launched: run id and script path, from its transcript."""
+    inputs: dict[str, dict] = {}
+    runs: list[dict] = []
+    try:
+        lines = transcript.read_text().splitlines()
+    except OSError:
+        return runs
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        content = entry.get("message", {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") == "Workflow":
+                inputs[block.get("id", "")] = block.get("input") or {}
+            if block.get("type") != "tool_result" or block.get("tool_use_id") not in inputs:
+                continue
+            text = block.get("content")
+            if isinstance(text, list):
+                text = " ".join(part.get("text", "") for part in text if isinstance(part, dict))
+            if not isinstance(text, str):
+                continue
+            run_id = re.search(r"Run ID: (wf_[\w-]+)", text)
+            if not run_id:
+                continue
+            script = re.search(r"Script file: (\S+)", text)
+            launched = inputs[block["tool_use_id"]]
+            runs.append(
+                {
+                    "run_id": run_id.group(1),
+                    "script_path": (script.group(1) if script else launched.get("scriptPath")) or "",
+                }
+            )
+    return runs
+
+
+def in_flight_workflows(session_id: str | None) -> list[dict]:
+    """Workflows the session launched that have a transcript directory but no completed state."""
+    transcript = session_transcript_path(session_id)
+    if transcript is None:
+        return []
+    session_dir = transcript.parent / str(session_id)
+    return [
+        run
+        for run in workflow_launches(transcript)
+        if (session_dir / "subagents" / "workflows" / run["run_id"]).is_dir()
+        and not (session_dir / "workflows" / f"{run['run_id']}.json").exists()
+    ]
+
+
+def handoff_grace_s() -> float:
+    try:
+        return float(os.environ.get("ACCOUNTS_HANDOFF_GRACE_S", HANDOFF_GRACE_S))
+    except ValueError:
+        return HANDOFF_GRACE_S
 
 
 def prompt_arg_index(args: list[str]) -> int | None:
@@ -939,6 +1019,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     hard_session_limit = accounts.hard_session_limit_enabled()
     hold_for_reset = accounts.hold_for_reset_enabled()
     handoff_count = 0
+    pending_since: float | None = None
     fallback_model = os.environ.get(
         "ACCOUNTS_FABLE_FALLBACK_MODEL",
         FABLE_FALLBACK_MODEL,
@@ -1144,6 +1225,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             relaunch_message(
                                 hold_notice(held_from, time.time(), hold_reason(hard_limit_kind)),
                                 brief_prompt,
+                                in_flight_workflows(session_id),
                             ),
                         )
                         selected = next_profile
@@ -1373,8 +1455,26 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     current_model = next_model
                     current_family = "general"
                     continue
-                stop_for_handoff(child)
                 moved_by = hard_limit_kind if hard_limit_reached else limit_rejected
+                in_flight = in_flight_workflows(session_id)
+                if moved_by is None and in_flight:
+                    # A planned move can wait for the work the stop would kill.
+                    pending_since = pending_since or time.time()
+                    if time.time() - pending_since < handoff_grace_s():
+                        write_router_state(
+                            state_path,
+                            {
+                                **read_router_state(state_path),
+                                "pending_handoff": {
+                                    "to": next_profile["label"],
+                                    "since": pending_since,
+                                    "in_flight": [run["run_id"] for run in in_flight],
+                                },
+                            },
+                        )
+                        continue
+                pending_since = None
+                stop_for_handoff(child)
                 brief_prompt, brief_model = take_handoff_brief(session_id)
                 next_model = brief_model or next_model
                 launch_args = handoff_session_args(
@@ -1387,6 +1487,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         if accounts.handoff_notice_enabled()
                         else None,
                         brief_prompt,
+                        in_flight,
                     ),
                 )
                 selected = next_profile
@@ -1465,6 +1566,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         if accounts.handoff_notice_enabled()
                         else None,
                         brief_prompt,
+                        in_flight_workflows(session_id),
                     ),
                 )
                 selected = next_profile
