@@ -72,3 +72,9 @@ assert plist["ProgramArguments"][0] == sys.argv[2]
 assert plist["StartInterval"] == 60
 assert shutil.which("accounts", path=plist["EnvironmentVariables"]["PATH"]) == sys.argv[2]
 PY
+
+# Persistent= only serves OnCalendar=; a stamp left from before a reboot stops OnBootSec= from ever firing.
+if grep -l '^Persistent=true' "$repo_root"/linux/systemd/*.timer.template; then
+    echo "FAIL: a Linux timer template sets Persistent=true" >&2
+    exit 1
+fi
