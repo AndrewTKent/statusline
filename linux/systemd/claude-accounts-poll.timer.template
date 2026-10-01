@@ -5,7 +5,6 @@ Description=Poll the Claude account usage board
 OnBootSec=60
 OnUnitActiveSec=__INTERVAL__
 AccuracySec=10
-Persistent=true
 Unit=claude-accounts-poll.service
 
 [Install]
