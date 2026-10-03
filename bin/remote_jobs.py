@@ -20,6 +20,7 @@ from pathlib import Path
 JOBS_FILE = "jobs.json"
 JOB_FILE = "job.json"
 REPORT_FILE = "report.md"
+QUEUE_FILE = "lane-queue.txt"
 SENT_FILES = {"brief.md", "launch.sh"}
 ROUTER_STATE_GLOB = "account-router-*.json"
 ROUTER_PID = re.compile(r"account-router-(\d+)\.json$")
@@ -34,6 +35,15 @@ def home() -> Path:
 
 def handoffs_dir() -> Path:
     return Path(os.environ.get("HANDOFFS_DIR") or home() / "handoffs")
+
+
+def queued_slugs() -> list[str]:
+    """Lanes the box's admission gate is holding, first in line first."""
+    try:
+        lines = (handoffs_dir() / QUEUE_FILE).read_text().splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines if line.strip()]
 
 
 def router_state_dir() -> Path:
@@ -237,30 +247,35 @@ def codex_in(worktree: str) -> bool:
     return False
 
 
-def session_state(tmux_alive: bool, worktree: str, router: dict) -> str:
+def session_state(tmux_alive: bool, worktree: str, router: dict, queued: bool) -> str:
     """A tmux session left at a bare shell after its router exited is not running.
     A job naming no worktree cannot be matched to a router, so tmux is all there is."""
     if not tmux_alive:
         return "gone"
     if router.get("held_until"):
         return "held"
+    # A gated lane's pane sits in the gate's sleep loop, with no router or codex yet.
+    if queued:
+        return "queued"
     if worktree and not router and not codex_in(worktree):
         return "gone"
     return "running"
 
 
-def job_row(directory: Path, live: set[str]) -> dict | None:
+def job_row(directory: Path, live: set[str], queue: list[str]) -> dict | None:
     job = read_json(directory / JOB_FILE, None)
     if not isinstance(job, dict):
         return None
     worktree = str(job.get("worktree") or "")
     report = report_status(directory / REPORT_FILE)
     router = router_state_for(worktree)
-    state = report or session_state(directory.name in live, worktree, router)
+    queued = directory.name in queue
+    state = report or session_state(directory.name in live, worktree, router, queued)
     session = session_dir(str(router.get("session_id") or ""))
     return {
         "state": state,
         "held_until": as_int(router.get("held_until")),
+        "queue_position": queue.index(directory.name) + 1 if queued else 0,
         "branch": str(job.get("branch") or ""),
         "head": git_head(worktree),
         "account": str(router.get("label") or ""),
@@ -276,11 +291,12 @@ def job_row(directory: Path, live: set[str]) -> dict | None:
 
 def build(now: float) -> dict:
     live = live_sessions()
+    queue = queued_slugs()
     jobs = {}
     for directory in children(handoffs_dir()):
         if not directory.is_dir():
             continue
-        row = job_row(directory, live)
+        row = job_row(directory, live, queue)
         if row is not None:
             jobs[directory.name] = row
     return {"version": 1, "generated_at": int(now), "jobs": jobs}
