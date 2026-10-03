@@ -236,6 +236,11 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "account": "team-1", "origin_session": "", "sent_at": $(( NOW - 90000 )),
       "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
     },
+    "queued-job": {
+      "state": "queued", "queue_position": 3, "branch": "andrew/queued", "head": "0fedcbb",
+      "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
     "old-job": {
       "state": "done", "branch": "andrew/old", "head": "9abcdef",
       "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 90000 )),
@@ -260,6 +265,7 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
 [[ "$jobs_output" == *"just-done"*"done"*"2m ago"* ]] || { printf 'a job that finished recently did not render its state and age\n' >&2; exit 1; }
 [[ "$jobs_output" != *"old-job"* ]] || { printf 'a job that finished long ago still rendered\n' >&2; exit 1; }
 [[ "$jobs_output" =~ held-job-on-a-devbox\ +held\ ·\ resumes\ [0-9]{1,2}:[0-9]{2}[ap]m\ [A-Z]+ ]] || { printf 'a held job did not say when it resumes\n' >&2; exit 1; }
+[[ "$jobs_output" =~ queued-job\ +queued\ ·\ \#3\ in\ line ]] || { printf 'a queued job did not say its place in line\n' >&2; exit 1; }
 # 20 characters, the widest name on either board: a held job sizes the column like a running one.
 [[ "$jobs_output" =~ demo-job\ {13}running ]] || { printf "a held job's name did not widen the job column\n" >&2; exit 1; }
 board_table_line=$(printf '%s\n' "$board_output" | grep -n 'Work' | head -1 | cut -d: -f1)

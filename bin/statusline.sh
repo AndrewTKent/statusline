@@ -782,7 +782,7 @@ remote_job_slugs() {
         --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
         --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" '
         (.jobs // {}) | to_entries[]
-        | select(.value.state == "running" or .value.state == "held" or ((.value.updated_at // 0) >= $cutoff))
+        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or ((.value.updated_at // 0) >= $cutoff))
         | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
                  or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
         | .key[0:$cap]
@@ -813,20 +813,21 @@ remote_job_lines() {
     local board_dir="$1" name_width="$2" fresh="$3" now_epoch="$4"
     local RJ_SEP=$'\037'
     [ -r "$board_dir/jobs.json" ] || return 0
-    local rows kind one two three four five six seven
+    local rows kind one two three four five six seven eight
     local padded detail state_color job_color age plural
     rows=$(jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
         --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
         --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" '
         (.jobs // {}) | to_entries[]
-        | select(.value.state == "running" or .value.state == "held" or ((.value.updated_at // 0) >= $cutoff))
+        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or ((.value.updated_at // 0) >= $cutoff))
         # A job belongs to the session that sent it; one with no sender shows everywhere.
         | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
                  or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
         | (["job", .key[0:$cap], (.value.state // ""), (.value.account // ""),
             ((.value.handoffs // 0) | tostring), ((.value.updated_at // 0) | tostring),
             (if $all == "1" and (.value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
-             then "mine" else "" end), ((.value.held_until // 0) | tostring)]
+             then "mine" else "" end), ((.value.held_until // 0) | tostring),
+            ((.value.queue_position // 0) | tostring)]
            | join("")),
           (select(.value.state == "running")
            | (.value.workflows // [])[] | select(.running == true)
@@ -835,10 +836,11 @@ remote_job_lines() {
               ((.started_at // 0) | tostring)]
            | join(""))
     ' "$board_dir/jobs.json" 2>/dev/null)
-    while IFS=$RJ_SEP read -r kind one two three four five six seven; do
+    while IFS=$RJ_SEP read -r kind one two three four five six seven eight; do
         case "$four" in ''|*[!0-9]*) four=0 ;; esac
         case "$five" in ''|*[!0-9]*) five=0 ;; esac
         case "$seven" in ''|*[!0-9]*) seven=0 ;; esac
+        case "$eight" in ''|*[!0-9]*) eight=0 ;; esac
         case "$kind" in
             job)
                 case "$two" in
@@ -854,6 +856,8 @@ remote_job_lines() {
                         plural="handoffs"; [ "$four" = "1" ] && plural="handoff"
                         detail+=" ${dim}· ${four} ${plural}${reset}"
                     fi
+                elif [ "$two" = "queued" ] && [ "$eight" -gt 0 ]; then
+                    detail=" ${dim}· #${eight} in line${reset}"
                 elif [ "$two" = "held" ] && [ "$seven" -gt 0 ]; then
                     detail=" ${dim}· resumes $(fmt_epoch "$seven" "%l:%M%p %Z" | sed 's/^ //; s/AM/am/; s/PM/pm/')${reset}"
                 else

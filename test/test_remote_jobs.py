@@ -150,6 +150,16 @@ class TestState:
 
         assert only_job(remote_jobs.build(2000.0))["state"] == "running"
 
+    def test_a_lane_the_gate_holds_publishes_queued_and_its_place(self, box, monkeypatch):
+        write_job(box)
+        (box / "handoffs" / "lane-queue.txt").write_text("other\ndemo\n")
+        live(monkeypatch, "demo")
+        monkeypatch.setattr(remote_jobs, "report_status", lambda _path: None)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["queue_position"]) == ("queued", 2)
+
     def test_a_router_holding_for_a_reset_publishes_held_and_when(self, box, monkeypatch):
         write_job(box)
         write_router_state(box, "s-1", held_until=5000, held_reason="session limit")

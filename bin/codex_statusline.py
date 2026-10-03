@@ -3601,7 +3601,7 @@ def remote_job_lines(
     lines = []
     for name, job in (board.get("jobs") or {}).items():
         state = job.get("state", "")
-        if state not in {"running", "held"} and job.get("updated_at", 0) < now - 1800:
+        if state not in {"running", "held", "queued"} and job.get("updated_at", 0) < now - 1800:
             continue
         origin_session, origin_pane = job.get("origin_session"), job.get("origin_pane")
         mine = bool(thread_id and origin_session == thread_id) or bool(pane_id and origin_pane == pane_id)
@@ -3616,6 +3616,8 @@ def remote_job_lines(
             handoffs = job.get("handoffs", 0)
             if handoffs:
                 detail += f" · {handoffs} handoff{'s' if handoffs != 1 else ''}"
+        elif state == "queued" and job.get("queue_position"):
+            detail = f" · #{job['queue_position']} in line"
         elif state == "held" and job.get("held_until"):
             detail = f" · resumes {format_clock(datetime.fromtimestamp(job['held_until']).astimezone())}"
         else:
