@@ -80,8 +80,8 @@ count the status line shows.
 | `accounts mint <label>` | Mint + vault a 1-year token for headless jobs |
 | `accounts tokens` | List minted tokens and expiry |
 | `accounts sync` | Converge the token vault with a second machine |
-| `accounts move <label> --to <host>` | Move an account to `<host>` over ssh (`--from <host>` pulls one here): import on the destination, then forget on the source; a failed import leaves the source untouched |
-| `accounts export <label>` / `import` / `forget <label>` | The pieces `move` is built from: `export` writes the account as JSON to a pipe (never a terminal), `import` installs it from stdin, `forget` removes it and keeps the profile directory |
+| `accounts move <label> --to <host>` | Move an account to `<host>` over ssh (`--from <host>` pulls one here): import on the destination, then forget on the source; a failed import leaves the source untouched. Sessions live on the account move off it on their own |
+| `accounts export <label>` / `import` / `forget <label>` | The pieces `move` is built from: `export` writes the account as JSON to a pipe (never a terminal), `import` installs it from stdin, `forget` removes it and keeps the profile directory. It refuses the pinned account; live sessions on it reroute first (up to 60s), and if any stay the account is put back |
 | `accounts pick-env` | Emit `CLAUDE_CONFIG_DIR` and account metadata |
 
 Codex uses its own command because the two CLIs expose different auth and quota
@@ -257,7 +257,8 @@ transcript launched whose transcript directory exists and whose completed state
 file does not. The supervisor records the wait in its state file as
 `pending_handoff` (target label, since when, the run ids) and moves once the
 runs finish or `ACCOUNTS_HANDOFF_GRACE_S` (default 1800) has passed. A wall
-moves at once. Whenever a move does stop runs, the notice names each run id and
+moves at once, and so does a session whose account was removed (`accounts forget`
+or `move`): its login is gone, so waiting for the runs is moot. Whenever a move does stop runs, the notice names each run id and
 script path and the `Workflow({scriptPath, resumeFromRunId})` call that resumes
 it, so the relaunched session picks the work up from the agents that finished.
 

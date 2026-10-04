@@ -832,6 +832,7 @@ LEASES_PATH = HOME / ".accounts" / "leases.json"
 CLAUDE_HOME = HOME / ".claude"
 CLAUDE_STATE_PATH = HOME / ".claude.json"
 LEASE_STALE_S = 30.0
+FORGET_DRAIN_S = 60.0
 
 PROFILE_SHARED_ENTRIES = (
     "CLAUDE.md",
@@ -2506,11 +2507,43 @@ def import_account(payload: dict) -> str:
     return label
 
 
-def _refuse_if_in_use(label: str) -> None:
+def _refuse_if_pinned(label: str) -> None:
     if _load_global_mode_snapshot()[0].get("label") == label:
         raise AccountsError(f"'{label}' is the pinned account; `accounts auto` first")
-    if any(lease.get("label") == label for lease in load_session_leases()):
-        raise AccountsError(f"'{label}' has a live session")
+
+
+def account_stored(label: str) -> bool:
+    try:
+        return label in (load_blobs().get("accounts") or {})
+    except AccountsError:
+        # An unreadable store is not a removal.
+        return True
+
+
+def _conf_label_token(label: str) -> str | None:
+    return next(
+        (token for token in _conf_var("ACCOUNT_LABELS").split() if token.startswith(f"{label}:")),
+        None,
+    )
+
+
+def _wait_for_sessions_to_leave(label: str) -> bool:
+    deadline = time.time() + FORGET_DRAIN_S
+    while any(lease.get("label") == label for lease in load_session_leases()):
+        if time.time() >= deadline:
+            return False
+        time.sleep(1)
+    return True
+
+
+def _restore_account(label: str, entry: dict | None, token: str | None) -> None:
+    with locked():
+        if entry is not None:
+            blobs = load_blobs()
+            blobs.setdefault("accounts", {})[label] = entry
+            save_blobs(blobs)
+        if token is not None:
+            set_conf_label_token(label, token)
 
 
 def _strip_profile_login(label: str) -> None:
@@ -2527,15 +2560,27 @@ def _strip_profile_login(label: str) -> None:
 
 def forget_account(label: str) -> None:
     with locked():
-        _refuse_if_in_use(label)
-        if not reset_profile_keychain(label):
-            raise AccountsError(f"could not remove the '{label}' profile keychain item")
+        _refuse_if_pinned(label)
         blobs = load_blobs()
-        (blobs.get("accounts") or {}).pop(label, None)
+        entry = (blobs.get("accounts") or {}).pop(label, None)
+        token = _conf_label_token(label)
         save_blobs(blobs)
-        _strip_profile_login(label)
-        clear_profile_account_state(label)
         set_conf_label_token(label, None)
+    try:
+        # Live supervisors see the entry gone and reroute their sessions first.
+        if not _wait_for_sessions_to_leave(label):
+            raise AccountsError(
+                f"'{label}' still has a live session after {FORGET_DRAIN_S:.0f}s: its supervisor"
+                " found no other account or predates removal rerouting; `accounts set` another account first"
+            )
+        with locked():
+            if not reset_profile_keychain(label):
+                raise AccountsError(f"could not remove the '{label}' profile keychain item")
+            _strip_profile_login(label)
+            clear_profile_account_state(label)
+    except AccountsError:
+        _restore_account(label, entry, token)
+        raise
     _repaint_board()
 
 
@@ -2562,7 +2607,7 @@ def _remote_error(host: str, step: str, result) -> AccountsError:
 
 
 def move_to(label: str, host: str) -> None:
-    _refuse_if_in_use(label)
+    _refuse_if_pinned(label)
     payload = json.dumps(export_payload(label))
     result = _remote_accounts(host, "import", payload)
     print(result.stdout, end="")

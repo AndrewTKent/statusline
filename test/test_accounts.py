@@ -5238,9 +5238,10 @@ class TestMoveAccount:
 
         assert self._stored()["work"] == fresh
 
-    @pytest.mark.parametrize("hold", ["pinned", "leased"])
-    def test_forget_refuses_a_label_in_use(self, tmp_path, monkeypatch, hold):
+    @pytest.mark.parametrize("hold", ["pinned", "never_leaves"])
+    def test_forget_keeps_a_label_still_in_use(self, tmp_path, monkeypatch, hold):
         self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        monkeypatch.setattr(accounts, "FORGET_DRAIN_S", 0)
         if hold == "pinned":
             accounts.save_mode("set", "work")
         else:
@@ -5250,6 +5251,33 @@ class TestMoveAccount:
             accounts.forget_account("work")
 
         assert self._stored()["work"] == self.WORK
+        assert accounts.CONF_PATH.read_text() == CONF_TEXT
+
+    def test_forget_waits_for_live_sessions_to_reroute(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        profile = accounts.ensure_native_profile("work", self.WORK)
+        accounts.save_session_leases([{"pid": os.getpid(), "label": "work", "updated_at": time.time()}])
+        seen_while_draining: list[tuple[bool, bool]] = []
+
+        def supervisor_reroutes(_seconds):
+            seen_while_draining.append(
+                (accounts.account_stored("work"), (profile / ".credentials.json").exists())
+            )
+            accounts.save_session_leases([{"pid": os.getpid(), "label": "other", "updated_at": time.time()}])
+
+        monkeypatch.setattr(accounts.time, "sleep", supervisor_reroutes)
+
+        accounts.forget_account("work")
+
+        assert seen_while_draining == [(False, True)]
+        assert "work" not in self._stored()
+        assert not (profile / ".credentials.json").exists()
+
+    def test_an_unreadable_store_does_not_read_as_a_removal(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch, {})
+        accounts.BLOBS_PATH.write_text("{not json")
+
+        assert accounts.account_stored("work")
 
     def test_forget_removes_the_login_and_keeps_the_profile(self, tmp_path, monkeypatch, capsys):
         self._paths(tmp_path, monkeypatch, {"work": self.WORK, "other": self.OTHER})
@@ -5289,8 +5317,9 @@ class TestMoveAccount:
 
         assert capsys.readouterr().out == "forgot work\n"
 
-    def test_move_to_imports_there_then_forgets_here(self, tmp_path, monkeypatch, capsys):
+    def test_move_to_imports_there_then_forgets_here_even_with_a_live_session(self, tmp_path, monkeypatch, capsys):
         self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        accounts.save_session_leases([{"pid": os.getpid(), "label": "work", "updated_at": time.time()}])
         calls = self._ssh(monkeypatch, self._done(stdout="imported work\n"))
         forgotten: list[str] = []
         monkeypatch.setattr(accounts, "forget_account", forgotten.append)

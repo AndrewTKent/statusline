@@ -54,7 +54,11 @@ RESUME_HINT = (
     " Workflows in flight when it stopped: {runs}. Resume each with"
     " Workflow({{scriptPath, resumeFromRunId}}); agents that finished replay from cache."
 )
-HANDOFF_REASONS = {"session": "session limit", "fable": "fable limit"}
+HANDOFF_REASONS = {
+    "session": "session limit",
+    "fable": "fable limit",
+    "removed": "account removed from this machine",
+}
 HOLD_NOTICE = (
     "The account router held this session from {start} to {end} because no"
     " account had quota left ({reason}). The previous process was stopped: any"
@@ -1164,11 +1168,13 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if detected_limit is not None and limit_rejected is None:
                         limit_rejected = detected_limit
                         mark_detected_limit(selected, detected_limit)
-                hard_limit_kind = (
-                    hard_limit_kind_for(selected["label"], current_family)
-                    if hard_session_limit
-                    else None
-                )
+                if not accounts.account_stored(selected["label"]):
+                    # A forgotten account's login is gone; waiting out workflows is moot.
+                    hard_limit_kind = "removed"
+                elif hard_session_limit:
+                    hard_limit_kind = hard_limit_kind_for(selected["label"], current_family)
+                else:
+                    hard_limit_kind = None
                 if hard_limit_kind == "fable" and in_process_fallback:
                     hard_limit_kind = None
                 hard_limit_reached = hard_limit_kind is not None
