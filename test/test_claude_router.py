@@ -24,6 +24,7 @@ SPEC.loader.exec_module(claude_router)
 
 @pytest.fixture(autouse=True)
 def ignore_host_conf(monkeypatch):
+    monkeypatch.setattr(claude_router.accounts, "account_stored", lambda _label: True)
     monkeypatch.setenv("ACCOUNTS_HARD_SESSION_LIMIT", "0")
     monkeypatch.setenv("ACCOUNTS_HANDOFF_NOTICE", "0")
     monkeypatch.setenv("ACCOUNTS_HOLD_FOR_RESET", "0")
@@ -3975,8 +3976,9 @@ def _two_account_home(tmp_path):
     return home
 
 
-# The first launch leaves one workflow in flight, switches the mode, and finishes
-# the workflow after a pause; the log records when each launch and the finish happened.
+# The first launch leaves one workflow in flight, switches the mode (or forgets its
+# account), and finishes the workflow after a pause; the log records when each launch
+# and the finish happened.
 _IN_FLIGHT_FAKE_CLAUDE = (
     "#!/usr/bin/env python3\n"
     "import json, os, signal, sys, time\n"
@@ -4001,9 +4003,17 @@ _IN_FLIGHT_FAKE_CLAUDE = (
     "    {'type': 'tool_use', 'id': 't1', 'name': 'Workflow', 'input': {'scriptPath': '/w/one.js'}}]}}) + '\\n'\n"
     "    + json.dumps({'message': {'content': [{'type': 'tool_result', 'tool_use_id': 't1',\n"
     "    'content': 'Script file: /w/one.js\\nRun ID: wf_one'}]}}) + '\\n')\n"
-    "(home / '.accounts' / 'mode.json').write_text(\n"
-    "    json.dumps({'version': 2, 'mode': 'set', 'label': 'second', 'global_generation': 2})\n"
-    ")\n"
+    "if os.environ.get('ROUTER_TEST_FORGET'):\n"
+    "    blobs = json.loads((home / '.accounts' / 'blobs.json').read_text())\n"
+    "    del blobs['accounts']['first']\n"
+    "    (home / '.accounts' / 'blobs.json').write_text(json.dumps(blobs))\n"
+    "    (home / '.accounts' / 'mode.json').write_text(\n"
+    "        json.dumps({'version': 2, 'mode': 'auto', 'global_generation': 2})\n"
+    "    )\n"
+    "else:\n"
+    "    (home / '.accounts' / 'mode.json').write_text(\n"
+    "        json.dumps({'version': 2, 'mode': 'set', 'label': 'second', 'global_generation': 2})\n"
+    "    )\n"
     "time.sleep(float(os.environ['ROUTER_TEST_FINISH_AFTER']))\n"
     "(session / 'workflows' / 'wf_one.json').write_text('{}')\n"
     "with log.open('a') as f:\n"
@@ -4012,7 +4022,9 @@ _IN_FLIGHT_FAKE_CLAUDE = (
 )
 
 
-def _run_router_with_in_flight_workflow(tmp_path, *, grace: str, finish_after: str):
+def _run_router_with_in_flight_workflow(
+    tmp_path, *, grace: str, finish_after: str, forget: bool = False
+):
     home = _two_account_home(tmp_path)
     log_path = tmp_path / "launches.jsonl"
     fake_claude = tmp_path / "fake-claude"
@@ -4029,6 +4041,7 @@ def _run_router_with_in_flight_workflow(tmp_path, *, grace: str, finish_after: s
             "ACCOUNTS_HANDOFF_NOTICE": "1",
             "ROUTER_TEST_LOG": str(log_path),
             "ROUTER_TEST_FINISH_AFTER": finish_after,
+            "ROUTER_TEST_FORGET": "1" if forget else "",
             "PYTHONPATH": str(REPO / "bin"),
         }
     )
@@ -4061,6 +4074,18 @@ def test_a_move_past_the_grace_names_the_workflow_it_killed(tmp_path):
 
     assert [l["label"] for l in launches] == ["first", "second"]
     assert "wf_one" in launches[1]["last"]
+
+
+def test_a_forgotten_account_moves_its_session_without_waiting_for_the_workflow(tmp_path):
+    events = _run_router_with_in_flight_workflow(
+        tmp_path, grace="60", finish_after="10", forget=True
+    )
+
+    launches = [e for e in events if e["event"] == "launch"]
+
+    assert [l["label"] for l in launches] == ["first", "second"]
+    assert not any(e["event"] == "finished" for e in events)
+    assert "account removed from this machine" in launches[1]["last"]
 
 
 class TestLaunchPromptWalk:
