@@ -198,6 +198,13 @@ board_order=$(awk '/^· devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $
 [ "$board_order" = "Team-1 Team-2 Team-10 " ] || { printf 'board accounts are not in natural name order: %s\n' "$board_order" >&2; exit 1; }
 codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")
 [ "$codex_line" = "· Seat-1-codex — — 37% — 3d" ] || { printf 'the Codex row is not its label, dashed 5h, week and weekly reset: %s\n' "$codex_line" >&2; exit 1; }
+
+printf 'ACCOUNTS_HIDE_OTHERS=1\n' >> "$TEST_HOME/.claude/statusline.conf"
+only_current=$(render_with_boards)
+[[ "$only_current" == *$'\n* Work '* ]] || { printf 'hide-others dropped the routed account row\n' >&2; exit 1; }
+[[ "$only_current" != *$'\n· General '* && "$only_current" != *$'\n· Personal '* ]] || { printf 'hide-others kept another local row\n' >&2; exit 1; }
+[[ "$only_current" == *$'\n· Team-1 '* ]] || { printf 'hide-others removed a remote board row\n' >&2; exit 1; }
+sed -i.bak '/^ACCOUNTS_HIDE_OTHERS=1$/d' "$TEST_HOME/.claude/statusline.conf" && rm -f "$TEST_HOME/.claude/statusline.conf.bak"
 [[ "$board_output" != *$'\u25b8'* ]] || { printf 'a board without a jobs file rendered a job line\n' >&2; exit 1; }
 PANE_TEST_ID=$({ printf 'iterm:PANE-TEST' | shasum -a 256 2>/dev/null || printf 'iterm:PANE-TEST' | sha256sum; } | cut -c1-12)
 cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON

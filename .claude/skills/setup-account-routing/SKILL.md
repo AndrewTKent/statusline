@@ -27,6 +27,7 @@ Run `/setup-statusline` first — both tools share `~/.claude/statusline.conf`.
    LABEL_COLORS="gmail:magenta work:cyan"   # optional
    ACCOUNTS_EXCLUDE=""                      # labels excluded from automatic routing
    ACCOUNTS_HIDE=""                         # labels hidden from the statusline board, still routed
+   ACCOUNTS_HIDE_OTHERS=0                   # 1: this session's account is the only local row
    SHOW_ACCOUNT_RESETS=1
    ```
 
