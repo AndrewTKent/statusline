@@ -392,8 +392,10 @@ account_label_is_excluded() {
 }
 
 # Board-only: ACCOUNTS_HIDE drops rows from the statusline; the router still uses them.
+# ACCOUNTS_HIDE_OTHERS=1 hides every local row; callers always keep this session's account.
 account_label_is_hidden() {
     local candidate="$1" hidden
+    [ "${ACCOUNTS_HIDE_OTHERS:-0}" = "1" ] && return 0
     for hidden in ${ACCOUNTS_HIDE:-}; do
         [ "$candidate" = "$hidden" ] && return 0
     done

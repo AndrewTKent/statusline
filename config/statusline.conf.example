@@ -35,6 +35,16 @@
 # red, white. Unmapped tags default to orange.
 # LABEL_COLORS="work:cyan personal:magenta alumni:green"
 
+# Retired identities: off the board and out of routing even if a live slot
+# resurfaces one. Values are LABELS from ACCOUNT_LABELS.
+# ACCOUNTS_EXCLUDE=""
+# Board-only: these labels stay in routing but their rows leave the statusline.
+# The account this session is on always renders.
+# ACCOUNTS_HIDE=""
+# Board-only: show this session's account as the only local row. Remote boards
+# (REMOTE_ACCOUNT_BOARDS) are unaffected.
+# ACCOUNTS_HIDE_OTHERS=0
+
 # Map full email addresses → payer labels for the "payer" dimension in
 # scan-tokens.py. This shows "which plan paid" independently of "what work."
 # Tokens from emails not in this map fall into "unknown".
