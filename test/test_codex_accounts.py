@@ -81,6 +81,36 @@ class CodexAccountsTest(unittest.TestCase):
                 sorted(p.name for p in (shared / "mcp-oauth-locks").iterdir()), ["abc.lock", "file-store.lock"]
             )
 
+    def test_profile_lock_file_created_before_shared_is_folded_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared = root / ".codex"
+            profile = root / "profiles" / "personal"
+            profile.mkdir(parents=True)
+            shared.mkdir(parents=True)
+            (profile / ".sqlite-maintenance.lock").write_text("")
+            (shared / ".sqlite-maintenance.lock").write_text("")
+
+            codex_accounts.ensure_profile(profile, shared)
+
+            self.assertTrue((profile / ".sqlite-maintenance.lock").is_symlink())
+            self.assertEqual(
+                (profile / ".sqlite-maintenance.lock").resolve(), (shared / ".sqlite-maintenance.lock").resolve()
+            )
+
+    def test_profile_file_differing_from_shared_still_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared = root / ".codex"
+            profile = root / "profiles" / "personal"
+            profile.mkdir(parents=True)
+            shared.mkdir(parents=True)
+            (profile / "installation_id").write_text("mine")
+            (shared / "installation_id").write_text("theirs")
+
+            with self.assertRaises(codex_accounts.AccountsError):
+                codex_accounts.ensure_profile(profile, shared)
+
     def test_profile_entry_colliding_with_shared_still_refuses(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

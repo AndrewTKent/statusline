@@ -141,9 +141,17 @@ def ensure_profile(profile: Path, source: Path | None = None) -> None:
 
 
 def fold_into_shared(entry: Path, shared: Path) -> None:
-    # Codex creates a directory in whichever home it runs from, so a profile can hold a real
-    # one before the shared home gains the same name; its files move across when none collide.
-    if entry.is_symlink() or not entry.is_dir() or not shared.is_dir():
+    # Codex creates a directory, or a lock file, in whichever home it runs from, so a profile can
+    # hold a real one before the shared home gains the same name. A file folds when its bytes match
+    # the shared one's; a directory's files move across when none collide.
+    if entry.is_symlink():
+        raise AccountsError(f"profile entry blocks shared state: {entry}")
+    if entry.is_file() and shared.is_file():
+        if entry.read_bytes() != shared.read_bytes():
+            raise AccountsError(f"profile entry blocks shared state: {entry} (differs from the shared file)")
+        entry.unlink()
+        return
+    if not entry.is_dir() or not shared.is_dir():
         raise AccountsError(f"profile entry blocks shared state: {entry}")
     children = list(entry.iterdir())
     for child in children:
