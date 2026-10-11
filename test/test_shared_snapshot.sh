@@ -199,6 +199,16 @@ board_order=$(awk '/^· devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $
 codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")
 [ "$codex_line" = "· Seat-1-codex — — 37% — 3d" ] || { printf 'the Codex row is not its label, dashed 5h, week and weekly reset: %s\n' "$codex_line" >&2; exit 1; }
 
+# Boards render in REMOTE_ACCOUNT_BOARDS order, not in directory-name order: "alpha" sorts before "devbox".
+mkdir -p "$REMOTE_ROOT_DIR/alpha"
+printf '{"version":1,"generated_at":%s,"health":{"last_success_at":%s,"error":null},"accounts":{}}\n' "$NOW" "$NOW" > "$REMOTE_ROOT_DIR/alpha/statusline-snapshot.json"
+printf '{"name":"alpha","fetched_at":%s,"attempted_at":%s,"error":null,"up":true,"probe":null}\n' "$NOW" "$NOW" > "$REMOTE_ROOT_DIR/alpha/meta.json"
+printf 'REMOTE_ACCOUNT_BOARDS="devbox:devbox alpha:alpha"\n' >> "$TEST_HOME/.claude/statusline.conf"
+board_names=$(awk '/^· (devbox|alpha) ·/{printf "%s ", $2}' <<< "$(render_with_boards)")
+[ "$board_names" = "devbox alpha " ] || { printf 'boards are not in REMOTE_ACCOUNT_BOARDS order: %s\n' "$board_names" >&2; exit 1; }
+sed -i.bak '/^REMOTE_ACCOUNT_BOARDS=/d' "$TEST_HOME/.claude/statusline.conf" && rm -f "$TEST_HOME/.claude/statusline.conf.bak"
+rm -rf "$REMOTE_ROOT_DIR/alpha"
+
 printf 'ACCOUNTS_HIDE_OTHERS=1\n' >> "$TEST_HOME/.claude/statusline.conf"
 only_current=$(render_with_boards)
 [[ "$only_current" == *$'\n* Work '* ]] || { printf 'hide-others dropped the routed account row\n' >&2; exit 1; }
