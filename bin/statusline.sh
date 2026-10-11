@@ -791,15 +791,33 @@ remote_job_slugs() {
     ' "$board_dir/jobs.json" 2>/dev/null
 }
 
+# Board directories in REMOTE_ACCOUNT_BOARDS order, then any pulled board the conf no longer names.
+remote_board_dirs() {
+    local root="$1" pair name board_dir
+    local -a named=() rest=()
+    for pair in ${REMOTE_ACCOUNT_BOARDS:-}; do
+        name="${pair%%:*}"
+        [ -d "$root/$name" ] && named+=( "$root/$name/" )
+    done
+    # set +f locally: script-wide `set -f` (L3) blocks glob expansion otherwise.
+    set +f
+    rest=( "$root"/*/ )
+    set -f
+    for board_dir in "${rest[@]}"; do
+        [ -d "$board_dir" ] || continue
+        case " ${named[*]-} " in *" $board_dir "*) continue ;; esac
+        named+=( "$board_dir" )
+    done
+    printf '%s\n' "${named[@]-}"
+}
+
 remote_board_labels() {
     local root="$1" board_dir now_epoch
     [ -d "$root" ] || return 0
     now_epoch=$(date +%s)
     local -a board_dirs
-    # set +f locally: script-wide `set -f` (L3) blocks glob expansion otherwise.
-    set +f
-    board_dirs=( "$root"/*/ )
-    set -f
+    board_dirs=()
+    while IFS= read -r board_dir; do board_dirs+=( "$board_dir" ); done < <(remote_board_dirs "$root")
     for board_dir in "${board_dirs[@]}"; do
         [ -d "$board_dir" ] || continue
         jq -r '(.accounts // {}) | keys[]' \
@@ -900,10 +918,8 @@ remote_board_lines() {
         printf '%*s%s' "$padding" '' "$value"
     }
     local -a board_dirs
-    # set +f locally: script-wide `set -f` (L3) blocks glob expansion otherwise.
-    set +f
-    board_dirs=( "$root"/*/ )
-    set -f
+    board_dirs=()
+    while IFS= read -r board_dir; do board_dirs+=( "$board_dir" ); done < <(remote_board_dirs "$root")
     for board_dir in "${board_dirs[@]}"; do
         [ -d "$board_dir" ] || continue
         board_name="${board_dir%/}"; board_name="${board_name##*/}"
