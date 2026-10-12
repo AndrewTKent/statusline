@@ -932,7 +932,7 @@ remote_board_lines() {
             "board_probe=" + ((.probe // "") | tostring | @sh)
         ' "$board_dir/meta.json" 2>/dev/null)"
         if [ "$board_up" = "false" ]; then
-            printf '%b\n' "${dim}· ${board_name} · stopped${reset}"
+            printf '%b\n' "${bold}${white}■ ${board_name}${reset} ${dim}· stopped${reset}"
             continue
         fi
         # The up-check's own login expired: the machine's state is unknown, not stopped.
@@ -940,7 +940,7 @@ remote_board_lines() {
         [ "$board_probe" = "auth" ] && board_state="${yellow}login expired${reset}${dim} · "
         case "$fetched_at" in ''|*[!0-9]*) fetched_at=0 ;; esac
         if [ "$fetched_at" -le 0 ]; then
-            printf '%b\n' "${dim}· ${board_name} · ${board_state}no data${board_error:+ · $board_error}${reset}"
+            printf '%b\n' "${bold}${white}■ ${board_name}${reset} ${dim}· ${board_state}no data${board_error:+ · $board_error}${reset}"
             continue
         fi
         age=$(( now_epoch - fetched_at ))
@@ -949,7 +949,7 @@ remote_board_lines() {
         { [ -n "$board_error" ] || [ "$age" -gt "$max_age" ]; } && fresh=false
         suffix=""
         [ -n "$board_error" ] && suffix=" · ${board_error}"
-        printf '%b\n' "${dim}· ${board_name} · ${board_state}$(remote_age_text "$age") ago${suffix}${reset}"
+        printf '%b\n' "${bold}${white}■ ${board_name}${reset} ${dim}· ${board_state}$(remote_age_text "$age") ago${suffix}${reset}"
         rows=$(jq -r '
             (.accounts // {}) | to_entries
             | sort_by(.key | ascii_downcase | [scan("[0-9]+|[^0-9]+") | tonumber? // .]) | .[] |
