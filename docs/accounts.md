@@ -136,6 +136,27 @@ Minted long-lived tokens remain outside `~/.claude`
 (`~/.accounts/vault.json`); archival copies only session JSONLs from
 `~/.claude/projects`.
 
+## Naming this machine
+
+`LOCAL_MACHINE_NAME` labels the local table with a bold header line, the same
+way a remote board is labeled by its own name below it — purely cosmetic, so a
+board with several machines on it reads as "whose numbers are these" at a
+glance instead of by position alone.
+
+```bash
+LOCAL_MACHINE_NAME="MacBook"
+```
+
+```
+  acct                5h   reset   week   fable   reset
+■ MacBook
+* Work               84%   2h15m    51%     80%      2d
+· Personal            0%       —   100%      8%     23h
+· devbox · 1m ago
+```
+
+Unset by default — no header, the prior rendering.
+
 ## Remote account boards
 
 One machine's board can appear under another's. The remote machine runs this
@@ -144,6 +165,7 @@ files that poll publishes and renders them below its local table.
 
 ```
   acct                5h   reset   week   fable   reset
+■ MacBook
 * Work               84%   2h15m    51%     80%      2d
 · Personal            0%       —   100%      8%     23h
 · devbox · 1m ago

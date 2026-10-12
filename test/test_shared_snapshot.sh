@@ -130,6 +130,7 @@ output=$(run_statusline work)
 for expected in "Claude Test" "work" "42.5%" "66%" "17%" "fable" "Personal" "pending" "needs reauth" "15.00k" "1.23k" "⌥ metrics-pane" "#9" "Cached local PR"; do
     [[ "$output" == *"$expected"* ]] || { printf 'missing shared value: %s\n' "$expected" >&2; exit 1; }
 done
+[[ "$output" != *'■'* ]] || { printf 'a local-machine header rendered with LOCAL_MACHINE_NAME unset\n' >&2; exit 1; }
 plain_output=$(printf '%s' "$output" | sed $'s/\033\\[[0-9;]*m//g')
 [[ "$plain_output" == *$'model   Claude Test · high\n'* ]] || { printf 'model and effort are jammed together\n' >&2; exit 1; }
 [[ "$plain_output" == *$'repo    project\ntree    ⌥ metrics-pane\nbranch  feature/agent-metrics-w…\npr      #9 Cached local PR\n'* ]] || {
@@ -288,6 +289,16 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
 board_table_line=$(printf '%s\n' "$board_output" | grep -n 'Work' | head -1 | cut -d: -f1)
 board_header_line=$(printf '%s\n' "$board_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
 [ "$board_header_line" -gt "$board_table_line" ] || { printf 'the board block did not render under the local table\n' >&2; exit 1; }
+
+printf 'LOCAL_MACHINE_NAME="MacBook"\n' >> "$TEST_HOME/.claude/statusline.conf"
+named_output=$(render_with_boards)
+[[ "$named_output" == *'■ MacBook'* ]] || { printf 'LOCAL_MACHINE_NAME did not render a header\n' >&2; exit 1; }
+local_header_line=$(printf '%s\n' "$named_output" | grep -n '■ MacBook' | head -1 | cut -d: -f1)
+named_table_line=$(printf '%s\n' "$named_output" | grep -n 'Work' | head -1 | cut -d: -f1)
+named_board_header_line=$(printf '%s\n' "$named_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
+[ "$local_header_line" -lt "$named_table_line" ] || { printf 'the local-machine header did not render above the local table\n' >&2; exit 1; }
+[ "$named_table_line" -lt "$named_board_header_line" ] || { printf 'the remote board no longer renders under the local table once named\n' >&2; exit 1; }
+sed -i.bak '/^LOCAL_MACHINE_NAME=/d' "$TEST_HOME/.claude/statusline.conf" && rm -f "$TEST_HOME/.claude/statusline.conf.bak"
 
 write_board_meta "$(( NOW - 3600 ))" true
 stale_board_output=$(render_with_boards)
