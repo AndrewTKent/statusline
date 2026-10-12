@@ -144,15 +144,15 @@ board with several machines on it reads as "whose numbers are these" at a
 glance instead of by position alone.
 
 ```bash
-LOCAL_MACHINE_NAME="MacBook"
+LOCAL_MACHINE_NAME="laptop"
 ```
 
 ```
   acct                5h   reset   week   fable   reset
-■ MacBook
+■ laptop
 * Work               84%   2h15m    51%     80%      2d
 · Personal            0%       —   100%      8%     23h
-· devbox · 1m ago
+■ devbox · 1m ago
 ```
 
 Unset by default — no header, the prior rendering.
@@ -165,10 +165,10 @@ files that poll publishes and renders them below its local table.
 
 ```
   acct                5h   reset   week   fable   reset
-■ MacBook
+■ laptop
 * Work               84%   2h15m    51%     80%      2d
 · Personal            0%       —   100%      8%     23h
-· devbox · 1m ago
+■ devbox · 1m ago
 · Team-1             12%   3h40m    26%      4%      5d
 · ▸ fix-cache        running · Team-1 · 2 handoffs
 ·     review loop 14/15 agents · 12m

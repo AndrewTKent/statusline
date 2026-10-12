@@ -195,7 +195,7 @@ render_with_boards() {
 write_board_meta "$NOW" true
 board_output=$(render_with_boards)
 [[ "$board_output" == *$'\n'"· Team-1 "*"8%"* ]] || { printf 'a fresh board did not render its Claude rows\n' >&2; exit 1; }
-board_order=$(awk '/^· devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $2}' <<< "$board_output")
+board_order=$(awk '/^■ devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $2}' <<< "$board_output")
 [ "$board_order" = "Team-1 Team-2 Team-10 " ] || { printf 'board accounts are not in natural name order: %s\n' "$board_order" >&2; exit 1; }
 codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")
 [ "$codex_line" = "· Seat-1-codex — — 37% — 3d" ] || { printf 'the Codex row is not its label, dashed 5h, week and weekly reset: %s\n' "$codex_line" >&2; exit 1; }
@@ -205,7 +205,7 @@ mkdir -p "$REMOTE_ROOT_DIR/alpha"
 printf '{"version":1,"generated_at":%s,"health":{"last_success_at":%s,"error":null},"accounts":{}}\n' "$NOW" "$NOW" > "$REMOTE_ROOT_DIR/alpha/statusline-snapshot.json"
 printf '{"name":"alpha","fetched_at":%s,"attempted_at":%s,"error":null,"up":true,"probe":null}\n' "$NOW" "$NOW" > "$REMOTE_ROOT_DIR/alpha/meta.json"
 printf 'REMOTE_ACCOUNT_BOARDS="devbox:devbox alpha:alpha"\n' >> "$TEST_HOME/.claude/statusline.conf"
-board_names=$(awk '/^· (devbox|alpha) ·/{printf "%s ", $2}' <<< "$(render_with_boards)")
+board_names=$(awk '/^■ (devbox|alpha) ·/{printf "%s ", $2}' <<< "$(render_with_boards)")
 [ "$board_names" = "devbox alpha " ] || { printf 'boards are not in REMOTE_ACCOUNT_BOARDS order: %s\n' "$board_names" >&2; exit 1; }
 sed -i.bak '/^REMOTE_ACCOUNT_BOARDS=/d' "$TEST_HOME/.claude/statusline.conf" && rm -f "$TEST_HOME/.claude/statusline.conf.bak"
 rm -rf "$REMOTE_ROOT_DIR/alpha"
@@ -290,10 +290,10 @@ board_table_line=$(printf '%s\n' "$board_output" | grep -n 'Work' | head -1 | cu
 board_header_line=$(printf '%s\n' "$board_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
 [ "$board_header_line" -gt "$board_table_line" ] || { printf 'the board block did not render under the local table\n' >&2; exit 1; }
 
-printf 'LOCAL_MACHINE_NAME="MacBook"\n' >> "$TEST_HOME/.claude/statusline.conf"
+printf 'LOCAL_MACHINE_NAME="laptop"\n' >> "$TEST_HOME/.claude/statusline.conf"
 named_output=$(render_with_boards)
-[[ "$named_output" == *'■ MacBook'* ]] || { printf 'LOCAL_MACHINE_NAME did not render a header\n' >&2; exit 1; }
-local_header_line=$(printf '%s\n' "$named_output" | grep -n '■ MacBook' | head -1 | cut -d: -f1)
+[[ "$named_output" == *'■ laptop'* ]] || { printf 'LOCAL_MACHINE_NAME did not render a header\n' >&2; exit 1; }
+local_header_line=$(printf '%s\n' "$named_output" | grep -n '■ laptop' | head -1 | cut -d: -f1)
 named_table_line=$(printf '%s\n' "$named_output" | grep -n 'Work' | head -1 | cut -d: -f1)
 named_board_header_line=$(printf '%s\n' "$named_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
 [ "$local_header_line" -lt "$named_table_line" ] || { printf 'the local-machine header did not render above the local table\n' >&2; exit 1; }

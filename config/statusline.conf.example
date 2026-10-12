@@ -118,7 +118,7 @@
 # another one's. Purely cosmetic: a bold header line above the local account
 # rows, so this machine's numbers are visually distinct from a pulled remote
 # board's. Unset = no header, the prior behavior.
-# LOCAL_MACHINE_NAME="MacBook"
+# LOCAL_MACHINE_NAME="laptop"
 
 # Optional per-board liveness check, one variable per board name (uppercased,
 # non-alphanumerics become "_"). Exit 0 means up, 1 down, 2 the check's own login
