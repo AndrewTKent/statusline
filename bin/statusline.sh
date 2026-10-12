@@ -46,6 +46,7 @@ yellow='\033[38;2;230;200;0m'
 white='\033[38;2;220;220;220m'
 magenta='\033[38;2;180;140;255m'
 dim='\033[38;2;220;220;220m'
+bold='\033[1m'
 reset='\033[0m'
 
 sep=" ${dim}│${reset} "
@@ -1412,6 +1413,7 @@ render_shared_account_snapshot() {
         printf -v header_account '%-*s' "$name_width" "acct"
         board_header="  ${header_account} $(_shared_ralign "5h" 4)  $(_shared_ralign "reset" 6)   $(_shared_ralign "week" 4)   $(_shared_ralign "$board_scoped_label" 5)  $(_shared_ralign "reset" 6)"
         _shared_emit "${dim}%s${reset}" "$board_header"
+        [ -n "${LOCAL_MACHINE_NAME:-}" ] && _shared_emit "${bold}${white}■ %s${reset}" "$LOCAL_MACHINE_NAME"
         while IFS=$'\037' read -r row_label row_five row_five_reset row_five_stale row_five_pending \
             row_seven row_seven_reset row_seven_stale row_seven_pending row_scoped row_scoped_label \
             row_scoped_reset row_scoped_stale row_scoped_pending row_expired row_leases; do

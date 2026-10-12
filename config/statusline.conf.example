@@ -114,6 +114,12 @@
 # line and the directory under ~/.accounts/remote.
 # REMOTE_ACCOUNT_BOARDS="devbox:devbox"
 
+# Name THIS machine's own row group, the same way REMOTE_ACCOUNT_BOARDS names
+# another one's. Purely cosmetic: a bold header line above the local account
+# rows, so this machine's numbers are visually distinct from a pulled remote
+# board's. Unset = no header, the prior behavior.
+# LOCAL_MACHINE_NAME="MacBook"
+
 # Optional per-board liveness check, one variable per board name (uppercased,
 # non-alphanumerics become "_"). Exit 0 means up, 1 down, 2 the check's own login
 # expired, anything else unknown. Only a board that reports down is never
