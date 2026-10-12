@@ -360,6 +360,13 @@ def binding_usage(row: dict[str, Any]) -> float:
     return max(values, default=101.0)
 
 
+def has_credit_headroom(row: dict[str, Any]) -> bool:
+    # Past the plan's limits Codex draws on purchased credits until the spend control stops it.
+    limits = row.get("rate_limits") if isinstance(row.get("rate_limits"), dict) else {}
+    credits = limits.get("credits") if isinstance(limits.get("credits"), dict) else {}
+    return bool(credits.get("has_credits")) and not limits.get("spend_control_reached")
+
+
 def pick_account(
     accounts: dict[str, dict[str, str]],
     usage: dict[str, dict[str, Any]],
@@ -380,7 +387,7 @@ def pick_account(
         and label in usage
         and not usage[label].get("error")
         and now - float(usage[label].get("fetched_at", 0)) <= USAGE_MAX_AGE_S
-        and binding_usage(usage[label]) < 100
+        and (binding_usage(usage[label]) < 100 or has_credit_headroom(usage[label]))
     ]
     return min(fresh, key=lambda label: (binding_usage(usage[label]), label), default=None)
 

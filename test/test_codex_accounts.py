@@ -155,6 +155,24 @@ class CodexAccountsTest(unittest.TestCase):
             "personal",
         )
 
+    def test_an_account_past_its_limit_routes_on_credits_after_plan_headroom(self) -> None:
+        now = time.time()
+        accounts = {"spent": {"home": "/tmp/spent"}, "broke": {"home": "/tmp/broke"}}
+        usage = {
+            "spent": {"fetched_at": now, "rate_limits": {"primary": {"used_percent": 100},
+                                                        "credits": {"has_credits": True, "balance": "45466.05"}}},
+            "broke": {"fetched_at": now, "rate_limits": {"primary": {"used_percent": 100},
+                                                        "credits": {"has_credits": False, "balance": "0"}}},
+        }
+        self.assertEqual(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now), "spent")
+
+        usage["broke"]["rate_limits"] = {"primary": {"used_percent": 90}}
+        self.assertEqual(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now), "broke")
+
+        usage["broke"]["rate_limits"] = {"primary": {"used_percent": 100}}
+        usage["spent"]["rate_limits"]["spend_control_reached"] = True
+        self.assertIsNone(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now))
+
     def test_set_mode_selects_the_pin_even_when_another_account_is_fresher(self) -> None:
         now = time.time()
         accounts = {"work": {"home": "/tmp/work"}, "personal": {"home": "/tmp/personal"}}
