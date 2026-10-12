@@ -361,10 +361,16 @@ def binding_usage(row: dict[str, Any]) -> float:
 
 
 def has_credit_headroom(row: dict[str, Any]) -> bool:
-    # Past the plan's limits Codex draws on purchased credits until the spend control stops it.
+    # Past the plan's limits Codex draws on credits. Only a prepaid balance counts: a workspace
+    # reports has_credits with no balance, and that bills as it goes.
     limits = row.get("rate_limits") if isinstance(row.get("rate_limits"), dict) else {}
     credits = limits.get("credits") if isinstance(limits.get("credits"), dict) else {}
-    return bool(credits.get("has_credits")) and not limits.get("spend_control_reached")
+    if limits.get("spend_control_reached"):
+        return False
+    try:
+        return float(credits.get("balance")) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def pick_account(

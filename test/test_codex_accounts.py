@@ -155,22 +155,27 @@ class CodexAccountsTest(unittest.TestCase):
             "personal",
         )
 
-    def test_an_account_past_its_limit_routes_on_credits_after_plan_headroom(self) -> None:
+    def test_an_account_past_its_limit_routes_on_its_prepaid_balance_after_plan_headroom(self) -> None:
         now = time.time()
-        accounts = {"spent": {"home": "/tmp/spent"}, "broke": {"home": "/tmp/broke"}}
+        accounts = {"spent": {"home": "/tmp/spent"}, "fresh": {"home": "/tmp/fresh"}}
         usage = {
             "spent": {"fetched_at": now, "rate_limits": {"primary": {"used_percent": 100},
                                                         "credits": {"has_credits": True, "balance": "45466.05"}}},
-            "broke": {"fetched_at": now, "rate_limits": {"primary": {"used_percent": 100},
-                                                        "credits": {"has_credits": False, "balance": "0"}}},
+            "fresh": {"fetched_at": now, "rate_limits": {"primary": {"used_percent": 90}}},
         }
+        self.assertEqual(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now), "fresh")
+
+        del accounts["fresh"]
         self.assertEqual(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now), "spent")
 
-        usage["broke"]["rate_limits"] = {"primary": {"used_percent": 90}}
-        self.assertEqual(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now), "broke")
-
-        usage["broke"]["rate_limits"] = {"primary": {"used_percent": 100}}
         usage["spent"]["rate_limits"]["spend_control_reached"] = True
+        self.assertIsNone(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now))
+
+    def test_workspace_credits_with_no_prepaid_balance_never_route_past_the_limit(self) -> None:
+        now = time.time()
+        accounts = {"team": {"home": "/tmp/team"}}
+        usage = {"team": {"fetched_at": now, "rate_limits": {"primary": {"used_percent": 100},
+                                                            "credits": {"has_credits": True, "balance": None}}}}
         self.assertIsNone(codex_accounts.pick_account(accounts, usage, {"mode": "auto"}, now=now))
 
     def test_set_mode_selects_the_pin_even_when_another_account_is_fresher(self) -> None:
