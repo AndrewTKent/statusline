@@ -21,6 +21,7 @@ JOBS_FILE = "jobs.json"
 JOB_FILE = "job.json"
 REPORT_FILE = "report.md"
 QUEUE_FILE = "lane-queue.txt"
+AFTER_FILE = "after"
 SENT_FILES = {"brief.md", "launch.sh"}
 ROUTER_STATE_GLOB = "account-router-*.json"
 ROUTER_PID = re.compile(r"account-router-(\d+)\.json$")
@@ -247,7 +248,17 @@ def codex_in(worktree: str) -> bool:
     return False
 
 
-def session_state(tmux_alive: bool, worktree: str, router: dict, queued: bool) -> str:
+def parent_slug(directory: Path) -> str:
+    """The lane a stacked lane waits on to raise, named in its `after` file."""
+    try:
+        return (directory / AFTER_FILE).read_text().strip()
+    except OSError:
+        return ""
+
+
+def session_state(
+    tmux_alive: bool, worktree: str, router: dict, queued: bool, after: str
+) -> str:
     """A tmux session left at a bare shell after its router exited is not running.
     A job naming no worktree cannot be matched to a router, so tmux is all there is."""
     if not tmux_alive:
@@ -258,7 +269,8 @@ def session_state(tmux_alive: bool, worktree: str, router: dict, queued: bool) -
     if queued:
         return "queued"
     if worktree and not router and not codex_in(worktree):
-        return "gone"
+        # A stacked lane's pane runs a waiter until its parent raises.
+        return "waiting" if after else "gone"
     return "running"
 
 
@@ -270,12 +282,14 @@ def job_row(directory: Path, live: set[str], queue: list[str]) -> dict | None:
     report = report_status(directory / REPORT_FILE)
     router = router_state_for(worktree)
     queued = directory.name in queue
-    state = report or session_state(directory.name in live, worktree, router, queued)
+    after = parent_slug(directory)
+    state = report or session_state(directory.name in live, worktree, router, queued, after)
     session = session_dir(str(router.get("session_id") or ""))
     return {
         "state": state,
         "held_until": as_int(router.get("held_until")),
         "queue_position": queue.index(directory.name) + 1 if queued else 0,
+        "after": after,
         "branch": str(job.get("branch") or ""),
         "head": git_head(worktree),
         "account": str(router.get("label") or ""),
