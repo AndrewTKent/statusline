@@ -170,6 +170,18 @@ class TestState:
 
         assert (row["state"], row["held_until"]) == ("held", 5000)
 
+    def test_a_stacked_lane_running_only_its_waiter_publishes_waiting_and_its_parent(
+        self, box, monkeypatch
+    ):
+        directory = write_job(box)
+        (directory / "after").write_text("iri-8386\n")
+        live(monkeypatch, "demo")
+        monkeypatch.setattr(remote_jobs, "report_status", lambda _path: None)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["after"]) == ("waiting", "iri-8386")
+
     def test_a_report_wins_over_a_session_that_is_still_alive(self, box, monkeypatch):
         directory = write_job(box)
         (directory / "report.md").write_text("status: done\nbranch pushed\n")
