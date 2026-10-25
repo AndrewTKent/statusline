@@ -1587,35 +1587,8 @@ def set_entry_blob(entry: dict, blob: str) -> None:
 
 
 def mark_auth_dead(label: str, entry: dict, now_ts: float) -> None:
-    """Record a server-rejected refresh; notify only on the transition."""
-    first_time = not entry.get("auth_dead_at")
+    """Record a server-rejected refresh."""
     entry["auth_dead_at"] = int(now_ts)
-    if first_time:
-        _notify_needs_login(label)
-
-
-def notifications_enabled() -> bool:
-    raw = os.environ.get("STATUSLINE_NOTIFY") or _conf_var("STATUSLINE_NOTIFY")
-    return raw.strip() == "1"
-
-
-def _notify_needs_login(label: str) -> None:
-    if not notifications_enabled():
-        return
-    try:
-        subprocess.run(
-            [
-                "osascript",
-                "-e",
-                f'display notification "{label} needs /login — routing around it" '
-                'with title "accounts"',
-            ],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except Exception:
-        pass
 
 
 def _persist_plan_canceled(label: str, canceled: bool) -> None:

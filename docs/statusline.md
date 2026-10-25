@@ -70,22 +70,13 @@ Set `SHARED_ACCOUNT_SNAPSHOT=1` to make account and quota rendering read-only an
 
 Shared mode uses its own lightweight presentation: the default layout keeps the
 account board, while compact terminal formats use one line. It still refreshes
-the terminal title and router state, but skips legacy notifications and history writes.
+the terminal title and router state, but skips legacy history writes.
 
 Claude Code's `statusLine.refreshInterval` controls renderer cadence. A 60-second interval matches the foreground account watcher and avoids repeated work for minute-resolution quota data.
 
 ### Terminal tab titles
 
 The script sets the terminal tab title (via ANSI escape) to `repo-name` on main/master, or `repo-name (branch)` on feature branches. Useful in Zed, iTerm2, and other terminals to tell sessions apart at a glance.
-
-### Notifications
-
-macOS Notification Center alerts are off by default; opt in with
-`STATUSLINE_NOTIFY=1` (exported, or set in `~/.claude/statusline.conf`).
-When enabled they fire once per threshold, deduped:
-- **Rate limit** at 80%, 90%, 95%
-- **Context** at 80%, 95%
-- **Budget** at 90%, 100%
 
 ### Automatic account detection
 
@@ -106,8 +97,7 @@ Claude Code pipes a JSON status blob into the script via stdin on every tool cal
 7. **Interpolates** usage between polls — tracks velocity across consecutive API responses for smooth fractional percentages
 8. **Builds** the budget row (if `DAILY_BUDGET` is set) and the optional multi-account reset board (if `SHOW_ACCOUNT_RESETS=1`)
 9. **Sets** terminal tab title to repo + branch
-10. **Checks** notification thresholds when `STATUSLINE_NOTIFY=1` (fires once per crossing, deduped)
-11. **Renders** in your chosen format, falling back to `narrow` under `NARROW_THRESHOLD` columns
+10. **Renders** in your chosen format, falling back to `narrow` under `NARROW_THRESHOLD` columns
 
 ### Architecture
 
@@ -124,7 +114,6 @@ Claude Code                    statusline.sh
     │                              ├─► read token-scan-summary.json (fallback: token-scan-cache.json)
     │                              ├─► background: fetch /api/oauth/usage (cached 60s)
     │                              ├─► background: refresh /api/oauth/profile (cached 5min)
-    │                              ├─► check notification thresholds
     │                              ├─► set terminal tab title (\033]0;repo (branch)\007)
     │                              │
     │  stdout ANSI ◄──────────────├─► render (default|compact|narrow|sigil|sparkline|rprompt|iterm2)
@@ -175,7 +164,6 @@ Claude Code                    statusline.sh
 | `/tmp/claude/statusline-pr-<repo-ref-key>.json` | PR status cache | 90s TTL |
 | `/tmp/claude/statusline-pr-<repo-ref-key>.json.lock` | PR refresh lock | Persistent file, transient lock |
 | `/tmp/claude/statusline-raw.json` | Raw status blob, for macOS apps | Updated each legacy render; not used in shared snapshot mode |
-| `/tmp/claude/statusline-notif-state.json` | Notification dedup state | Per-threshold |
 | `/tmp/claude/statusline-refresh-<profile>.lock` | Account-keyed background refresh lock | Transient |
 | `/tmp/claude/statusline-creds-mtime-<profile>` | Account-keyed credential mtime detector | Persistent |
 | `/tmp/claude/statusline-token-hash-<profile>` | Account-keyed OAuth token hash detector | Persistent |

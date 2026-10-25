@@ -3116,7 +3116,6 @@ class TestNativeProfiles:
             }
 
         monkeypatch.setattr(accounts, "fetch_profile", profile_for)
-        monkeypatch.setattr(accounts, "_notify_needs_login", lambda _l: None)
 
         assert accounts.sync_profile_credentials(blobs, persist=False) == set()
         entry = blobs["accounts"]["gmail"]
@@ -4852,30 +4851,6 @@ class TestEntryNeedsLogin:
         assert accounts.entry_needs_login(entry, NOW_TS) is False
 
 
-class TestMarkAuthDead:
-    def test_notifies_only_on_transition(self, monkeypatch):
-        calls: list[str] = []
-        monkeypatch.setattr(accounts, "_notify_needs_login", calls.append)
-        entry: dict = {}
-        accounts.mark_auth_dead("gmail", entry, NOW_TS)
-        accounts.mark_auth_dead("gmail", entry, NOW_TS + 60)
-        assert calls == ["gmail"]
-        assert entry["auth_dead_at"] == int(NOW_TS + 60)
-
-
-class TestNotifyNeedsLogin:
-    def test_silent_unless_opted_in(self, monkeypatch):
-        runs: list[list[str]] = []
-        monkeypatch.setattr(accounts.subprocess, "run", lambda cmd, **_kw: runs.append(cmd))
-        monkeypatch.setattr(accounts, "_conf_var", lambda _name: "")
-        monkeypatch.delenv("STATUSLINE_NOTIFY", raising=False)
-        accounts._notify_needs_login("gmail")
-        assert runs == []
-        monkeypatch.setenv("STATUSLINE_NOTIFY", "1")
-        accounts._notify_needs_login("gmail")
-        assert len(runs) == 1 and runs[0][0] == "osascript"
-
-
 class TestVerifyEntryAuth:
     @pytest.fixture(autouse=True)
     def _no_keychain(self, monkeypatch):
@@ -4892,7 +4867,6 @@ class TestVerifyEntryAuth:
         assert accounts.verify_entry_auth("gmail", entry, NOW_TS) == "ok"
 
     def test_rejected_refresh_marks_dead(self, monkeypatch):
-        monkeypatch.setattr(accounts, "_notify_needs_login", lambda _l: None)
 
         def rejected(_blob):
             raise accounts.TokenRefreshError("401")
@@ -4912,7 +4886,6 @@ class TestVerifyEntryAuth:
         assert "auth_dead_at" not in entry
 
     def test_no_usable_refresh_token_marks_dead(self, monkeypatch):
-        monkeypatch.setattr(accounts, "_notify_needs_login", lambda _l: None)
         monkeypatch.setattr(accounts, "refresh_blob_access", lambda _b: None)
         entry = {"blob": _blob(PAST_MS)}
         assert accounts.verify_entry_auth("gmail", entry, NOW_TS) == "dead"
@@ -5080,7 +5053,6 @@ class TestProfileKeychain:
             }
         )
         monkeypatch.setattr(accounts, "kc_read", lambda _svc: dead_item)
-        monkeypatch.setattr(accounts, "_notify_needs_login", lambda _l: None)
         entry = {"blob": _blob(PAST_MS)}
         assert accounts.verify_entry_auth("gmail", entry, NOW_TS) == "dead"
         assert entry["auth_dead_at"] == int(NOW_TS)
@@ -5134,8 +5106,6 @@ class TestMismatchIsVisible:
             "identity_from_profile",
             lambda _p: {"email": "WRONG@x", "org_uuid": "9", "org_type": "t"},
         )
-        notified: list[str] = []
-        monkeypatch.setattr(accounts, "_notify_needs_login", notified.append)
         monkeypatch.setattr(accounts, "_write_0600", lambda _p, _b: None)
         monkeypatch.setattr(accounts, "save_blobs", lambda _b: None)
         blobs = {
@@ -5145,14 +5115,13 @@ class TestMismatchIsVisible:
         }
         accounts.sync_profile_credentials(blobs, persist=True)
         assert "auth_dead_at" not in blobs["accounts"]["gmail"]
-        assert notified == []
 
 
 CONF_TEXT = (
     "# Accounts\n"
     '# ACCOUNT_LABELS="work:*@example.com"\n'
     'ACCOUNT_LABELS="other:o@example.com|o-org work:w@example.com|w-org"  # keep\n'
-    "STATUSLINE_NOTIFY=0"
+    "SHOW_ACCOUNT_RESETS=1"
 )
 WORK_TOKEN = "work:w@example.com|w-org"
 REMOTE = 'PATH="$HOME/.accounts/bin:$HOME/.local/bin:$PATH" accounts'
@@ -5176,11 +5145,11 @@ class TestConfLabelEdit:
 
     def test_appends_the_line_when_the_conf_has_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
-        accounts.CONF_PATH.write_text("STATUSLINE_NOTIFY=0")
+        accounts.CONF_PATH.write_text("SHOW_ACCOUNT_RESETS=1")
 
         accounts.set_conf_label_token("work", WORK_TOKEN)
 
-        assert accounts.CONF_PATH.read_text() == f'STATUSLINE_NOTIFY=0\nACCOUNT_LABELS="{WORK_TOKEN}"\n'
+        assert accounts.CONF_PATH.read_text() == f'SHOW_ACCOUNT_RESETS=1\nACCOUNT_LABELS="{WORK_TOKEN}"\n'
 
 
 class TestMoveAccount:
