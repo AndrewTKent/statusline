@@ -67,7 +67,7 @@ Other ways in: `npx @andrewkent/claude-statusline install`, or copy `bin/statusl
 
 Claude Code pipes a JSON status blob to the script, and it prints one labeled row per fact: model, session time, account, repo, branch, PR, context fill, the 5-hour and weekly windows, and token totals. Rows appear only when their data exists. Rate limits refresh in the background, so a render never waits on the network except to validate a changed credential.
 
-Reference: [docs/statusline.md](docs/statusline.md) (every row, PR badges, notifications, files written).
+Reference: [docs/statusline.md](docs/statusline.md) (every row, PR badges, files written).
 
 ### Formats
 
@@ -94,7 +94,6 @@ Set `FORMAT=` in `~/.claude/statusline.conf` or the `STATUSLINE_FORMAT` env var.
 | `ACCOUNT_LABELS`, `LABEL_COLORS` | Email pattern → short account tag, and its color |
 | `SHOW_ACCOUNT_RESETS` | Adds the per-account board |
 | `SHARED_ACCOUNT_SNAPSHOT` | Read account and quota rows only from the `accounts` snapshot |
-| `STATUSLINE_NOTIFY` | Opt in to macOS threshold notifications |
 | `WORK_PATHS`, `PERSONAL_PATHS`, `WORK_KEYWORDS`, `PERSONAL_KEYWORDS` | Work/personal token classifier |
 
 ## Codex status line
