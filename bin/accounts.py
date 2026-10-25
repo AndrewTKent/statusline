@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import uuid
 from contextlib import contextmanager
@@ -236,11 +237,16 @@ def fetch_profile(access_token: str, timeout: float = 4.0) -> dict | None:
     return data if isinstance(data, dict) and data.get("account") else None
 
 
+class PlanCanceled(Exception):
+    """The token is valid but its org's plan no longer allows OAuth."""
+
+
 def fetch_usage(access_token: str, timeout: float = 4.0) -> dict | None:
     """GET /api/oauth/usage as a pure read with the account's access token.
     Returns the parsed usage dict, or None on any failure (401 on an expired
-    access token, network error, bad JSON). Never uses the refresh token, so
-    it can't rotate a shared account's credential."""
+    access token, network error, bad JSON); raises PlanCanceled when the org
+    lost OAuth access. Never uses the refresh token, so it can't rotate a
+    shared account's credential."""
     req = urllib.request.Request(
         USAGE_URL,
         headers={
@@ -254,9 +260,21 @@ def fetch_usage(access_token: str, timeout: float = 4.0) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 403 and _error_code(e) == "oauth_not_allowed_for_organization":
+            raise PlanCanceled() from e
+        return None
     except Exception:
         return None
     return data if isinstance(data, dict) and "five_hour" in data else None
+
+
+def _error_code(e: urllib.error.HTTPError) -> str | None:
+    try:
+        details = json.loads(e.read().decode())["error"]["details"]
+        return details.get("error_code")
+    except Exception:
+        return None
 
 
 def refresh_blob_access(blob: str, timeout: float = 15.0) -> str | None:
@@ -1600,6 +1618,19 @@ def _notify_needs_login(label: str) -> None:
         pass
 
 
+def _persist_plan_canceled(label: str, canceled: bool) -> None:
+    with locked():
+        fresh = load_blobs()
+        entry = (fresh.get("accounts") or {}).get(label)
+        if entry is None:
+            return
+        if canceled:
+            entry["plan_canceled_at"] = entry.get("plan_canceled_at") or int(time.time())
+        else:
+            entry.pop("plan_canceled_at", None)
+        save_blobs(fresh)
+
+
 def _persist_auth_dead(label: str) -> None:
     """Stamp + save outside any existing lock (cmd_refresh's failure paths)."""
     with locked():
@@ -1924,10 +1955,18 @@ def poll_blobs_usage(blobs: dict) -> int:
             continue
         if blob != stored_blob and not _token_matches_entry_identity(token, e):
             continue
-        usage = fetch_usage(token)
+        try:
+            usage = fetch_usage(token)
+        except PlanCanceled:
+            if not e.get("plan_canceled_at"):
+                e["plan_canceled_at"] = now
+                _persist_plan_canceled(label, True)
+            continue
         if usage is None:
             failed += 1
             continue
+        if e.pop("plan_canceled_at", None):
+            _persist_plan_canceled(label, False)
         fresh[f"{e.get('email')}|{e.get('org_uuid')}"] = usage_to_reset_row(
             e.get("email"), e.get("org_uuid"), usage, now
         )
@@ -1957,6 +1996,7 @@ def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dic
         if f"{key}|fable" in session_limits:
             effs["fable"] = 100.0
         last_seen = row.get("last_seen")
+        canceled = bool(e.get("plan_canceled_at"))
         rows.append(
             {
                 "label": label,
@@ -1964,7 +2004,9 @@ def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dic
                 "five_hour": effs["five_hour"],
                 "seven_day": effs["seven_day"],
                 "fable": effs["fable"],
-                "expired": entry_needs_login(e, now_ts),
+                # A canceled plan routes like a dead login; renderers name it apart.
+                "expired": canceled or entry_needs_login(e, now_ts),
+                "canceled": canceled,
                 "active": label == active_label,
                 "stale": not last_seen or (now_ts - last_seen) > STALE_AFTER_S,
             }
@@ -2122,6 +2164,7 @@ def write_statusline_snapshot(blobs: dict, *, error: str | None) -> dict:
             ),
             "scoped": scoped_snapshot,
             "expired": entry_needs_login(entry, now_ts),
+            "canceled": bool(entry.get("plan_canceled_at")),
             "live_leases": lease_counts.get(label, 0),
         }
     last_success = _snapshot_previous_success()
@@ -3383,7 +3426,9 @@ def cmd_status(_args) -> None:
         pct = "—" if r["five_hour"] is None else f"{r['five_hour']:.0f}%"
         spct = "—" if r["seven_day"] is None else f"{r['seven_day']:.0f}%"
         fpct = "—" if r["fable"] is None else f"{r['fable']:.0f}%"
-        if r["expired"]:
+        if r.get("canceled"):
+            flag = "  ⚠canceled"
+        elif r["expired"]:
             flag = "  ⚠login"
         elif r["label"] in excludes:
             flag = "  [excluded]"
@@ -3411,7 +3456,9 @@ def cmd_ls(_args) -> None:
     print(f"{'':2}{'label':<12} {'email':<32} {'5h':>6} {'7d':>6} {'fable':>6}")
     any_expired = False
     for r in rows:
-        if r["expired"]:
+        if r.get("canceled"):
+            suffix = "  CANCELED — plan has no Claude Code access"
+        elif r["expired"]:
             suffix = "  EXPIRED — /login to refresh"
             any_expired = True
         elif r["label"] in blocked_labels:

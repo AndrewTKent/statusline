@@ -958,7 +958,7 @@ remote_board_lines() {
             ((.value.scoped // [] | map(select((.label // "" | ascii_downcase) == "fable")) | first) // {}) as $fable |
             [.key, (.value.five_hour.used_pct // ""), (.value.five_hour.resets_at // ""),
              (.value.seven_day.used_pct // ""), ($fable.used_pct // ""), ($fable.resets_at // ""),
-             (.value.expired // false)] | map(tostring) | join("")
+             (if (.value.canceled // false) then "canceled" else (.value.expired // false) end)] | map(tostring) | join("")
         ' "$board_dir/statusline-snapshot.json" 2>/dev/null)
         while IFS=$RB_SEP read -r row_label row_five row_five_reset row_seven row_fable row_fable_reset row_expired; do
             [ -z "$row_label" ] && continue
@@ -978,6 +978,7 @@ remote_board_lines() {
             printf -v pad_name '%-*s' "$name_width" "$row_label"
             suffix=""
             [ "$row_expired" = "true" ] && suffix=" ${red}⚠ needs reauth${reset}"
+            [ "$row_expired" = "canceled" ] && suffix=" ${red}⚠ plan canceled${reset}"
             printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$row_five" 4)${reset}  ${dim}$(_rb_ralign "$row_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$row_seven" 4)${reset}   ${fable_color}$(_rb_ralign "$row_fable" 5)${reset}  ${dim}$(_rb_ralign "$row_fable_reset" 6)${reset}${suffix}"
         done <<< "$rows"
         # The board shows the box's whole account set, Codex included. Codex has no
@@ -1124,7 +1125,7 @@ render_shared_account_snapshot() {
                  (if ($row_account.seven_day | has("stale")) then $row_account.seven_day.stale else true end), ($row_account.seven_day.pending_reset // false),
                  ($row_scoped.used_pct // ""), ($row_scoped.label // $row_scoped.kind // ""), ($row_scoped.resets_at // ""),
                  (if ($row_scoped | length) == 0 then false elif ($row_scoped | has("stale")) then $row_scoped.stale else true end), ($row_scoped.pending_reset // false),
-                 ($row_account.expired // false), ($row_account.live_leases // 0)] | map(tostring) | join("\u001f")
+                 (if ($row_account.canceled // false) then "canceled" else ($row_account.expired // false) end), ($row_account.live_leases // 0)] | map(tostring) | join("\u001f")
             ] | join("\n") | @sh)
         ' <<< "$snapshot" 2>/dev/null) || snapshot_values=""
         if [ -n "$snapshot_values" ]; then
@@ -1433,6 +1434,7 @@ render_shared_account_snapshot() {
             [ "$row_scoped" != "—" ] && scoped_color=$(color_for_pct "${row_scoped%\%}")
             { [ "$row_five_stale" = "true" ] || [ "$row_seven_stale" = "true" ] || [ "$row_scoped_stale" = "true" ]; } && row_suffix=" ${dim}~ stale${reset}"
             [ "$row_expired" = "true" ] && row_suffix+=" ${red}⚠ needs reauth${reset}"
+            [ "$row_expired" = "canceled" ] && row_suffix=" ${red}⚠ plan canceled${reset}"
             local padded_name
             printf -v padded_name '%-*s' "$name_width" "$row_display"
             _shared_emit "%b${white}%s${reset} ${five_color}%s${reset}  ${dim}%s${reset}   ${seven_color}%s${reset}   ${scoped_color}%s${reset}  ${dim}%s${reset}%b" \
@@ -2693,8 +2695,13 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
         _US=$'\x1f'
         _name_w=9
         ACCOUNTS_EXPIRED_LOOKUP=""
+        ACCOUNTS_CANCELED_LOOKUP=""
         ACTIVE_SESSION_LIMITS_LOOKUP=""
         if [ -f "$accounts_blobs" ]; then
+            ACCOUNTS_CANCELED_LOOKUP=$(jq -r '
+                (.accounts // {}) | to_entries[] | .value |
+                select((.plan_canceled_at // null) != null) |
+                "\(.email)|\(.org_uuid)"' "$accounts_blobs" 2>/dev/null)
             ACCOUNTS_EXPIRED_LOOKUP=$(jq -r --argjson now "$now_ar" '
                 (.accounts // {}) | to_entries[] | .value |
                 (try ((.blob | fromjson).claudeAiOauth) catch null) as $oauth |
@@ -2924,6 +2931,11 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
                 if [ -n "$ACCOUNTS_EXPIRED_LOOKUP" ] && \
                    printf '%s\n' "$ACCOUNTS_EXPIRED_LOOKUP" | grep -qxF "${em}|${uuid}"; then
                     exp_suffix=" ${red}⚠ needs reauth${reset}"
+                fi
+                if [ -n "$ACCOUNTS_CANCELED_LOOKUP" ] && \
+                   printf '%s\n' "$ACCOUNTS_CANCELED_LOOKUP" | grep -qxF "${em}|${uuid}"; then
+                    stale_suffix=""
+                    exp_suffix=" ${red}⚠ plan canceled${reset}"
                 fi
 
                 # ── Per-account row (new stacked layout) ──
