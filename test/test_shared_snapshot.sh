@@ -98,7 +98,7 @@ cat > "$TEST_HOME/.accounts/statusline-snapshot.json" <<JSON
       "live_leases": 0
     },
     "lapsed": {
-      "five_hour": {"used_pct": 0, "resets_at": null, "observed_at": 1, "stale": true, "pending_reset": false},
+      "five_hour": {"used_pct": 4, "resets_at": null, "observed_at": 1, "stale": true, "pending_reset": false},
       "seven_day": {"used_pct": 98, "resets_at": null, "observed_at": 1, "stale": true, "pending_reset": false},
       "scoped": [],
       "expired": false,
