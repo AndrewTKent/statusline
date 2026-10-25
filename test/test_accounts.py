@@ -1478,6 +1478,18 @@ class TestAccountEligibility:
         rows = accounts.route_rows(blobs, None, 2_000_000_000.0)
         assert [r["label"] for r in rows] == ["B", "A"]
 
+    def test_a_canceled_plan_is_never_routed(self, monkeypatch):
+        monkeypatch.setattr(accounts, "load_resets", lambda: {
+            "a@x|o1": {"five_hour_pct": 80.0, "seven_day_pct": 80.0, "last_seen": 2_000_000_000.0},
+            "b@x|o2": {"five_hour_pct": 1.0, "seven_day_pct": 1.0, "last_seen": 2_000_000_000.0},
+        })
+        blobs = {"accounts": {
+            "A": {"blob": _live_blob("a"), "email": "a@x", "org_uuid": "o1"},
+            "B": {"blob": _live_blob("b"), "email": "b@x", "org_uuid": "o2", "plan_canceled_at": 1},
+        }}
+        rows = accounts.route_rows(blobs, None, 2_000_000_000.0)
+        assert accounts.pick_profile_route(rows, set(), None) == "A"
+
     def test_route_rows_unknown_axis_sorts_last(self, monkeypatch):
         # C's weekly was never polled → _rate_eligible can't pick it; the board
         # must not show it above fully-known rows ("sorted best-first").
@@ -2155,6 +2167,75 @@ class TestPollBlobsUsage:
 
         with pytest.raises(accounts.AccountsError, match="usage poll failed for 1 account"):
             accounts.poll_blobs_usage(blobs)
+
+    def test_a_canceled_plan_is_flagged_not_failed(self, monkeypatch, capsys):
+        blobs = {
+            "accounts": {
+                "work": {"blob": _live_blob("work"), "email": "work@example.com", "org_uuid": "org-work"},
+                "lapsed": {"blob": _live_blob("lapsed"), "email": "lapsed@example.com", "org_uuid": "org-lapsed"},
+            }
+        }
+
+        def fetch(token):
+            if token == "lapsed":
+                raise accounts.PlanCanceled()
+            return {"five_hour": {"utilization": 12}}
+
+        monkeypatch.setattr(accounts.time, "time", lambda: 2_000.0)
+        monkeypatch.setattr(accounts, "profile_live_blob", lambda _label: None)
+        monkeypatch.setattr(accounts, "fetch_usage", fetch)
+        monkeypatch.setattr(accounts, "usage_to_reset_row", lambda *_args: {})
+        monkeypatch.setattr(accounts, "merge_reset_rows", lambda _rows: None)
+        persisted = []
+        monkeypatch.setattr(accounts, "_persist_plan_canceled", lambda *args: persisted.append(args))
+
+        assert accounts.poll_blobs_usage(blobs) == 1
+
+        assert blobs["accounts"]["lapsed"]["plan_canceled_at"] == 2_000
+        assert persisted == [("lapsed", True)]
+        assert "usage poll failed" not in capsys.readouterr().err
+
+    def test_a_usage_answer_clears_the_canceled_flag(self, monkeypatch):
+        blobs = {
+            "accounts": {
+                "back": {"blob": _live_blob("back"), "email": "back@example.com",
+                         "org_uuid": "org-back", "plan_canceled_at": 1_000},
+            }
+        }
+        monkeypatch.setattr(accounts.time, "time", lambda: 2_000.0)
+        monkeypatch.setattr(accounts, "profile_live_blob", lambda _label: None)
+        monkeypatch.setattr(accounts, "fetch_usage", lambda _token: {"five_hour": {"utilization": 12}})
+        monkeypatch.setattr(accounts, "usage_to_reset_row", lambda *_args: {})
+        monkeypatch.setattr(accounts, "merge_reset_rows", lambda _rows: None)
+        persisted = []
+        monkeypatch.setattr(accounts, "_persist_plan_canceled", lambda *args: persisted.append(args))
+
+        accounts.poll_blobs_usage(blobs)
+
+        assert "plan_canceled_at" not in blobs["accounts"]["back"]
+        assert persisted == [("back", False)]
+
+
+class TestFetchUsageRefusals:
+    @pytest.mark.parametrize(
+        "error_code, canceled",
+        [("oauth_not_allowed_for_organization", True), ("some_other_permission_error", False)],
+    )
+    def test_only_the_org_oauth_refusal_means_canceled(self, monkeypatch, error_code, canceled):
+        body = json.dumps({"error": {"type": "permission_error", "details": {"error_code": error_code}}})
+
+        def refuse(_req, timeout):
+            raise accounts.urllib.error.HTTPError(
+                accounts.USAGE_URL, 403, "Forbidden", {}, io.BytesIO(body.encode())
+            )
+
+        monkeypatch.setattr(accounts.urllib.request, "urlopen", refuse)
+
+        if canceled:
+            with pytest.raises(accounts.PlanCanceled):
+                accounts.fetch_usage("token")
+        else:
+            assert accounts.fetch_usage("token") is None
 
 
 def _live_blob(atok, future_ms=3_000_000_000_000):

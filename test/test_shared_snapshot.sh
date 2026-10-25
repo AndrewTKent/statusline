@@ -96,6 +96,14 @@ cat > "$TEST_HOME/.accounts/statusline-snapshot.json" <<JSON
       "scoped": [],
       "expired": true,
       "live_leases": 0
+    },
+    "lapsed": {
+      "five_hour": {"used_pct": 4, "resets_at": null, "observed_at": 1, "stale": true, "pending_reset": false},
+      "seven_day": {"used_pct": 98, "resets_at": null, "observed_at": 1, "stale": true, "pending_reset": false},
+      "scoped": [],
+      "expired": false,
+      "canceled": true,
+      "live_leases": 0
     }
   }
 }
@@ -132,6 +140,11 @@ for expected in "Claude Test" "work" "42.5%" "66%" "17%" "fable" "Personal" "pen
 done
 [[ "$output" != *'■'* ]] || { printf 'a local-machine header rendered with LOCAL_MACHINE_NAME unset\n' >&2; exit 1; }
 plain_output=$(printf '%s' "$output" | sed $'s/\033\\[[0-9;]*m//g')
+lapsed_line=$(printf '%s\n' "$plain_output" | grep 'Lapsed' || true)
+[[ "$lapsed_line" == *'plan canceled'* && "$lapsed_line" != *'stale'* ]] || {
+    printf 'a canceled plan does not read as canceled:\n%s\n' "$plain_output" >&2
+    exit 1
+}
 [[ "$plain_output" == *$'model   Claude Test · high\n'* ]] || { printf 'model and effort are jammed together\n' >&2; exit 1; }
 [[ "$plain_output" == *$'repo    project\ntree    ⌥ metrics-pane\nbranch  feature/agent-metrics-w…\npr      #9 Cached local PR\n'* ]] || {
     printf 'checkout identity is not split into readable rows\n' >&2
