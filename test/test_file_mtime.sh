@@ -9,8 +9,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # statusline.sh reads stdin at top level, so extract just the function.
-sed -n '/^file_mtime()/,/^}/p' bin/statusline.sh > "$tmp/fns.sh"
+sed -n '/^file_mtime()/,/^}/p; /^file_size()/,/^}/p' bin/statusline.sh > "$tmp/fns.sh"
 grep -q 'file_mtime()' "$tmp/fns.sh" || { echo "FAIL: extraction broke"; exit 1; }
+grep -q 'file_size()' "$tmp/fns.sh" || { echo "FAIL: file_size extraction broke"; exit 1; }
 # shellcheck disable=SC1091
 source "$tmp/fns.sh"
 
@@ -67,3 +68,35 @@ age=$(( 1786469125 - junk_mtime ))
 [ "$age" -gt 0 ] || fail "age from empty mtime should stay usable, got $age"
 
 echo "PASS: file_mtime probes GNU before BSD and rejects non-numeric output"
+
+# file_size: same probe order. GNU `stat -f %z FILE` reads %z as a second
+# operand, prints the filesystem report for FILE and exits 1, so a BSD-first
+# probe captured that report ahead of the real size and never yielded a number.
+size_expected=$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_size)' "$target")
+cat > "$shim/stat" <<GNU
+#!/usr/bin/env bash
+if [ "\$1" = "-c" ]; then printf '%s\n' "$size_expected"; exit 0; fi
+if [ "\$1" = "-f" ]; then printf 'File: "%s"\nBlocks: Total: 419872768  Free: 4242\n' "\$3"; exit 1; fi
+exit 1
+GNU
+chmod +x "$shim/stat"
+[ "$(file_size "$target")" = "$size_expected" ] || fail "GNU stat size, got [$(file_size "$target")]"
+
+cat > "$shim/stat" <<BSD
+#!/usr/bin/env bash
+if [ "\$1" = "-f" ]; then printf '%s\n' "$size_expected"; exit 0; fi
+echo "stat: illegal option -- \${1#-}" >&2
+exit 1
+BSD
+chmod +x "$shim/stat"
+[ "$(file_size "$target")" = "$size_expected" ] || fail "BSD stat size, got [$(file_size "$target")]"
+
+cat > "$shim/stat" <<'JUNK'
+#!/usr/bin/env bash
+printf 'Type: overlayfs\nBlocks: Total: 419872768\n'
+exit 0
+JUNK
+chmod +x "$shim/stat"
+file_size "$target" >/dev/null && fail "non-numeric stat should make file_size fail"
+
+echo "PASS: file_size probes GNU before BSD and rejects non-numeric output"

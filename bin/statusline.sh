@@ -62,6 +62,16 @@ file_mtime() {
     printf '%s' "$mtime"
 }
 
+# file_size PATH — bytes, empty when unreadable. Same GNU-first probe order as
+# file_mtime: BSD-first (`stat -f %z`) prints GNU's filesystem report before it
+# fails, so the captured value was never a number.
+file_size() {
+    local size
+    size=$(stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null)
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$size"
+}
+
 format_tokens() {
     local num=$1
     if [ "$num" -ge 1000000 ] 2>/dev/null; then
@@ -2256,7 +2266,7 @@ if $needs_refresh || $needs_profile_refresh; then
                                     extra_limit:     ($u.extra_usage.monthly_limit // 0)
                                 }' >> "$hist_file" 2>/dev/null
                             if [ -f "$hist_file" ]; then
-                                hist_size=$(stat -f %z "$hist_file" 2>/dev/null || stat -c %s "$hist_file" 2>/dev/null || echo 0)
+                                hist_size=$(file_size "$hist_file" || echo 0)
                                 if [ "$hist_size" -gt 5000000 ] 2>/dev/null; then
                                     # Byte-truncate then drop the partial first line so readers
                                     # don't have to defend against a corrupt leading record.
@@ -2277,9 +2287,12 @@ usage_data=""
 _usage_cache_seen=0
 _usage_data_source=""
 if [ -f "$cache_file" ]; then
-    _usage_cache_id_before=$(stat -f '%i:%m' "$cache_file" 2>/dev/null || stat -c '%i:%Y' "$cache_file" 2>/dev/null || echo "")
+    # GNU spelling first: on Linux and Git Bash, BSD's `stat -f` is --file-system
+    # and prints a report (free blocks included) ahead of failing, so before and
+    # after could differ and the cache was dropped at random.
+    _usage_cache_id_before=$(stat -c '%i:%Y' "$cache_file" 2>/dev/null || stat -f '%i:%m' "$cache_file" 2>/dev/null || echo "")
     usage_data=$(cat "$cache_file" 2>/dev/null)
-    _usage_cache_id_after=$(stat -f '%i:%m' "$cache_file" 2>/dev/null || stat -c '%i:%Y' "$cache_file" 2>/dev/null || echo "")
+    _usage_cache_id_after=$(stat -c '%i:%Y' "$cache_file" 2>/dev/null || stat -f '%i:%m' "$cache_file" 2>/dev/null || echo "")
     if [ -n "$_usage_cache_id_before" ] && [ "$_usage_cache_id_before" = "$_usage_cache_id_after" ]; then
         _usage_cache_seen="${_usage_cache_id_after##*:}"
         _usage_data_source="cache"
