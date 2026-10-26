@@ -25,6 +25,19 @@ Restart Claude Code. Done.
 
 **Requires:** [`jq`](https://jqlang.github.io/jq/) &middot; Claude Code (logged in) &middot; Optional: [`gh`](https://cli.github.com/) for PR badges
 
+### Windows (Git Bash)
+
+The script runs under the Git Bash that Claude Code on Windows already uses; nothing else from MSYS is needed.
+
+1. Install jq: `winget install jqlang.jq`, then **restart the terminal and Claude Code** so both pick up the new `PATH`. A Claude Code started before the install can't find `jq`, and most rows then come out empty.
+2. Copy the script as in the manual install above.
+3. Point `statusLine` at it through `bash`, with the Git Bash form of the path:
+   ```json
+   { "statusLine": { "type": "command", "command": "bash /c/Users/<you>/.claude/statusline.sh", "padding": 0 } }
+   ```
+
+Rate limits come straight from Claude Code's status blob (`rate_limits`), so the session and weekly rows work without the macOS keychain; the OAuth credential in `~/.claude/.credentials.json` is only used for extra usage and the account board.
+
 ## What you see
 
 `default` renders one labeled row per fact — the sample at the top of the [README](../README.md). Every row below `repo` is conditional on data actually being available:
@@ -93,8 +106,8 @@ Claude Code pipes a JSON status blob into the script via stdin on every tool cal
 3. **Resolves** the account label from the OAuth profile cache and updates the daily cost/token ledgers in `~/.claude/`
 4. **Scans** subagent JSONL files for the current session (cached 30s) and reads `token-scan-summary.json` (fallback: `token-scan-cache.json`) for the work/personal token split — kicks off a background `scan-tokens.py` rescan when that cache is stale (>180s)
 5. **Builds** the git/PR segment (branch, dirty, ahead/behind, `gh pr view` cached 90s) and the effort/fast-mode/focus badges
-6. **Refreshes** rate limits and profile from Anthropic's OAuth API in the background (usage cached 60s, profile cached 5min)
-7. **Interpolates** usage between polls — tracks velocity across consecutive API responses for smooth fractional percentages
+6. **Reads** the 5h and 7d windows from the status blob's `rate_limits` when Claude Code sends them, and **refreshes** rate limits and profile from Anthropic's OAuth API in the background (usage cached 60s, or 5min when stdin carries the windows; profile cached 5min). A failed usage poll (e.g. HTTP 429) backs off for 5min instead of re-polling every render
+7. **Interpolates** polled usage between polls — tracks velocity across consecutive API responses for smooth fractional percentages (stdin values are already current and are shown as-is)
 8. **Builds** the budget row (if `DAILY_BUDGET` is set) and the optional multi-account reset board (if `SHOW_ACCOUNT_RESETS=1`)
 9. **Sets** terminal tab title to repo + branch
 10. **Renders** in your chosen format, falling back to `narrow` under `NARROW_THRESHOLD` columns
@@ -165,6 +178,7 @@ Claude Code                    statusline.sh
 | `/tmp/claude/statusline-pr-<repo-ref-key>.json.lock` | PR refresh lock | Persistent file, transient lock |
 | `/tmp/claude/statusline-raw.json` | Raw status blob, for macOS apps | Updated each legacy render; not used in shared snapshot mode |
 | `/tmp/claude/statusline-refresh-<profile>.lock` | Account-keyed background refresh lock | Transient |
+| `/tmp/claude/statusline-usage-backoff-<profile>` | Set by a failed usage poll; suppresses re-polling | 5min; cleared by a good poll or a credential change |
 | `/tmp/claude/statusline-creds-mtime-<profile>` | Account-keyed credential mtime detector | Persistent |
 | `/tmp/claude/statusline-token-hash-<profile>` | Account-keyed OAuth token hash detector | Persistent |
 

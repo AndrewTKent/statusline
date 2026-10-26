@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@andrewkent/claude-statusline"><img alt="npm" src="https://img.shields.io/npm/v/@andrewkent/claude-statusline?color=cb3837&logo=npm&label=npm"></a>
   <a href="https://github.com/AndrewTKent/statusline/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AndrewTKent/statusline/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux-blue">
+  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows%20%28Git%20Bash%29-blue">
   <img alt="dependencies" src="https://img.shields.io/badge/deps-jq-lightgrey">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
@@ -59,7 +59,7 @@ The Claude status line is one bash script with no dependency beyond `jq`.
 curl -fsSL https://raw.githubusercontent.com/AndrewTKent/statusline/main/install.sh | bash
 ```
 
-Restart Claude Code. Requires [`jq`](https://jqlang.github.io/jq/) and a logged-in Claude Code; [`gh`](https://cli.github.com/) is optional, for PR badges.
+Restart Claude Code. Requires [`jq`](https://jqlang.github.io/jq/) and a logged-in Claude Code; [`gh`](https://cli.github.com/) is optional, for PR badges. On Windows, see [Windows (Git Bash)](docs/statusline.md#windows-git-bash).
 
 Other ways in: `npx @andrewkent/claude-statusline install`, or copy `bin/statusline.sh` to `~/.claude/statusline.sh` and point `statusLine` at it ([docs/statusline.md](docs/statusline.md#install)).
 
