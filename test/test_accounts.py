@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -35,6 +36,10 @@ PAIRS = [
     ("work", "*@acme.ai", None),
     ("gmail", "someone@gmail.com", None),
 ]
+
+
+def test_the_suite_never_touches_the_real_home():
+    assert accounts.HOME != Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 
 class TestResolveLabel:
