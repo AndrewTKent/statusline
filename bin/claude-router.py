@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -556,6 +557,25 @@ def in_flight_workflows(session_id: str | None) -> list[dict]:
     ]
 
 
+def accounts_mtime() -> float | None:
+    try:
+        return Path(accounts.__file__).stat().st_mtime
+    except OSError:
+        return None
+
+
+def reload_accounts_on_install(loaded_mtime: float | None) -> float | None:
+    """A supervisor outlives many installs; routing policy follows the installed router."""
+    mtime = accounts_mtime()
+    if mtime is None or mtime == loaded_mtime:
+        return loaded_mtime
+    try:
+        importlib.reload(accounts)
+    except Exception as exc:
+        accounts.log_line(f"router reload failed, keeping the loaded copy: {exc!r}", echo=False)
+    return mtime
+
+
 def handoff_grace_s() -> float:
     try:
         return float(os.environ.get("ACCOUNTS_HANDOFF_GRACE_S", HANDOFF_GRACE_S))
@@ -1070,6 +1090,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
 
     if os.environ.pop("ACCOUNTS_ROUTER_OUTPUT_FROZEN", "") == "1":
         set_synchronized_output(False)
+    accounts_loaded_mtime = accounts_mtime()
     try:
         while True:
             state_path.unlink(missing_ok=True)
@@ -1115,6 +1136,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     time.sleep(interval)
                 except KeyboardInterrupt:
                     continue
+                accounts_loaded_mtime = reload_accounts_on_install(accounts_loaded_mtime)
                 state = read_router_state(state_path)
                 session_id = state.get("session_id") or session_id
                 if session_id != watched_session_id:

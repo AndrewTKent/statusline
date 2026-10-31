@@ -4407,3 +4407,14 @@ class TestHoldForReset:
 
         assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 0
         assert calls[0]["env"]["CLAUDE_CONFIG_DIR"] == HELD["profile"]
+
+
+def test_the_supervisor_reloads_routing_only_after_a_reinstall(monkeypatch):
+    reloads = []
+    monkeypatch.setattr(claude_router.importlib, "reload", reloads.append)
+    monkeypatch.setattr(claude_router, "accounts_mtime", lambda: 2.0)
+
+    assert claude_router.reload_accounts_on_install(2.0) == 2.0
+    assert reloads == []
+    assert claude_router.reload_accounts_on_install(1.0) == 2.0
+    assert reloads == [claude_router.accounts]
