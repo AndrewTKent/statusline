@@ -72,6 +72,8 @@ TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # public Claude Code OAuth client (PKCE, no secret)
 STALE_AFTER_S = 3 * 3600
 SESSION_LIMIT_FALLBACK_S = 5 * 3600
+# The usage API still reports a 5h number for these plans; only a detected session limit walls them.
+PLANS_WITHOUT_FIVE_HOUR_LIMIT = {"Ultra"}
 NATIVE_DAEMON_MIN_VERSION = (2, 1, 220)
 NATIVE_REFRESH_WAIT_S = 5.0
 NATIVE_REFRESH_POLL_S = 0.1
@@ -401,6 +403,7 @@ def identity_from_profile(profile: dict) -> dict:
         "org_uuid": org.get("uuid"),
         "org_type": org.get("organization_type"),
         "rate_limit_tier": org.get("rate_limit_tier"),
+        "plan": org.get("plan_display_name"),
     }
 
 
@@ -1072,6 +1075,7 @@ def _pin_known_profile_login(
         target["email"] = identity["email"] or target.get("email")
         target["org_uuid"] = identity["org_uuid"] or target.get("org_uuid")
         target["org_type"] = identity["org_type"] or target.get("org_type")
+        target["plan"] = identity.get("plan") or target.get("plan")
         write_profile_credentials(target_label, login_blob)
         transferred = True
     if mode.get("policy_scope") == "pane":
@@ -1185,6 +1189,7 @@ def sync_profile_credentials(blobs: dict, *, persist: bool) -> set[str]:
         entry["email"] = identity["email"] or entry.get("email")
         entry["org_uuid"] = identity["org_uuid"] or entry.get("org_uuid")
         entry["org_type"] = identity["org_type"] or entry.get("org_type")
+        entry["plan"] = identity.get("plan") or entry.get("plan")
         changed = True
     if changed and (persist or persist_login):
         save_blobs(blobs)
@@ -1604,6 +1609,16 @@ def _persist_plan_canceled(label: str, canceled: bool) -> None:
         save_blobs(fresh)
 
 
+def _persist_plan(label: str, plan: str) -> None:
+    with locked():
+        fresh = load_blobs()
+        entry = (fresh.get("accounts") or {}).get(label)
+        if entry is None:
+            return
+        entry["plan"] = plan
+        save_blobs(fresh)
+
+
 def _persist_auth_dead(label: str) -> None:
     """Stamp + save outside any existing lock (cmd_refresh's failure paths)."""
     with locked():
@@ -1938,6 +1953,11 @@ def poll_blobs_usage(blobs: dict) -> int:
         if usage is None:
             failed += 1
             continue
+        if not e.get("plan"):
+            plan = identity_from_profile(fetch_profile(token) or {})["plan"]
+            if plan:
+                e["plan"] = plan
+                _persist_plan(label, plan)
         if e.pop("plan_canceled_at", None):
             _persist_plan_canceled(label, False)
         fresh[f"{e.get('email')}|{e.get('org_uuid')}"] = usage_to_reset_row(
@@ -1949,6 +1969,10 @@ def poll_blobs_usage(blobs: dict) -> int:
     if failed:
         print(f"accounts: usage poll failed for {failed} account(s)", file=sys.stderr)
     return len(fresh)
+
+
+def has_five_hour_limit(entry: dict) -> bool:
+    return entry.get("plan") not in PLANS_WITHOUT_FIVE_HOUR_LIMIT
 
 
 def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dict]:
@@ -1964,8 +1988,12 @@ def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dic
         key = f"{e.get('email')}|{e.get('org_uuid')}"
         row = resets_row(resets, e.get("email"), e.get("org_uuid"))
         effs = effective_pcts(row, now_utc())
+        five_hour_limited = has_five_hour_limit(e)
+        if not five_hour_limited:
+            effs["five_hour"] = 0.0
         if key in session_limits:
             effs["five_hour"] = 100.0
+            five_hour_limited = True
         if f"{key}|fable" in session_limits:
             effs["fable"] = 100.0
         last_seen = row.get("last_seen")
@@ -1975,6 +2003,7 @@ def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dic
                 "label": label,
                 "email": e.get("email"),
                 "five_hour": effs["five_hour"],
+                "five_hour_limited": five_hour_limited,
                 "seven_day": effs["seven_day"],
                 "fable": effs["fable"],
                 # A canceled plan routes like a dead login; renderers name it apart.
@@ -2121,10 +2150,11 @@ def write_statusline_snapshot(blobs: dict, *, error: str | None) -> dict:
                     **window,
                 }
             )
+        five_hour_shown = has_five_hour_limit(entry) or key in session_limits
         accounts_snapshot[label] = {
             "five_hour": _snapshot_window(
-                row.get("five_hour_pct"),
-                row.get("five_hour_reset"),
+                row.get("five_hour_pct") if five_hour_shown else None,
+                row.get("five_hour_reset") if five_hour_shown else None,
                 observed_at,
                 now_ts,
                 hard_limited=key in session_limits,
@@ -3396,7 +3426,10 @@ def cmd_status(_args) -> None:
         f"   fable: {next_fable or '(none free)'}"
     )
     for r in rows:
-        pct = "—" if r["five_hour"] is None else f"{r['five_hour']:.0f}%"
+        if not r.get("five_hour_limited", True):
+            pct = "none"
+        else:
+            pct = "—" if r["five_hour"] is None else f"{r['five_hour']:.0f}%"
         spct = "—" if r["seven_day"] is None else f"{r['seven_day']:.0f}%"
         fpct = "—" if r["fable"] is None else f"{r['fable']:.0f}%"
         if r.get("canceled"):
@@ -3442,7 +3475,7 @@ def cmd_ls(_args) -> None:
             suffix = ""
         print(
             f"  {r['label']:<12} {r['email'] or '?':<32} "
-            f"{_fmt_pct(r['five_hour'], r['stale']):>6} "
+            f"{_fmt_pct(r['five_hour'], r['stale']) if r['five_hour_limited'] else 'none':>6} "
             f"{_fmt_pct(r['seven_day'], r['stale']):>6} "
             f"{_fmt_pct(r['fable'], r['stale']):>6}{suffix}"
         )
