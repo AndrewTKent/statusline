@@ -5239,6 +5239,7 @@ class TestMoveAccount:
             monkeypatch.setattr(accounts, name, tmp_path / leaf)
         monkeypatch.setattr(accounts, "_lock_depth", 0)
         monkeypatch.setattr(accounts, "fetch_profile", lambda _token: None)
+        monkeypatch.setattr(accounts, "retire_legacy_route_agent", lambda: None)
         accounts.CLAUDE_HOME.mkdir()
         accounts.CONF_PATH.write_text(CONF_TEXT)
         accounts.save_blobs({"version": 1, "accounts": accounts_map})
@@ -5284,8 +5285,23 @@ class TestMoveAccount:
     def _payload(self, entry=None):
         return {"label": "work", "entry": entry or self.WORK, "label_line": WORK_TOKEN}
 
+    @pytest.mark.parametrize("command", ["export", "import"])
+    def test_export_and_import_refuse_outside_a_move(self, tmp_path, monkeypatch, capsys, command):
+        self._paths(tmp_path, monkeypatch, {"other": self.OTHER})
+        monkeypatch.delenv("ACCOUNTS_MOVE", raising=False)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(self._payload())))
+
+        with pytest.raises(SystemExit):
+            accounts.main([command, "work"] if command == "export" else [command])
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "accounts login --box HOST LABEL" in captured.err
+        assert self._stored() == {"other": self.OTHER}
+
     def test_export_refuses_a_terminal(self, tmp_path, monkeypatch, capsys):
         self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        monkeypatch.setenv("ACCOUNTS_MOVE", "1")
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
         with pytest.raises(SystemExit):
@@ -5297,6 +5313,7 @@ class TestMoveAccount:
         self, tmp_path, monkeypatch, capsys
     ):
         self._paths(tmp_path, monkeypatch, {"work": self.WORK})
+        monkeypatch.setenv("ACCOUNTS_MOVE", "1")
         accounts.CONF_PATH.write_text('ACCOUNT_LABELS="work:stale@example.com|stale-org"\n')
         rotated = _live_blob("rotated-token")
         accounts.ensure_native_profile("work", {"blob": rotated})
@@ -5319,6 +5336,7 @@ class TestMoveAccount:
         profile = accounts.ensure_native_profile("work", {"blob": _live_blob("earlier-token")})
         (profile / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "old@example.com"}}))
         self.keychain[accounts.profile_keychain_service("work")] = _live_blob("earlier-token")
+        monkeypatch.setenv("ACCOUNTS_MOVE", "1")
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(self._payload())))
 
         accounts.cmd_import(types.SimpleNamespace())
@@ -5355,6 +5373,80 @@ class TestMoveAccount:
         accounts.import_account(self._payload(fresh))
 
         assert self._stored()["work"] == fresh
+
+    def _resolves_to_work(self, monkeypatch):
+        monkeypatch.setattr(
+            accounts,
+            "fetch_profile",
+            lambda _token: {
+                "account": {"email": "w@example.com"},
+                "organization": {"uuid": "w-org", "organization_type": "team", "plan_display_name": "Max"},
+            },
+        )
+
+    def test_register_records_the_profile_login_as_the_account_it_resolves_to(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._paths(tmp_path, monkeypatch, {"other": self.OTHER})
+        accounts.CONF_PATH.write_text(CONF_TEXT.replace(f" {WORK_TOKEN}", ""))
+        self._resolves_to_work(monkeypatch)
+        login = _live_blob("box-login-token")
+        profile = accounts.prepare_login_profile("work")
+        (profile / ".credentials.json").write_text(login)
+
+        accounts.main(["register", "work"])
+
+        assert capsys.readouterr().out == "registered work: w@example.com\n"
+        assert self._stored()["work"] == {
+            "blob": login,
+            "email": "w@example.com",
+            "org_uuid": "w-org",
+            "org_type": "team",
+            "plan": "Max",
+        }
+        assert ("work", "w@example.com", "w-org") in accounts.load_label_pairs()
+        assert self.polls == 1
+
+    def test_register_leaves_a_keychain_held_login_in_place(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch, {})
+        self._resolves_to_work(monkeypatch)
+        login = _live_blob("keychain-login-token")
+        service = accounts.profile_keychain_service("work")
+        self.keychain[service] = login
+
+        accounts.register_account("work")
+
+        assert self._stored()["work"]["blob"] == login
+        assert self.keychain[service] == login
+
+    def test_register_refuses_an_account_another_label_holds(self, tmp_path, monkeypatch):
+        stored = {"other": {"blob": "b", "email": "w@example.com", "org_uuid": "w-org"}}
+        self._paths(tmp_path, monkeypatch, stored)
+        self._resolves_to_work(monkeypatch)
+        self.keychain[accounts.profile_keychain_service("work")] = _live_blob("box-login-token")
+
+        with pytest.raises(accounts.AccountsError, match="'other' already holds this account"):
+            accounts.register_account("work")
+
+        assert self._stored() == stored
+        assert accounts.CONF_PATH.read_text() == CONF_TEXT
+
+    @pytest.mark.parametrize(
+        ("login", "refusal"),
+        [(None, "has no login"), (_live_blob("box-login-token"), "did not resolve to an account")],
+        ids=["no-login", "unresolved-login"],
+    )
+    def test_register_refuses_a_profile_without_a_resolvable_login(
+        self, tmp_path, monkeypatch, login, refusal
+    ):
+        self._paths(tmp_path, monkeypatch, {})
+        if login:
+            self.keychain[accounts.profile_keychain_service("work")] = login
+
+        with pytest.raises(accounts.AccountsError, match=refusal):
+            accounts.register_account("work")
+
+        assert self._stored() == {}
 
     @pytest.mark.parametrize("hold", ["pinned", "never_leaves"])
     def test_forget_keeps_a_label_still_in_use(self, tmp_path, monkeypatch, hold):
@@ -5445,7 +5537,7 @@ class TestMoveAccount:
         accounts.cmd_move(types.SimpleNamespace(label="work", to="remote-host", from_host=None))
 
         assert [call["argv"] for call in calls] == [
-            ["ssh", "-o", "BatchMode=yes", "remote-host", f"{REMOTE} import"]
+            ["ssh", "-o", "BatchMode=yes", "remote-host", f"ACCOUNTS_MOVE=1 {REMOTE} import"]
         ]
         assert json.loads(calls[0]["input"])["entry"] == self.WORK
         assert forgotten == ["work"]
@@ -5473,7 +5565,10 @@ class TestMoveAccount:
 
         accounts.cmd_move(types.SimpleNamespace(label="work", to=None, from_host="remote-host"))
 
-        assert [call["argv"][-1].split()[-2:] for call in calls] == [["export", "work"], ["forget", "work"]]
+        assert [call["argv"][-1] for call in calls] == [
+            f"ACCOUNTS_MOVE=1 {REMOTE} export work",
+            f"{REMOTE} forget work",
+        ]
         assert self._stored()["work"] == self.WORK
         assert (accounts.PROFILES_PATH / "work" / ".credentials.json").read_text() == self.WORK["blob"]
         assert capsys.readouterr().out == "imported work\nforgot work\n"
@@ -5488,3 +5583,109 @@ class TestMoveAccount:
             accounts.cmd_move(types.SimpleNamespace(label="work", to=None, from_host="remote-host"))
 
         assert [call["argv"][-1].split()[-2:] for call in calls] == [["export", "work"]]
+
+
+class TestBoxLogin:
+    CODE = "fake-code#fake-state"
+    URL = "https://claude.com/cai/oauth/authorize?code=true&client_id=fake&state=fake"
+    URL_PANE = f"Browser didn't open? Use the url below to sign in:\n\n{URL}\n\nPaste code here if prompted >"
+    BOARD = (
+        "  label        email                                5h     7d  fable\n"
+        "  work         w@example.com                        12%     3%      —\n"
+    )
+
+    def _box(self, monkeypatch, panes, *, tty=True):
+        calls: list[dict] = []
+
+        def run(argv, **kwargs):
+            assert argv[:3] == ["ssh", "-o", "BatchMode=yes"]
+            command = argv[-1]
+            calls.append({"command": command, "input": kwargs.get("input")})
+            if "capture-pane" in command:
+                return subprocess.CompletedProcess([], 0, panes.pop(0) if len(panes) > 1 else panes[0], "")
+            if command.endswith("register work"):
+                return subprocess.CompletedProcess([], 0, "registered work: w@example.com\n", "")
+            if command.endswith(" ls"):
+                return subprocess.CompletedProcess([], 0, self.BOARD, "")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        monkeypatch.setattr(accounts.subprocess, "run", run)
+        monkeypatch.setattr(accounts, "retire_legacy_route_agent", lambda: None)
+        monkeypatch.setattr(accounts.sys, "stdin", types.SimpleNamespace(isatty=lambda: tty))
+        monkeypatch.setattr(accounts.getpass, "getpass", lambda _prompt: self.CODE)
+        monkeypatch.setattr(accounts.time, "sleep", lambda _seconds: None)
+        return calls
+
+    def test_the_browser_code_reaches_the_box_login_over_stdin_and_the_login_is_registered(
+        self, monkeypatch, capsys
+    ):
+        calls = self._box(monkeypatch, [self.URL_PANE, f"{self.URL_PANE}\naccounts-login-exit: 0"])
+
+        accounts.main(["login", "--box", "box-host", "work"])
+
+        out = capsys.readouterr().out
+        assert self.URL in out
+        assert "registered work: w@example.com\n" in out
+        assert out.endswith("work         w@example.com                        12%     3%      —\n")
+        assert all(self.CODE not in call["command"] for call in calls)
+        fed = [call for call in calls if call["input"] == self.CODE]
+        assert len(fed) == 1 and "tmux load-buffer" in fed[0]["command"]
+
+    def test_a_failed_login_is_killed_and_not_registered(self, monkeypatch):
+        calls = self._box(monkeypatch, [self.URL_PANE, f"{self.URL_PANE}\naccounts-login-exit: 1"])
+
+        with pytest.raises(accounts.AccountsError, match="exited 1"):
+            accounts.login_box("work", "box-host")
+
+        commands = [call["command"] for call in calls]
+        assert commands[-1] == "tmux kill-session -t accounts-login-work 2>/dev/null; true"
+        assert not any(command.endswith("register work") for command in commands)
+
+    def test_a_login_that_never_finishes_stops_waiting(self, monkeypatch):
+        self._box(monkeypatch, [self.URL_PANE])
+        monkeypatch.setattr(accounts, "LOGIN_DONE_WAIT_S", 0)
+        sleeps: list[float] = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 50:
+                raise RuntimeError("never stopped waiting")
+
+        monkeypatch.setattr(accounts.time, "sleep", sleep)
+
+        with pytest.raises(accounts.AccountsError, match="the login result did not appear"):
+            accounts.login_box("work", "box-host")
+
+    def test_login_refuses_without_a_terminal(self, monkeypatch):
+        calls = self._box(monkeypatch, [self.URL_PANE], tty=False)
+
+        with pytest.raises(accounts.AccountsError, match="needs a terminal"):
+            accounts.login_box("work", "box-host")
+
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("box", "sync", "expected"),
+        [("box-host", ("sync-host",), "box-host"), (None, ("sync-host",), "sync-host"), (None, (), None)],
+        ids=["configured-box", "first-sync-host", "nothing-configured"],
+    )
+    def test_a_bare_box_flag_logs_in_the_configured_box(
+        self, tmp_path, monkeypatch, capsys, box, sync, expected
+    ):
+        monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+        monkeypatch.delenv("ACCOUNTS_BOX", raising=False)
+        if box:
+            monkeypatch.setenv("ACCOUNTS_BOX", box)
+        monkeypatch.setattr(accounts, "sync_hosts", lambda: sync)
+        monkeypatch.setattr(accounts, "retire_legacy_route_agent", lambda: None)
+        logins: list[tuple[str, str]] = []
+        monkeypatch.setattr(accounts, "login_box", lambda label, host: logins.append((label, host)))
+
+        if expected is None:
+            with pytest.raises(SystemExit):
+                accounts.main(["login", "work", "--box"])
+            assert "name the box" in capsys.readouterr().err
+            assert logins == []
+        else:
+            accounts.main(["login", "work", "--box"])
+            assert logins == [("work", expected)]

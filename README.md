@@ -125,6 +125,9 @@ accounts status
 | `accounts fable` | Switch live supervised sessions to Fable while headroom is available |
 | `accounts poll` | Refresh dormant stored/native profiles, then poll every routable account |
 | `accounts move <label> --to <host>` | Move an account to another machine (`--from <host>` pulls one here) |
+| `accounts login --box <host> <label>` | Log a box in to `<label>` with its own `/login` there; the browser step runs here and no credential leaves either machine |
+
+A login lives on one machine. Claude's OAuth refresh rotates the refresh token, so two machines holding one login race: the first to refresh wins and the other is signed out. `accounts export` and `accounts import` therefore run only inside `accounts move`, which forgets the source; a second machine that needs the same account gets its own login with `accounts login --box`, a separate lineage on the same quota.
 
 Reference: [docs/accounts.md](docs/accounts.md) (all commands, Codex setup, the overage guard, Fable fallback, remote boards, unattended jobs, the handoff notice).
 

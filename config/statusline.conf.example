@@ -189,3 +189,7 @@
 # Optional: SSH targets for `accounts sync` to converge the minted-token vault
 # with (space-separated, first reachable wins). Unset means sync is off.
 # ACCOUNTS_SYNC_HOSTS="my-host my-host-tailscale"
+#
+# Optional: the ssh host a bare `accounts login --box LABEL` logs in (default:
+# the first ACCOUNTS_SYNC_HOSTS entry).
+# ACCOUNTS_BOX="my-host"
