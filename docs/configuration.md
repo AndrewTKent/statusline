@@ -34,6 +34,7 @@ Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated vers
 | `ACCOUNTS_HARD_SESSION_LIMIT` | `0` | Opt out of proactive routing at a plan wall (100% five-hour, 100% weekly, or 100% Fable for a Fable session); account pins are bypassed only at those boundaries |
 | `ACCOUNTS_STRICT_QUOTA` | `1` | Refuse to launch when no account has quota, and terminate at a hard limit when no replacement is available; by default Claude opens and stays open for session history and reset monitoring |
 | `ACCOUNTS_HOLD_FOR_RESET` | `1` | When no account can take the work, stop Claude, wait until a window resets and resume it, instead of keeping the interface open (off by default) |
+| `ACCOUNTS_BOX` | `"my-host"` | The ssh host a bare `accounts login --box <label>` logs in (default: the first `ACCOUNTS_SYNC_HOSTS` entry) |
 
 Keys for remote boards, unattended jobs and the handoff notice are described in [accounts.md](accounts.md).
 

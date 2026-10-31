@@ -18,7 +18,9 @@ Router commands:
   sync            converge the minted-token vault with the sync host
   pick-env        emit env exports for the best routable account
   move LABEL      move an account to (--to HOST) or from (--from HOST) another machine
-  export / import / forget   the pieces move is built from
+  login --box HOST LABEL     log a box in to LABEL on its own, with a fresh /login there
+  register LABEL  record the login in LABEL's profile as that account (login --box runs it)
+  export / import / forget   the pieces move is built from; export and import run only under move
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import fnmatch
+import getpass
 import hashlib
 import hmac
 import json
@@ -946,11 +949,38 @@ def clear_profile_account_state(label: str) -> None:
     _write_0600(state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
-def ensure_native_profile(label: str, entry: dict) -> Path:
+def _make_profile_dir(label: str) -> Path:
     profile = native_profile_path(label)
     profile.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(PROFILES_PATH, 0o700)
     os.chmod(profile, 0o700)
+    return profile
+
+
+def _share_profile_entries(profile: Path) -> None:
+    _seed_profile_state(profile)
+    for name in PROFILE_SHARED_ENTRIES:
+        source = CLAUDE_HOME / name
+        target = profile / name
+        if not source.exists():
+            continue
+        if target.is_symlink():
+            if target.resolve(strict=False) == source.resolve(strict=False):
+                continue
+            target.unlink()
+        elif target.exists():
+            continue
+        target.symlink_to(source, target_is_directory=source.is_dir())
+
+
+def prepare_login_profile(label: str) -> Path:
+    profile = _make_profile_dir(label)
+    _share_profile_entries(profile)
+    return profile
+
+
+def ensure_native_profile(label: str, entry: dict) -> Path:
+    profile = _make_profile_dir(label)
 
     stored_blob = entry.get("blob", "")
     if not blob_access_token(stored_blob):
@@ -965,19 +995,7 @@ def ensure_native_profile(label: str, entry: dict) -> Path:
     else:
         os.chmod(credentials, 0o600)
 
-    _seed_profile_state(profile)
-    for name in PROFILE_SHARED_ENTRIES:
-        source = CLAUDE_HOME / name
-        target = profile / name
-        if not source.exists():
-            continue
-        if target.is_symlink():
-            if target.resolve(strict=False) == source.resolve(strict=False):
-                continue
-            target.unlink()
-        elif target.exists():
-            continue
-        target.symlink_to(source, target_is_directory=source.is_dir())
+    _share_profile_entries(profile)
     return profile
 
 
@@ -2509,6 +2527,8 @@ def cmd_sync(_args) -> None:
 
 # `accounts` is not on a non-interactive ssh login's PATH; the router shims are.
 REMOTE_ACCOUNTS = 'PATH="$HOME/.accounts/bin:$HOME/.local/bin:$PATH" accounts'
+# A copied login races the original over refresh-token rotation, so only move may export or import.
+MOVE_ENV = "ACCOUNTS_MOVE"
 
 
 def label_token(label: str, entry: dict) -> str:
@@ -2527,19 +2547,23 @@ def export_payload(label: str) -> dict:
     return {"label": label, "entry": entry, "label_line": label_token(label, entry)}
 
 
+def _refuse_identity_collision(stored: dict, label: str, entry: dict) -> None:
+    identity = (entry["email"], entry["org_uuid"])
+    for other, existing in stored.items():
+        same_identity = (existing.get("email"), existing.get("org_uuid")) == identity
+        if other != label and same_identity:
+            raise AccountsError(f"'{other}' already holds this account")
+        if other == label and not same_identity:
+            raise AccountsError(f"'{label}' already holds a different account")
+
+
 def import_account(payload: dict) -> str:
     label = payload["label"]
     entry = payload["entry"]
-    identity = (entry["email"], entry["org_uuid"])
     with locked():
         blobs = load_blobs()
         stored = blobs.setdefault("accounts", {})
-        for other, existing in stored.items():
-            same_identity = (existing.get("email"), existing.get("org_uuid")) == identity
-            if other != label and same_identity:
-                raise AccountsError(f"'{other}' already holds this account")
-            if other == label and not same_identity:
-                raise AccountsError(f"'{label}' already holds a different account")
+        _refuse_identity_collision(stored, label, entry)
         # A Keychain item left from an earlier tenancy would shadow the new file.
         if not reset_profile_keychain(label):
             raise AccountsError(f"could not remove the '{label}' profile keychain item")
@@ -2551,6 +2575,29 @@ def import_account(payload: dict) -> str:
         clear_profile_account_state(label)
     _repaint_board()
     return label
+
+
+def register_account(label: str) -> dict:
+    blob = profile_live_blob(label) or ""
+    access_token = blob_access_token(blob)
+    if not access_token:
+        raise AccountsError(f"the '{label}' profile has no login")
+    identity = identity_from_profile(fetch_profile(access_token) or {})
+    if not identity["email"] or not identity["org_uuid"]:
+        raise AccountsError(f"the '{label}' login did not resolve to an account")
+    entry = {key: identity[key] for key in ("email", "org_uuid", "org_type", "plan")}
+    set_entry_blob(entry, blob)
+    with locked():
+        blobs = load_blobs()
+        stored = blobs.setdefault("accounts", {})
+        _refuse_identity_collision(stored, label, entry)
+        stored[label] = entry
+        save_blobs(blobs)
+        set_conf_label_token(label, label_token(label, entry))
+        # No keychain reset, unlike import: on a Mac that item holds this very login.
+        ensure_native_profile(label, entry)
+    _repaint_board()
+    return entry
 
 
 def _refuse_if_pinned(label: str) -> None:
@@ -2639,13 +2686,18 @@ def _repaint_board() -> None:
             raise
 
 
-def _remote_accounts(host: str, command: str, payload: str | None = None):
+def _box_shell(host: str, command: str, payload: str | None = None):
     return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", host, f"{REMOTE_ACCOUNTS} {command}"],
+        ["ssh", "-o", "BatchMode=yes", host, command],
         input=payload,
         capture_output=True,
         text=True,
     )
+
+
+def _remote_accounts(host: str, command: str, payload: str | None = None, *, move: bool = False):
+    prefix = f"{MOVE_ENV}=1 " if move else ""
+    return _box_shell(host, f"{prefix}{REMOTE_ACCOUNTS} {command}", payload)
 
 
 def _remote_error(host: str, step: str, result) -> AccountsError:
@@ -2655,7 +2707,7 @@ def _remote_error(host: str, step: str, result) -> AccountsError:
 def move_to(label: str, host: str) -> None:
     _refuse_if_pinned(label)
     payload = json.dumps(export_payload(label))
-    result = _remote_accounts(host, "import", payload)
+    result = _remote_accounts(host, "import", payload, move=True)
     print(result.stdout, end="")
     if result.returncode != 0:
         raise _remote_error(host, "import", result)
@@ -2664,7 +2716,7 @@ def move_to(label: str, host: str) -> None:
 
 
 def move_from(label: str, host: str) -> None:
-    exported = _remote_accounts(host, f"export {shlex.quote(label)}")
+    exported = _remote_accounts(host, f"export {shlex.quote(label)}", move=True)
     if exported.returncode != 0:
         raise _remote_error(host, "export", exported)
     try:
@@ -2679,8 +2731,17 @@ def move_from(label: str, host: str) -> None:
         raise _remote_error(host, "forget", forgotten)
 
 
+def _refuse_outside_move() -> None:
+    if os.environ.get(MOVE_ENV) != "1":
+        die(
+            "a login lives on one machine; `accounts move --to HOST LABEL` moves it, and a second"
+            " machine logs in on its own: `accounts login --box HOST LABEL`"
+        )
+
+
 def cmd_export(args) -> None:
     """Write one account as JSON for `accounts import` on another machine."""
+    _refuse_outside_move()
     if sys.stdout.isatty():
         die("export writes a credential; pipe it, never print it to a terminal")
     print(json.dumps(export_payload(args.label)))
@@ -2688,6 +2749,7 @@ def cmd_export(args) -> None:
 
 def cmd_import(_args) -> None:
     """Install an account from `accounts export` JSON on stdin."""
+    _refuse_outside_move()
     try:
         payload = json.loads(sys.stdin.read())
     except json.JSONDecodeError as exc:
@@ -2707,6 +2769,109 @@ def cmd_move(args) -> None:
         move_to(args.label, args.to)
     else:
         move_from(args.label, args.from_host)
+
+
+# ── logging a box in on its own ───────────────────────────────────────────
+
+LOGIN_URL_RE = re.compile(r"https://\S*oauth/authorize\S*")
+LOGIN_EXIT_RE = re.compile(r"accounts-login-exit: (\d+)")
+LOGIN_URL_WAIT_S = 60.0
+LOGIN_DONE_WAIT_S = 120.0
+LOGIN_POLL_S = 1.0
+
+
+def default_box() -> str:
+    box = os.environ.get("ACCOUNTS_BOX") or _conf_var("ACCOUNTS_BOX") or next(iter(sync_hosts()), "")
+    if not box:
+        raise AccountsError("name the box: `accounts login --box HOST LABEL`, or set ACCOUNTS_BOX")
+    return box
+
+
+def login_session_name(label: str) -> str:
+    # tmux rewrites "." in a session name, which would break every later -t.
+    return "accounts-login-" + label.replace(".", "_")
+
+
+def _login_launch_command(label: str) -> str:
+    session = login_session_name(label)
+    login = (
+        'PATH="$HOME/.local/bin:$PATH" '
+        f'CLAUDE_CONFIG_DIR="$HOME/.accounts/profiles/{label}" claude auth login --claudeai; '
+        'echo "accounts-login-exit: $?"; sleep 600'
+    )
+    return f"tmux new-session -d -s {session} -x 400 -y 50 {shlex.quote(login)}"
+
+
+def _wait_for_pane(host: str, session: str, pattern: re.Pattern, wait_s: float, what: str):
+    deadline = time.monotonic() + wait_s
+    while True:
+        pane = _box_shell(host, f"tmux capture-pane -p -J -S -200 -t {session}")
+        match = pattern.search(pane.stdout or "")
+        if match:
+            return match
+        if time.monotonic() >= deadline:
+            raise AccountsError(f"{host}: {what} did not appear within {wait_s:.0f}s")
+        time.sleep(LOGIN_POLL_S)
+
+
+def _run_box_login(label: str, host: str) -> None:
+    session = login_session_name(label)
+    started = _box_shell(host, _login_launch_command(label))
+    if started.returncode != 0:
+        raise _remote_error(host, "tmux start", started)
+    url = _wait_for_pane(host, session, LOGIN_URL_RE, LOGIN_URL_WAIT_S, "the login URL").group(0)
+    print(f"open this in a browser signed in to the account for {label}:\n\n  {url}\n")
+    code = getpass.getpass("paste the code the browser shows: ").strip()
+    if not code:
+        raise AccountsError("no code entered")
+    # The code goes over stdin into a tmux buffer, never into an argv on either machine.
+    fed = _box_shell(
+        host,
+        f"tmux load-buffer -b {session} - && tmux paste-buffer -d -b {session} -t {session}"
+        f" && tmux send-keys -t {session} Enter",
+        code,
+    )
+    if fed.returncode != 0:
+        raise _remote_error(host, "code entry", fed)
+    done = _wait_for_pane(host, session, LOGIN_EXIT_RE, LOGIN_DONE_WAIT_S, "the login result")
+    if done.group(1) != "0":
+        raise AccountsError(f"{host}: claude auth login exited {done.group(1)}")
+
+
+def login_box(label: str, host: str) -> None:
+    native_profile_path(label)  # rejects a label that is unsafe in the box's shell
+    if not sys.stdin.isatty():
+        raise AccountsError("login --box needs a terminal: it asks for the code the browser shows")
+    prepared = _remote_accounts(host, f"register --prepare {shlex.quote(label)}")
+    if prepared.returncode != 0:
+        raise _remote_error(host, "profile setup", prepared)
+    session = login_session_name(label)
+    _box_shell(host, f"tmux kill-session -t {session} 2>/dev/null; true")
+    try:
+        _run_box_login(label, host)
+    finally:
+        _box_shell(host, f"tmux kill-session -t {session} 2>/dev/null; true")
+    registered = _remote_accounts(host, f"register {shlex.quote(label)}")
+    print(registered.stdout, end="")
+    if registered.returncode != 0:
+        raise _remote_error(host, "register", registered)
+    board = _remote_accounts(host, "ls")
+    line = next((row for row in board.stdout.splitlines() if row.split()[:1] == [label]), None)
+    print(line.strip() if line else f"{host} board has no row for {label} yet")
+
+
+def cmd_login(args) -> None:
+    """Log a box in to LABEL with its own /login, so no credential leaves either machine."""
+    login_box(args.label, args.box or default_box())
+
+
+def cmd_register(args) -> None:
+    """Record the login in LABEL's profile as the account it resolves to."""
+    if args.prepare:
+        prepare_login_profile(args.label)
+        return
+    entry = register_account(args.label)
+    print(f"registered {args.label}: {entry['email']}")
 
 
 def cmd_mint(args) -> None:
@@ -3569,13 +3734,45 @@ def build_parser() -> argparse.ArgumentParser:
     direction.add_argument("--from", dest="from_host", metavar="HOST")
     p_move.set_defaults(fn=cmd_move)
 
-    p_export = sub.add_parser("export", help="write one account as JSON to a pipe")
+    p_login = sub.add_parser(
+        "login",
+        help="log a box in to an account with its own /login; a login is never copied",
+        description=(
+            "Run a fresh Claude login inside the box's profile for LABEL and register it there."
+            " The browser step happens here; no credential leaves either machine. A copied login"
+            " races the original over refresh-token rotation and signs one machine out, so"
+            " export and import refuse to run outside `accounts move`."
+        ),
+    )
+    p_login.add_argument(
+        "--box",
+        required=True,
+        nargs="?",
+        const="",
+        metavar="HOST",
+        help="ssh host of the box (bare --box: ACCOUNTS_BOX, else the first sync host)",
+    )
+    p_login.add_argument("label")
+    p_login.set_defaults(fn=cmd_login)
+
+    p_register = sub.add_parser(
+        "register", help="record the login in LABEL's profile as the account it resolves to"
+    )
+    p_register.add_argument("label")
+    p_register.add_argument(
+        "--prepare", action="store_true", help="only create the profile a login will land in"
+    )
+    p_register.set_defaults(fn=cmd_register)
+
+    p_export = sub.add_parser(
+        "export", help="write one account as JSON to a pipe (only under `accounts move`)"
+    )
     p_export.add_argument("label")
     p_export.set_defaults(fn=cmd_export)
 
-    sub.add_parser("import", help="install an account from export JSON on stdin").set_defaults(
-        fn=cmd_import
-    )
+    sub.add_parser(
+        "import", help="install an account from export JSON on stdin (only under `accounts move`)"
+    ).set_defaults(fn=cmd_import)
 
     p_forget = sub.add_parser("forget", help="remove an account from this machine")
     p_forget.add_argument("label")
