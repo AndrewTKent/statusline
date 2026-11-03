@@ -167,6 +167,15 @@ session_topic() {
     [ -n "$topic" ] && printf '%s' "$topic" > "$cache" && printf '%s\n' "$topic"
 }
 
+# Name set with `/rename` or `claude --name`. session_name in the status blob
+# also carries the AI-generated title, so read only the transcript's own
+# custom-title entries; the last one wins.
+session_custom_name() {
+    local transcript="$1"
+    [ -f "$transcript" ] || return
+    grep -F '"type":"custom-title"' "$transcript" 2>/dev/null | tail -1 | jq -r '.customTitle // empty' 2>/dev/null
+}
+
 recent_session_checkout() {
     local sid="$1" cwd="$2"
     [ -z "$sid" ] || [ -z "$cwd" ] && return
@@ -644,7 +653,7 @@ format_reset_time() {
 # ── Parse JSON (single jq call for performance) ────────
 if [ "${SHARED_ACCOUNT_SNAPSHOT:-0}" = "1" ]; then
     MODEL="unknown" COST=0 DURATION_MS=0 CONTEXT_PCT=0 CWD=""
-    INPUT_TOKENS=0 OUTPUT_TOKENS=0 SESSION_ID="" EFFORT_VAL=""
+    INPUT_TOKENS=0 OUTPUT_TOKENS=0 SESSION_ID="" EFFORT_VAL="" TRANSCRIPT_PATH=""
 else
     eval "$(jq -r '
     "MODEL=" + (.model.display_name // "unknown" | @sh),
@@ -659,6 +668,7 @@ else
     "CACHE_READ=" + (.context_window.current_usage.cache_read_input_tokens // 0 | tostring | @sh),
     "CACHE_CREATE=" + (.context_window.current_usage.cache_creation_input_tokens // 0 | tostring | @sh),
     "SESSION_ID=" + (.session_id // "" | @sh),
+    "TRANSCRIPT_PATH=" + (.transcript_path // "" | @sh),
     "EFFORT_VAL=" + (.effort.level // .effort_level // "" | @sh),
     "CTX_SIZE=" + (.context_window.context_window_size // 200000 | tostring | @sh)
 ' <<< "$input" 2>/dev/null)"
@@ -3385,6 +3395,8 @@ render_pr_row() {
 render_default() {
     # Labeled identity block — one fact per row, consistent with
     # context/left/usage rows below.
+    [ -n "$SESSION_NAME" ] && \
+        printf "${white}%-7s${reset} %b\n" "name"    "${white}${SESSION_NAME}${reset}"
     printf "${white}%-7s${reset} %b\n" "model"   "${blue}${MODEL}${reset}${EFFORT}${FAST_MODE}${UNSUP_BADGE:+ ${UNSUP_BADGE}}"
     [ -n "$SESSION_TIME" ] && \
         printf "${white}%-7s${reset} %b\n" "time"    "${dim}⏱${reset} ${white}${SESSION_TIME}${reset}${IDLE_DISPLAY}"
@@ -3777,6 +3789,7 @@ FORMAT="${STATUSLINE_FORMAT:-${FORMAT:-default}}"
 TAB_TITLE="${DIR_NAME}"
 [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ] && TAB_TITLE="${DIR_NAME} (${SHORT_BRANCH})"
 SESSION_TOPIC=$(session_topic "$SESSION_ID" "$CWD")
+SESSION_NAME=$(session_custom_name "$TRANSCRIPT_PATH")
 [ -n "$SESSION_TOPIC" ] && TAB_TITLE="${SESSION_TOPIC} — ${TAB_TITLE}"
 printf '\033]0;%s\007' "$TAB_TITLE"
 

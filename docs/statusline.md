@@ -31,6 +31,7 @@ Restart Claude Code. Done.
 
 | Row | Shown when | What it shows |
 |-----|-----------|----------------|
+| `name` | a custom name is set with `/rename` or `claude --name` | The session name; AI-generated titles do not count |
 | `model` | always | Model + effort (`.low`/`.medium`/`.high`/`.xhigh`/`.max`/`.ultracode`; shared snapshot mode writes `· low` and so on) + `⚡fast` when Settings' fast mode is on |
 | `time` | session duration available | Wall-clock (`⏱ 24:12`); adds `idle Nm` after 30s with no user turn |
 | `account` | account resolved | Tag from `ACCOUNT_LABELS`, colored per `LABEL_COLORS` |
