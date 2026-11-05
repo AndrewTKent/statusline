@@ -1,0 +1,17 @@
+name: Owner Approval
+
+# A fork PR runs its own copy of this file with a read-only token. It only wakes
+# merge-on-approval.yml, which reads every fact from the API and trusts nothing here.
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  approved:
+    if: github.event.review.state == 'approved' && github.event.review.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "owner approved"
