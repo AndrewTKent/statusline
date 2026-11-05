@@ -1,83 +1,80 @@
 name: Merge On Owner Approval
 
-# workflow_run runs main's copy of this file, never a PR's, and nothing here checks out PR code.
-# The triggering run is only a wake-up: the PR, the owner's review and CI's result come from the API.
+# A contributor without write access merges their own PR by commenting `/merge` once the owner
+# has approved its current head and CI is green on it. The owner's approval is the gate; the
+# merge is the author's move. issue_comment runs main's copy of this file with a write token,
+# checks out nothing, and reads every fact from the API.
+
 on:
-  workflow_run:
-    workflows: [CI, Owner Approval]
-    types: [completed]
+  issue_comment:
+    types: [created]
 
 permissions: {}
 
 concurrency:
-  group: merge-on-approval-${{ github.event.workflow_run.head_sha }}
+  group: merge-on-approval-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
   merge:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      (github.event.workflow_run.event == 'pull_request' ||
-       github.event.workflow_run.event == 'pull_request_review')
+      github.event.issue.pull_request &&
+      (github.event.comment.body == '/merge' || startsWith(github.event.comment.body, '/merge ')) &&
+      (github.event.comment.user.id == github.event.issue.user.id ||
+       github.event.comment.user.id == github.repository_owner_id)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read
       contents: write
-      pull-requests: read
+      pull-requests: write
     outputs:
       merged: ${{ steps.merge.outputs.merged }}
       publish: ${{ steps.merge.outputs.publish }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
       OWNER_ID: ${{ github.repository_owner_id }}
-      SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
       - id: merge
-        name: Merge the PR whose head the owner approved, once CI passed on that head
+        name: Merge the PR if the owner approved its current head and CI passed on it
         run: |
           set -euo pipefail
+          say() { gh pr comment "$PR" --repo "$REPO" --body "$1" >/dev/null; echo "::notice::$1"; }
 
-          # A fork's review run reports the base repo as head_repository, so match on head_sha alone.
-          pr=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
-            --jq '.[] | select(.head.sha == env.SHA and (.draft | not)) | .number')
-          if [ -z "$pr" ] || [ "$(wc -l <<<"$pr")" -ne 1 ]; then
-            echo "::notice::no single open, ready PR into main has head $SHA"
-            exit 0
+          pr=$(gh api "repos/$REPO/pulls/$PR")
+          state=$(jq -r .state <<<"$pr"); draft=$(jq -r .draft <<<"$pr"); base=$(jq -r .base.ref <<<"$pr")
+          sha=$(jq -r .head.sha <<<"$pr")
+          if [ "$state" != open ] || [ "$draft" = true ] || [ "$base" != main ]; then
+            say "Not merged: the PR must be open, not a draft, and into main."; exit 0
           fi
 
-          verdict=$(gh api --paginate "repos/$REPO/pulls/$pr/reviews?per_page=100" \
+          # The owner's latest non-comment review must approve this exact head.
+          verdict=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
             --jq '.[] | select(.user.id == (env.OWNER_ID | tonumber) and .state != "COMMENTED" and .state != "PENDING")
               | "\(.submitted_at) \(.id) \(.state) \(.commit_id)"' \
             | sort -k1,1 -k2,2n | tail -n 1 | cut -d' ' -f3-)
-          if [ "$verdict" != "APPROVED $SHA" ]; then
-            echo "::notice::#$pr: the owner's latest review is '${verdict:-none}', not an approval of $SHA"
-            exit 0
+          if [ "$verdict" != "APPROVED $sha" ]; then
+            say "Not merged: the owner's latest review is '${verdict:-none}', not an approval of the current head ${sha:0:10}."; exit 0
           fi
 
-          ci=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=pull_request&per_page=100" \
+          ci=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$sha&event=pull_request&per_page=100" \
             --jq '.workflow_runs | max_by(.run_number) | .conclusion // "none"')
           if [ "$ci" != success ]; then
-            echo "::notice::#$pr: CI on $SHA is '$ci'"
-            exit 0
+            say "Not merged: CI on ${sha:0:10} is '$ci'."; exit 0
           fi
 
           # Mirrors publish.yml's on.push.paths, read before the merge so a failure here cannot strand one.
-          files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" \
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)')
           publish=false
-          if grep -qE '^(bin/statusline\.sh|install\.sh|npm/.+|config/.+)$' <<<"$files"; then
-            publish=true
-          fi
+          if grep -qE '^(bin/statusline\.sh|install\.sh|npm/.+|config/.+)$' <<<"$files"; then publish=true; fi
 
           # sha makes GitHub refuse the merge (409) if the head moved after the checks above.
-          gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=squash -f sha="$SHA" --silent
-          echo "::notice::merged #$pr at $SHA"
-          {
-            echo "merged=true"
-            echo "publish=$publish"
-          } >> "$GITHUB_OUTPUT"
+          gh api --method PUT "repos/$REPO/pulls/$PR/merge" --field merge_method=squash --field sha="$sha" --silent
+          echo "::notice::merged #$PR at $sha"
+          { echo "merged=true"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
 
   after-merge:
     needs: merge
@@ -95,12 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           gh workflow run ci.yml --repo "$REPO" --ref main
-          if [ "$PUBLISH" != true ]; then
-            exit 0
-          fi
+          [ "$PUBLISH" = true ] || exit 0
           state=$(gh api "repos/$REPO/actions/workflows/publish.yml" --jq .state)
-          if [ "$state" != active ]; then
-            echo "::warning::publish.yml is $state, so this merge was not published"
-            exit 0
-          fi
+          if [ "$state" != active ]; then echo "::warning::publish.yml is $state, so this merge was not published"; exit 0; fi
           gh workflow run publish.yml --repo "$REPO" --ref main
