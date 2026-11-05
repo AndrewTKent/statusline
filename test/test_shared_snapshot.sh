@@ -208,6 +208,9 @@ render_with_boards() {
 write_board_meta "$NOW" true
 board_output=$(render_with_boards)
 [[ "$board_output" == *$'\n'"· Team-1 "*"8%"* ]] || { printf 'a fresh board did not render its Claude rows\n' >&2; exit 1; }
+session_row=$(grep -n '^ *session ' <<< "$board_output" | cut -d: -f1)
+weekly_row=$(grep -n '^ *weekly ' <<< "$board_output" | cut -d: -f1)
+[ -n "$session_row" ] && [ "$session_row" -lt "$weekly_row" ] || { printf 'the 5-hour row is not above the weekly row\n' >&2; exit 1; }
 board_order=$(awk '/^■ devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $2}' <<< "$board_output")
 [ "$board_order" = "Team-1 Team-2 Team-10 " ] || { printf 'board accounts are not in natural name order: %s\n' "$board_order" >&2; exit 1; }
 codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")

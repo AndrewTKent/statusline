@@ -75,8 +75,6 @@ TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # public Claude Code OAuth client (PKCE, no secret)
 STALE_AFTER_S = 3 * 3600
 SESSION_LIMIT_FALLBACK_S = 5 * 3600
-# The usage API still reports a 5h number for these plans; only a detected session limit walls them.
-PLANS_WITHOUT_FIVE_HOUR_LIMIT = {"Ultra"}
 NATIVE_DAEMON_MIN_VERSION = (2, 1, 220)
 NATIVE_REFRESH_WAIT_S = 5.0
 NATIVE_REFRESH_POLL_S = 0.1
@@ -1627,16 +1625,6 @@ def _persist_plan_canceled(label: str, canceled: bool) -> None:
         save_blobs(fresh)
 
 
-def _persist_plan(label: str, plan: str) -> None:
-    with locked():
-        fresh = load_blobs()
-        entry = (fresh.get("accounts") or {}).get(label)
-        if entry is None:
-            return
-        entry["plan"] = plan
-        save_blobs(fresh)
-
-
 def _persist_auth_dead(label: str) -> None:
     """Stamp + save outside any existing lock (cmd_refresh's failure paths)."""
     with locked():
@@ -1971,11 +1959,6 @@ def poll_blobs_usage(blobs: dict) -> int:
         if usage is None:
             failed += 1
             continue
-        if not e.get("plan"):
-            plan = identity_from_profile(fetch_profile(token) or {})["plan"]
-            if plan:
-                e["plan"] = plan
-                _persist_plan(label, plan)
         if e.pop("plan_canceled_at", None):
             _persist_plan_canceled(label, False)
         fresh[f"{e.get('email')}|{e.get('org_uuid')}"] = usage_to_reset_row(
@@ -1989,8 +1972,10 @@ def poll_blobs_usage(blobs: dict) -> int:
     return len(fresh)
 
 
-def has_five_hour_limit(entry: dict) -> bool:
-    return entry.get("plan") not in PLANS_WITHOUT_FIVE_HOUR_LIMIT
+def has_five_hour_limit(row: dict) -> bool:
+    # A poll of an account without the limit reports five_hour as null, whatever its plan.
+    # A row no poll has written is unknown, not unlimited.
+    return row.get("five_hour_pct") is not None or row.get("last_seen") is None
 
 
 def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dict]:
@@ -2006,7 +1991,7 @@ def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dic
         key = f"{e.get('email')}|{e.get('org_uuid')}"
         row = resets_row(resets, e.get("email"), e.get("org_uuid"))
         effs = effective_pcts(row, now_utc())
-        five_hour_limited = has_five_hour_limit(e)
+        five_hour_limited = has_five_hour_limit(row)
         if not five_hour_limited:
             effs["five_hour"] = 0.0
         if key in session_limits:
@@ -2168,11 +2153,10 @@ def write_statusline_snapshot(blobs: dict, *, error: str | None) -> dict:
                     **window,
                 }
             )
-        five_hour_shown = has_five_hour_limit(entry) or key in session_limits
         accounts_snapshot[label] = {
             "five_hour": _snapshot_window(
-                row.get("five_hour_pct") if five_hour_shown else None,
-                row.get("five_hour_reset") if five_hour_shown else None,
+                row.get("five_hour_pct"),
+                row.get("five_hour_reset"),
                 observed_at,
                 now_ts,
                 hard_limited=key in session_limits,
