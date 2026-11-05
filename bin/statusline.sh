@@ -921,7 +921,7 @@ remote_board_lines() {
     case "$max_age" in ''|*[!0-9]*|0) max_age=900 ;; esac
     now_epoch=$(date +%s)
     local board_dir board_name fetched_at board_error board_up board_probe board_state age fresh
-    local rows codex_rows row_label row_five row_five_reset row_seven row_fable row_fable_reset row_expired
+    local rows codex_rows row_label row_five row_five_stale row_five_reset row_seven row_fable row_fable_reset row_expired
     local cx_label cx_week cx_week_reset cx_error
     local pad_name five_color seven_color fable_color suffix
     _rb_ralign() {
@@ -966,20 +966,25 @@ remote_board_lines() {
             (.accounts // {}) | to_entries
             | sort_by(.key | ascii_downcase | [scan("[0-9]+|[^0-9]+") | tonumber? // .]) | .[] |
             ((.value.scoped // [] | map(select((.label // "" | ascii_downcase) == "fable")) | first) // {}) as $fable |
-            [.key, (.value.five_hour.used_pct // ""), (.value.five_hour.resets_at // ""),
+            [.key, (.value.five_hour.used_pct // ""), (.value.five_hour.resets_at // ""), (if (.value.five_hour | type) == "object" and (.value.five_hour | has("stale")) then .value.five_hour.stale else true end),
              (.value.seven_day.used_pct // ""), ($fable.used_pct // ""), ($fable.resets_at // ""),
              (if (.value.canceled // false) then "canceled" else (.value.expired // false) end)] | map(tostring) | join("")
         ' "$board_dir/statusline-snapshot.json" 2>/dev/null)
-        while IFS=$RB_SEP read -r row_label row_five row_five_reset row_seven row_fable row_fable_reset row_expired; do
+        while IFS=$RB_SEP read -r row_label row_five row_five_reset row_five_stale row_seven row_fable row_fable_reset row_expired; do
             [ -z "$row_label" ] && continue
-            [ -z "$row_five" ] && row_five="—" || printf -v row_five '%.0f%%' "$row_five"
+            if [ -z "$row_five" ] && [ "$row_five_stale" = "false" ]; then
+                # Polled, and the account has no 5-hour window: its cells stay blank.
+                row_five=""; row_five_reset=""
+            else
+                [ -z "$row_five" ] && row_five="—" || printf -v row_five '%.0f%%' "$row_five"
+                row_five_reset=$(shared_reset_relative "$row_five_reset" false)
+            fi
             [ -z "$row_seven" ] && row_seven="—" || printf -v row_seven '%.0f%%' "$row_seven"
             [ -z "$row_fable" ] && row_fable="—" || printf -v row_fable '%.0f%%' "$row_fable"
-            row_five_reset=$(shared_reset_relative "$row_five_reset" false)
             row_fable_reset=$(shared_reset_relative "$row_fable_reset" false)
             five_color="$dim"; seven_color="$dim"; fable_color="$dim"
             if $fresh; then
-                [ "$row_five" != "—" ] && five_color=$(color_for_pct "${row_five%\%}")
+                [ -n "$row_five" ] && [ "$row_five" != "—" ] && five_color=$(color_for_pct "${row_five%\%}")
                 [ "$row_seven" != "—" ] && seven_color=$(color_for_pct "${row_seven%\%}")
                 [ "$row_fable" != "—" ] && fable_color=$(color_for_pct "${row_fable%\%}")
             fi
@@ -1433,13 +1438,18 @@ render_shared_account_snapshot() {
             [ -z "$row_label" ] && continue
             row_display="$(printf '%s' "${row_label:0:1}" | tr '[:lower:]' '[:upper:]')${row_label:1}"
             marker="${dim}·${reset} "; [ "$row_label" = "$routed_label" ] && marker="${white}*${reset} "
-            [ -z "$row_five" ] && row_five="—" || printf -v row_five '%.0f%%' "$row_five"
+            if [ -z "$row_five" ] && [ "$row_five_stale" = "false" ]; then
+                # Polled, and the account has no 5-hour window: its cells stay blank.
+                row_five=""; row_five_reset=""
+            else
+                [ -z "$row_five" ] && row_five="—" || printf -v row_five '%.0f%%' "$row_five"
+                row_five_reset=$(shared_reset_relative "$row_five_reset" "$row_five_pending")
+            fi
             [ -z "$row_seven" ] && row_seven="—" || printf -v row_seven '%.0f%%' "$row_seven"
             [ -z "$row_scoped" ] && row_scoped="—" || printf -v row_scoped '%.0f%%' "$row_scoped"
-            row_five_reset=$(shared_reset_relative "$row_five_reset" "$row_five_pending")
             row_scoped_reset=$(shared_reset_relative "$row_scoped_reset" "$row_scoped_pending")
             local row_suffix="" five_color="$dim" seven_color="$dim" scoped_color="$dim"
-            [ "$row_five" != "—" ] && five_color=$(color_for_pct "${row_five%\%}")
+            [ -n "$row_five" ] && [ "$row_five" != "—" ] && five_color=$(color_for_pct "${row_five%\%}")
             [ "$row_seven" != "—" ] && seven_color=$(color_for_pct "${row_seven%\%}")
             [ "$row_scoped" != "—" ] && scoped_color=$(color_for_pct "${row_scoped%\%}")
             { [ "$row_five_stale" = "true" ] || [ "$row_seven_stale" = "true" ] || [ "$row_scoped_stale" = "true" ]; } && row_suffix=" ${dim}~ stale${reset}"
