@@ -97,6 +97,13 @@ cat > "$TEST_HOME/.accounts/statusline-snapshot.json" <<JSON
       "expired": true,
       "live_leases": 0
     },
+    "ultra": {
+      "five_hour": {"used_pct": null, "resets_at": null, "observed_at": $NOW, "stale": false, "pending_reset": false},
+      "seven_day": {"used_pct": 5, "resets_at": "2099-01-07T12:00:00Z", "observed_at": $NOW, "stale": false, "pending_reset": false},
+      "scoped": [{"kind": "fable", "label": "Fable", "used_pct": 8, "resets_at": "2099-01-07T12:00:00Z", "observed_at": $NOW, "stale": false, "pending_reset": false}],
+      "expired": false,
+      "live_leases": 0
+    },
     "lapsed": {
       "five_hour": {"used_pct": 4, "resets_at": null, "observed_at": 1, "stale": true, "pending_reset": false},
       "seven_day": {"used_pct": 98, "resets_at": null, "observed_at": 1, "stale": true, "pending_reset": false},
@@ -160,6 +167,10 @@ while IFS= read -r output_line; do
     [[ "$output_line" == *General* ]] && general_line="$output_line"
 done <<< "$plain_output"
 [[ -n "$general_line" && "$general_line" != *"~ stale"* ]] || { printf 'fresh account without a scoped limit rendered stale\n' >&2; exit 1; }
+ultra_line=$(awk '/^[·*] Ultra /{$1 = $1; print}' <<< "$plain_output")
+[[ "$ultra_line" == "· Ultra 5% 8% "[0-9]* && "$ultra_line" != *"—"* ]] || { printf 'a polled account with no 5-hour window did not leave its 5h cells blank: %s\n' "$ultra_line" >&2; exit 1; }
+personal_line=$(awk '/^[·*] Personal /{$1 = $1; print}' <<< "$plain_output")
+[[ "$personal_line" == "· Personal 91% pending — — —"* ]] || { printf 'an unpolled weekly window lost its dash: %s\n' "$personal_line" >&2; exit 1; }
 local_order=$(awk '/^[·*] (General|Personal|Work) /{printf "%s ", $2}' <<< "$plain_output")
 [ "$local_order" = "General Personal Work " ] || { printf 'local accounts are not in name order: %s\n' "$local_order" >&2; exit 1; }
 REMOTE_ROOT_DIR="$SANDBOX/remote"
@@ -179,6 +190,12 @@ cat > "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" <<JSON
     "team-2": {
       "five_hour": {"used_pct": 30, "resets_at": "2099-01-01T12:00:00Z", "stale": false},
       "seven_day": {"used_pct": 35, "resets_at": "2099-01-07T12:00:00Z", "stale": false},
+      "scoped": [],
+      "expired": false
+    },
+    "ultra": {
+      "five_hour": {"used_pct": null, "resets_at": null, "stale": false},
+      "seven_day": {"used_pct": 9, "resets_at": "2099-01-07T12:00:00Z", "stale": false},
       "scoped": [],
       "expired": false
     },
@@ -213,6 +230,8 @@ weekly_row=$(grep -n '^ *weekly ' <<< "$board_output" | cut -d: -f1)
 [ -n "$session_row" ] && [ "$session_row" -lt "$weekly_row" ] || { printf 'the 5-hour row is not above the weekly row\n' >&2; exit 1; }
 board_order=$(awk '/^■ devbox ·/{on=1; next} on && /^· Team-/{printf "%s ", $2}' <<< "$board_output")
 [ "$board_order" = "Team-1 Team-2 Team-10 " ] || { printf 'board accounts are not in natural name order: %s\n' "$board_order" >&2; exit 1; }
+remote_ultra_line=$(awk '/^■ devbox ·/{on=1; next} on && /^· Ultra /{$1 = $1; print}' <<< "$board_output")
+[ "$remote_ultra_line" = "· Ultra 9% — —" ] || { printf 'a remote account with no 5-hour window did not leave its 5h cells blank: %s\n' "$remote_ultra_line" >&2; exit 1; }
 codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")
 [ "$codex_line" = "· Seat-1-codex — — 37% — 3d" ] || { printf 'the Codex row is not its label, dashed 5h, week and weekly reset: %s\n' "$codex_line" >&2; exit 1; }
 
