@@ -1495,7 +1495,17 @@ class TestAccountEligibility:
         rows = accounts.route_rows(blobs, None, 2_000_000_000.0)
         assert accounts.pick_profile_route(rows, set(), None) == "A"
 
-    def test_an_ultra_account_routes_past_a_full_five_hour_window(self, monkeypatch):
+    def test_a_poll_that_reports_no_five_hour_figure_routes_with_no_limit(self, monkeypatch):
+        monkeypatch.setattr(accounts, "load_resets", lambda: {
+            "a@x|o1": {"five_hour_pct": None, "seven_day_pct": 54.0, "last_seen": 2_000_000_000.0},
+        })
+        monkeypatch.setattr(accounts, "load_session_limits", lambda _now: {})
+        blobs = {"accounts": {"A": {"blob": _live_blob("a"), "email": "a@x", "org_uuid": "o1"}}}
+        rows = accounts.route_rows(blobs, None, 2_000_000_000.0)
+        assert rows[0]["five_hour_limited"] is False
+        assert accounts.pick_profile_route(rows, set(), None) == "A"
+
+    def test_a_reported_five_hour_figure_gates_routing_on_an_ultra_plan(self, monkeypatch):
         monkeypatch.setattr(accounts, "load_resets", lambda: {
             "a@x|o1": {"five_hour_pct": 100.0, "seven_day_pct": 54.0, "last_seen": 2_000_000_000.0},
         })
@@ -1504,16 +1514,14 @@ class TestAccountEligibility:
             "A": {"blob": _live_blob("a"), "email": "a@x", "org_uuid": "o1", "plan": "Ultra"},
         }}
         rows = accounts.route_rows(blobs, None, 2_000_000_000.0)
-        assert accounts.pick_profile_route(rows, set(), None) == "A"
+        assert accounts.pick_profile_route(rows, set(), None) is None
 
-    def test_a_detected_session_limit_still_walls_an_ultra_account(self, monkeypatch):
+    def test_a_detected_session_limit_walls_an_account_reporting_no_five_hour_figure(self, monkeypatch):
         monkeypatch.setattr(accounts, "load_resets", lambda: {
-            "a@x|o1": {"five_hour_pct": 10.0, "seven_day_pct": 10.0, "last_seen": 2_000_000_000.0},
+            "a@x|o1": {"five_hour_pct": None, "seven_day_pct": 10.0, "last_seen": 2_000_000_000.0},
         })
         monkeypatch.setattr(accounts, "load_session_limits", lambda _now: {"a@x|o1": {}})
-        blobs = {"accounts": {
-            "A": {"blob": _live_blob("a"), "email": "a@x", "org_uuid": "o1", "plan": "Ultra"},
-        }}
+        blobs = {"accounts": {"A": {"blob": _live_blob("a"), "email": "a@x", "org_uuid": "o1"}}}
         rows = accounts.route_rows(blobs, None, 2_000_000_000.0)
         assert accounts.pick_profile_route(rows, set(), None) is None
 
@@ -2073,30 +2081,6 @@ class TestPollBlobsUsage:
     @pytest.fixture(autouse=True)
     def _no_profile_calls(self, monkeypatch):
         monkeypatch.setattr(accounts, "fetch_profile", lambda _token: None)
-
-    def test_a_poll_records_a_missing_plan(self, monkeypatch):
-        blobs = {"accounts": {
-            "work": {"blob": _live_blob("work"), "email": "work@example.com", "org_uuid": "org-work"},
-        }}
-        monkeypatch.setattr(accounts.time, "time", lambda: 2_000.0)
-        monkeypatch.setattr(accounts, "profile_live_blob", lambda _label: None)
-        monkeypatch.setattr(accounts, "fetch_usage", lambda _token: {"five_hour": {"utilization": 12}})
-        monkeypatch.setattr(
-            accounts,
-            "fetch_profile",
-            lambda _token: {
-                "account": {"email": "work@example.com"},
-                "organization": {"uuid": "org-work", "plan_display_name": "Ultra"},
-            },
-        )
-        monkeypatch.setattr(accounts, "usage_to_reset_row", lambda *_args: {})
-        monkeypatch.setattr(accounts, "merge_reset_rows", lambda _rows: None)
-        persisted = []
-        monkeypatch.setattr(accounts, "_persist_plan", lambda *args: persisted.append(args))
-
-        accounts.poll_blobs_usage(blobs)
-
-        assert persisted == [("work", "Ultra")]
 
     def test_polls_from_a_fresher_profile_keychain_blob(self, monkeypatch):
         stored = json.dumps(
@@ -3475,13 +3459,13 @@ class TestStatuslineSnapshot:
             assert secret not in encoded
         assert (accounts.SNAPSHOT_PATH.stat().st_mode & 0o777) == 0o600
 
-    def test_an_ultra_account_shows_no_five_hour_figure(self, tmp_path, monkeypatch):
+    def test_the_snapshot_shows_a_reported_five_hour_figure_on_an_ultra_plan(self, tmp_path, monkeypatch):
         self._paths(tmp_path, monkeypatch)
         monkeypatch.setattr(accounts, "load_label_pairs", lambda: [("work", "w@x", "o1")])
         monkeypatch.setattr(accounts, "load_session_leases", lambda now_ts=None: [])
         accounts.save_mode("auto", None)
         accounts.RESETS_PATH.write_text(json.dumps({
-            "w@x|o1": {"five_hour_pct": 100, "five_hour_reset": "2099-01-01T00:00:00+00:00",
+            "w@x|o1": {"five_hour_pct": 12, "five_hour_reset": "2099-01-01T00:00:00+00:00",
                        "seven_day_pct": 54, "last_seen": time.time()},
         }))
         blobs = {"accounts": {"work": {
@@ -3490,8 +3474,7 @@ class TestStatuslineSnapshot:
 
         snapshot = accounts.write_statusline_snapshot(blobs, error=None)
 
-        assert snapshot["accounts"]["work"]["five_hour"]["used_pct"] is None
-        assert snapshot["accounts"]["work"]["seven_day"]["used_pct"] == 54.0
+        assert snapshot["accounts"]["work"]["five_hour"]["used_pct"] == 12.0
 
     def test_error_preserves_last_success(self, tmp_path, monkeypatch):
         self._paths(tmp_path, monkeypatch)
