@@ -3288,6 +3288,17 @@ class CodexStatuslineTest(unittest.TestCase):
         self.assertEqual(account_header.index("resets"), account_row.index(banked_text))
         personal_row = next(line for line in lines if line.startswith("  · Personal"))
         self.assertEqual(account_header.index("resets"), personal_row.rindex("—"))
+
+        no_reset_board = {**board, "rows": [{k: v for k, v in row.items() if k != "reset_credits"} for row in board["rows"]]}
+        no_reset_board["remote"] = [{"board": "remote", "stopped": False, "age_s": 7200, "fresh": False,
+                                     "rows": no_reset_board["rows"][1:]}]
+        with mock.patch.object(codex_statusline, "codex_account_board", return_value=no_reset_board):
+            no_resets = codex_statusline.render_footer(data, 80, codex_statusline.Palette(False)).splitlines()
+        self.assertNotIn("resets", next(line for line in no_resets if line.strip().startswith("acct")))
+        self.assertFalse(next(line for line in no_resets if line.startswith("  · Personal")).endswith("—"))
+        remote_row = no_resets[[i for i, line in enumerate(no_resets) if "· remote ·" in line][0] + 1]
+        self.assertTrue(remote_row.endswith(" 2h ago · stale"))
+        self.assertNotIn("— · ", remote_row)
         self.assertNotIn("5h", account_header)
         self.assertNotIn("20%", account_row)
         self.assertNotIn("left", account_header)
