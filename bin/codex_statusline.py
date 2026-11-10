@@ -4060,20 +4060,23 @@ def render_footer(data: dict[str, Any], width: int, p: Palette, max_rows: int | 
     all_rows = board_rows + [account for board in remote_boards for account in board["rows"]]
     if (all_rows or remote_boards) and width >= 40:
         name_width = min(16, max([9] + [len(str(account["label"])) for account in all_rows]))
-        header = f"    {'acct':<{name_width}} {'week':>5} {'renews':>6} resets"
+        # The resets column shows only while some account has a reset left to use.
+        any_resets = any(account.get("reset_credits") for account in all_rows)
+        header = f"    {'acct':<{name_width}} {'week':>5} {'renews':>6}" + (" resets" if any_resets else "")
         if all_rows:
             lines.append(footer_spans([(p.dim, header)], width, p))
         for account in board_rows:
             marker = "*" if account["label"] == account_board.get("current_label") else "·"
-            trailer = reset_credit_text(account.get("reset_credits") or [])
+            trailer = reset_credit_text(account.get("reset_credits") or []) if any_resets else ""
             lines.append(codex_board_row(account, marker, trailer, name_width, width, p))
         for board in remote_boards:
             state = "stopped" if board["stopped"] else f"{remote_board_age_text(board['age_s'])} ago"
             lines.append(footer_spans([(p.dim, f"  · {board['board']} · {state}")], width, p))
             for account in board["rows"]:
-                trailer = reset_credit_text(account.get("reset_credits") or [])
+                cells = [reset_credit_text(account.get("reset_credits") or [])] if any_resets else []
                 if not board["fresh"]:
-                    trailer += f" · {state} · stale"
+                    cells += [state, "stale"]
+                trailer = " · ".join(cells)
                 lines.append(codex_board_row(account, "·", trailer, name_width, width, p))
             lines.extend(remote_job_lines(
                 board, data.get("thread_id", ""), data.get("origin_pane", ""),
