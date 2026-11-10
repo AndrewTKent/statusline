@@ -38,7 +38,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # setup-python has no Python 3.9 build for Ubuntu 26.04, which ubuntu-latest now is.
+        os: [ubuntu-24.04, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - name: Install jq and SQLite
