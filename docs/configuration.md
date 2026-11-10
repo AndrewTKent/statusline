@@ -28,7 +28,7 @@ Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated vers
 | `SHOW_ACCOUNT_RESETS` | `1` | Adds a per-account board (5h%, reset, week%, fable%, reset, work-unit cap) below the main rows |
 | `ACCOUNTS_EXCLUDE` | `"alumni"` | Labels kept off the board and out of routing |
 | `ACCOUNTS_HIDE` | `"personal"` | Labels kept in routing but off the board; this session's account always renders |
-| `ACCOUNTS_HIDE_OTHERS` | `1` | This session's account is the only local row on the board; remote boards still render |
+| `ACCOUNTS_HIDE_OTHERS` | `1` | This session's account is the only local row on the board; remote boards still render. A window from `accounts schedule` overrides it and `ACCOUNTS_HIDE` while it is open |
 | `SHARED_ACCOUNT_SNAPSHOT` | `1` | Read account/routing/quota rows only from the private accounts snapshot; use `accounts watch --interval 60` to refresh it explicitly |
 | `SHARED_ACCOUNT_SNAPSHOT_FILE`, `SHARED_ACCOUNT_SNAPSHOT_MAX_AGE` | | Override the snapshot path or stale threshold |
 | `ACCOUNTS_HARD_SESSION_LIMIT` | `0` | Opt out of proactive routing at a plan wall (100% five-hour, 100% weekly, or 100% Fable for a Fable session); account pins are bypassed only at those boundaries |
