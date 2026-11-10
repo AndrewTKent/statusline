@@ -26,6 +26,7 @@ Router commands:
 from __future__ import annotations
 
 import argparse
+import calendar
 import fcntl
 import fnmatch
 import getpass
@@ -47,6 +48,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import remote_boards
 
@@ -912,6 +914,7 @@ PROFILE_ACCOUNT_STATE_KEYS = {
 # Default-profile credential source used to capture login and refresh state.
 CRED_FILE = HOME / ".claude" / ".credentials.json"
 MODE_PATH = HOME / ".accounts" / "mode.json"
+BOARD_SCHEDULE_PATH = HOME / ".accounts" / "board-schedule.json"
 BLOBS_PATH = HOME / ".accounts" / "blobs.json"
 
 
@@ -3531,6 +3534,130 @@ def cmd_fable(_args) -> None:
         print(f"  next: {best['label']} (fable {best['fable']:.0f}%, binding {b:.0f}%)")
 
 
+def board_zone():
+    """The zone the statusline renders in: STATUSLINE_TZ, ~/.claude/statusline-tz, TZ, else local."""
+    name = os.environ.get("STATUSLINE_TZ", "").strip()
+    tz_file = HOME / ".claude" / "statusline-tz"
+    if not name and tz_file.exists():
+        name = "".join(tz_file.read_text().split())
+    name = name or os.environ.get("TZ", "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise AccountsError(f"unknown time zone: {name!r}")
+    return datetime.now().astimezone().tzinfo
+
+
+def _day_numbers() -> dict[str, int]:
+    names: dict[str, int] = {}
+    for index in range(7):
+        names[calendar.day_abbr[index].lower()] = index + 1
+        names[calendar.day_name[index].lower()] = index + 1
+    return names
+
+
+def parse_schedule_days(text: str) -> list[int]:
+    """ISO weekdays (Monday 1) from `sat,sun` or `mon-fri`; a range may wrap past the week's end."""
+    names = _day_numbers()
+    days: set[int] = set()
+    for part in text.lower().split(","):
+        first, dash, last = part.strip().partition("-")
+        if first not in names or (dash and last not in names):
+            raise AccountsError(f"unknown day in {part.strip()!r}; use names like {calendar.day_abbr[0].lower()}")
+        day, end = names[first], names[last] if dash else names[first]
+        days.add(day)
+        while day != end:
+            day = day % 7 + 1
+            days.add(day)
+    return sorted(days)
+
+
+def parse_schedule_hours(text: str) -> tuple[int, int]:
+    """Minutes since midnight for `HH:MM-HH:MM`; the end may be 24:00 and must follow the start."""
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})", text.strip())
+    if not match:
+        raise AccountsError(f"hours must look like 20:00-24:00, not {text!r}")
+    start_h, start_m, end_h, end_m = map(int, match.groups())
+    start, end = start_h * 60 + start_m, end_h * 60 + end_m
+    if start_m > 59 or end_m > 59 or end > 24 * 60 or start >= end:
+        raise AccountsError(f"{text!r} is not a window within one day; split one that crosses midnight")
+    return start, end
+
+
+def load_board_schedule() -> list[dict]:
+    try:
+        record = json.loads(BOARD_SCHEDULE_PATH.read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as error:
+        raise AccountsError(f"{BOARD_SCHEDULE_PATH} is unreadable: {error}")
+    return list(record.get("windows") or [])
+
+
+def save_board_schedule(windows: list[dict]) -> None:
+    if not windows:
+        BOARD_SCHEDULE_PATH.unlink(missing_ok=True)
+        return
+    _write_0600(BOARD_SCHEDULE_PATH, json.dumps({"version": 1, "windows": windows}, indent=2) + "\n")
+
+
+def active_board_window(windows: list[dict], now: datetime) -> int | None:
+    """Index of the first window that holds `now` (already in the board's zone), or None."""
+    minute = now.hour * 60 + now.minute
+    for index, window in enumerate(windows):
+        if now.isoweekday() in window["days"] and window["start"] <= minute < window["end"]:
+            return index
+    return None
+
+
+def describe_board_window(window: dict) -> str:
+    days = " ".join(calendar.day_abbr[day - 1] for day in window["days"])
+    hours = f"{window['start'] // 60:02d}:{window['start'] % 60:02d}-{window['end'] // 60:02d}:{window['end'] % 60:02d}"
+    shown = "every local account" if window["show"] == "all" else "only " + ", ".join(window["show"])
+    return f"{days}  {hours}  {shown}"
+
+
+def cmd_schedule(args) -> None:
+    """View, add, remove or clear the windows that decide which local accounts the board shows."""
+    windows = load_board_schedule()
+    action = args.schedule_command
+    if action == "add":
+        start, end = parse_schedule_hours(args.hours) if args.hours else (0, 24 * 60)
+        show: str | list[str] = "all"
+        if args.show != "all":
+            show = [label.strip() for label in args.show.split(",") if label.strip()]
+            known = set((load_blobs().get("accounts") or {}).keys())
+            unknown = [label for label in show if label not in known]
+            if unknown:
+                raise AccountsError(f"no stored account named {', '.join(unknown)}")
+        windows.append({"days": parse_schedule_days(args.days), "start": start, "end": end, "show": show})
+        save_board_schedule(windows)
+    elif action == "remove":
+        if not 1 <= args.number <= len(windows):
+            raise AccountsError(f"there is no window {args.number}; `accounts schedule` lists them")
+        windows.pop(args.number - 1)
+        save_board_schedule(windows)
+    elif action == "clear":
+        windows = []
+        save_board_schedule(windows)
+
+    if not windows:
+        print("no board schedule: the board follows ACCOUNTS_HIDE_OTHERS and ACCOUNTS_HIDE")
+        return
+    print("board schedule (first matching window wins):")
+    for number, window in enumerate(windows, 1):
+        print(f"  {number}. {describe_board_window(window)}")
+    now = datetime.now(board_zone())
+    active = active_board_window(windows, now)
+    shown = (
+        f"window {active + 1}, {describe_board_window(windows[active]).split('  ')[-1]}"
+        if active is not None
+        else "no window, so ACCOUNTS_HIDE_OTHERS and ACCOUNTS_HIDE apply"
+    )
+    print(f"now {now.strftime('%a %H:%M %Z')}: {shown}")
+
+
 def cmd_status(_args) -> None:
     with locked():
         blobs = load_blobs()
@@ -3686,6 +3813,23 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="mode + per-account 5h/7d/fable headroom + ⚠login flags",
     ).set_defaults(fn=cmd_status)
+
+    p_schedule = sub.add_parser(
+        "schedule", help="view or change when the board shows which local accounts"
+    )
+    p_schedule.set_defaults(fn=cmd_schedule, schedule_command=None)
+    schedule_sub = p_schedule.add_subparsers(dest="schedule_command")
+    p_schedule_add = schedule_sub.add_parser(
+        "add", help="add a window: days, optional HH:MM-HH:MM hours, and the accounts it shows"
+    )
+    p_schedule_add.add_argument("days", help="day names or ranges, e.g. sat,sun or mon-fri")
+    p_schedule_add.add_argument("hours", nargs="?", help="HH:MM-HH:MM local time; all day when omitted")
+    p_schedule_add.add_argument(
+        "--show", default="all", help="'all' (default) or comma-separated account labels"
+    )
+    p_schedule_remove = schedule_sub.add_parser("remove", help="remove window N")
+    p_schedule_remove.add_argument("number", type=int)
+    schedule_sub.add_parser("clear", help="remove every window")
 
     sub.add_parser(
         "poll", help="refresh the usage board for all stored accounts now"

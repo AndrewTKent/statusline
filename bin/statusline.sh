@@ -403,8 +403,16 @@ account_label_is_excluded() {
 
 # Board-only: ACCOUNTS_HIDE drops rows from the statusline; the router still uses them.
 # ACCOUNTS_HIDE_OTHERS=1 hides every local row; callers always keep this session's account.
+# A board-schedule window in effect replaces both with the rows it names.
 account_label_is_hidden() {
     local candidate="$1" hidden
+    if [ -n "$BOARD_SCHEDULE_SHOW" ]; then
+        [ "${BOARD_SCHEDULE_SHOW#show:}" = "*" ] && return 1
+        for hidden in ${BOARD_SCHEDULE_SHOW#show:}; do
+            [ "$candidate" = "$hidden" ] && return 1
+        done
+        return 0
+    fi
     [ "${ACCOUNTS_HIDE_OTHERS:-0}" = "1" ] && return 0
     for hidden in ${ACCOUNTS_HIDE:-}; do
         [ "$candidate" = "$hidden" ] && return 0
@@ -611,6 +619,22 @@ fmt_epoch() {  # $1=epoch  $2=strftime format — rendered in $_SL_TZ
         TZ="$_SL_TZ" date -r "$1" +"$2" 2>/dev/null
     fi
 }
+
+# The board schedule (`accounts schedule`) names, for the first window that holds the current day and
+# time in $_SL_TZ, the local rows the board shows: "show:*" for every account, "show:<labels>"
+# otherwise. Nothing prints when no window holds now, and the board follows ACCOUNTS_HIDE_OTHERS
+# and ACCOUNTS_HIDE as before. BOARD_SCHEDULE_NOW sets the epoch it is read at.
+board_schedule_show() {
+    local file="${BOARD_SCHEDULE_FILE:-$HOME/.accounts/board-schedule.json}" epoch day minute
+    [ -f "$file" ] || return 0
+    epoch="${BOARD_SCHEDULE_NOW:-$(date +%s)}"
+    day=$(fmt_epoch "$epoch" %u)
+    minute=$(( 10#$(fmt_epoch "$epoch" %H) * 60 + 10#$(fmt_epoch "$epoch" %M) ))
+    jq -r --argjson day "$day" --argjson minute "$minute" '
+        first(.windows[]? | select(any(.days[]; . == $day) and .start <= $minute and $minute < .end))
+        | "show:" + (if .show == "all" then "*" else (.show | join(" ")) end)' "$file" 2>/dev/null
+}
+BOARD_SCHEDULE_SHOW=$(board_schedule_show)
 
 format_reset_time() {
     local iso_str="$1"

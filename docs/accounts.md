@@ -75,6 +75,9 @@ count the status line shows.
 | `accounts auto` | Clear global and pane pins, then route supervised sessions to the freshest account |
 | `accounts fable` | Switch live supervised sessions to Fable while headroom is available |
 | `accounts status` | Mode + per-account 5h/7d/Fable headroom + ⚠login flags |
+| `accounts schedule` | List the board schedule's windows and what the board shows now |
+| `accounts schedule add <days> [HH:MM-HH:MM] [--show all\|<label,...>]` | Add a window: days such as `sat,sun` or `mon-fri`, hours in the board's zone (all day when omitted), and the local accounts it shows (`all` by default). The first window holding the current day and time decides the board; outside every window `ACCOUNTS_HIDE_OTHERS` and `ACCOUNTS_HIDE` apply |
+| `accounts schedule remove <n>` / `accounts schedule clear` | Remove one window, or all of them |
 | `accounts poll` | Refresh dormant stored/native profiles, then poll every routable account |
 | `accounts refresh [label]` | Refresh stale file-backed credentials without a browser |
 | `accounts mint <label>` | Mint + vault a 1-year token for headless jobs |

@@ -250,6 +250,34 @@ only_current=$(render_with_boards)
 [[ "$only_current" == *$'\n* Work '* ]] || { printf 'hide-others dropped the routed account row\n' >&2; exit 1; }
 [[ "$only_current" != *$'\n· General '* && "$only_current" != *$'\n· Personal '* ]] || { printf 'hide-others kept another local row\n' >&2; exit 1; }
 [[ "$only_current" == *$'\n· Team-1 '* ]] || { printf 'hide-others removed a remote board row\n' >&2; exit 1; }
+# A board-schedule window in effect replaces hide-others with the rows it names, read in the board's zone.
+local_epoch() {  # $1="YYYY-MM-DD HH:MM" $2=zone
+    python3 -c 'import sys; from datetime import datetime; from zoneinfo import ZoneInfo; print(int(datetime.fromisoformat(sys.argv[1]).replace(tzinfo=ZoneInfo(sys.argv[2])).timestamp()))' "$1" "$2"
+}
+shows_every_row() { [[ "$1" == *$'\n· General '* && "$1" == *$'\n· Personal '* ]]; }
+schedule_render() {  # $1=local time in $2's zone, $2=board zone
+    BOARD_SCHEDULE_NOW=$(local_epoch "$1" "$2") STATUSLINE_TZ="$2" render_with_boards
+}
+mkdir -p "$TEST_HOME/.accounts"
+# Saturday, Sunday, Tuesday, Friday all day, and Monday, Wednesday, Thursday from 20:00.
+printf '%s\n' '{"version":1,"windows":[{"days":[2,5,6,7],"start":0,"end":1440,"show":"all"},{"days":[1,3,4],"start":1200,"end":1440,"show":"all"}]}' \
+    > "$TEST_HOME/.accounts/board-schedule.json"
+LA=America/Los_Angeles
+! shows_every_row "$(schedule_render '2026-11-09 19:59' "$LA")" || { printf 'a schedule showed every row before its window opened\n' >&2; exit 1; }
+shows_every_row "$(schedule_render '2026-11-09 20:00' "$LA")" || { printf 'a schedule did not show every row once its window opened\n' >&2; exit 1; }
+shows_every_row "$(schedule_render '2026-11-10 23:59' "$LA")" || { printf 'an all-day window closed before midnight\n' >&2; exit 1; }
+! shows_every_row "$(schedule_render '2026-11-11 00:00' "$LA")" || { printf 'an all-day window stayed open past midnight\n' >&2; exit 1; }
+shows_every_row "$(schedule_render '2026-11-13 09:00' "$LA")" || { printf 'a Friday all-day window did not show every row\n' >&2; exit 1; }
+! shows_every_row "$(schedule_render '2026-11-11 01:00' America/New_York)" || { printf 'a schedule took the day from another zone\n' >&2; exit 1; }
+shows_every_row "$(schedule_render '2026-11-09 22:30' America/New_York)" || { printf 'a schedule did not follow the board zone\n' >&2; exit 1; }
+# A window that names accounts shows only those, beside this session's account.
+printf '%s\n' '{"version":1,"windows":[{"days":[3],"start":540,"end":1020,"show":["general"]}]}' \
+    > "$TEST_HOME/.accounts/board-schedule.json"
+named_only=$(schedule_render '2026-11-11 10:00' "$LA")
+[[ "$named_only" == *$'\n· General '* && "$named_only" == *$'\n* Work '* && "$named_only" != *$'\n· Personal '* ]] ||
+    { printf 'a window naming accounts did not show exactly those beside the session account\n' >&2; exit 1; }
+[[ "$(schedule_render '2026-11-11 17:00' "$LA")" != *$'\n· General '* ]] || { printf 'a window stayed open at its end time\n' >&2; exit 1; }
+rm -f "$TEST_HOME/.accounts/board-schedule.json"
 sed -i.bak '/^ACCOUNTS_HIDE_OTHERS=1$/d' "$TEST_HOME/.claude/statusline.conf" && rm -f "$TEST_HOME/.claude/statusline.conf.bak"
 [[ "$board_output" != *$'\u25b8'* ]] || { printf 'a board without a jobs file rendered a job line\n' >&2; exit 1; }
 PANE_TEST_ID=$({ printf 'iterm:PANE-TEST' | shasum -a 256 2>/dev/null || printf 'iterm:PANE-TEST' | sha256sum; } | cut -c1-12)

@@ -5677,3 +5677,80 @@ class TestBoxLogin:
         else:
             accounts.main(["login", "work", "--box"])
             assert logins == [("work", expected)]
+
+
+class TestBoardSchedule:
+    @pytest.mark.parametrize(
+        "text, days",
+        [
+            ("sat,sun,tue,fri", [2, 5, 6, 7]),
+            ("mon-fri", [1, 2, 3, 4, 5]),
+            ("fri-mon", [1, 5, 6, 7]),
+            ("Wednesday", [3]),
+        ],
+    )
+    def test_days_read_names_lists_and_wrapping_ranges(self, text, days):
+        assert accounts.parse_schedule_days(text) == days
+
+    def test_an_unknown_day_is_refused(self):
+        with pytest.raises(accounts.AccountsError, match="unknown day"):
+            accounts.parse_schedule_days("sat,funday")
+
+    @pytest.mark.parametrize("text", ["22:00-02:00", "9-17", "10:00-10:00", "08:60-09:00"])
+    def test_hours_outside_one_day_are_refused(self, text):
+        with pytest.raises(accounts.AccountsError):
+            accounts.parse_schedule_hours(text)
+
+    def test_hours_may_end_at_midnight(self):
+        assert accounts.parse_schedule_hours("20:00-24:00") == (1200, 1440)
+
+    @pytest.mark.parametrize(
+        "moment, expected",
+        [
+            (datetime(2026, 11, 9, 19, 59), None),
+            (datetime(2026, 11, 9, 20, 0), 0),
+            (datetime(2026, 11, 10, 9, 0), 1),
+            (datetime(2026, 11, 10, 17, 0), 2),
+            (datetime(2026, 11, 11, 0, 0), None),
+        ],
+    )
+    def test_the_first_window_holding_now_wins(self, moment, expected):
+        windows = [
+            {"days": [1], "start": 1200, "end": 1440, "show": "all"},
+            {"days": [2], "start": 540, "end": 1020, "show": ["work"]},
+            {"days": [2], "start": 0, "end": 1440, "show": "all"},
+        ]
+        assert accounts.active_board_window(windows, moment) == expected
+
+    def test_the_command_adds_removes_and_clears_windows(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(accounts, "BOARD_SCHEDULE_PATH", tmp_path / "board-schedule.json")
+        monkeypatch.setattr(accounts, "retire_legacy_route_agent", lambda: None)
+        monkeypatch.setattr(accounts, "load_blobs", lambda: {"accounts": {"work": {}}})
+        monkeypatch.setenv("STATUSLINE_TZ", "UTC")
+        accounts.main(["schedule", "add", "sat,sun"])
+        accounts.main(["schedule", "add", "mon-fri", "09:00-17:00", "--show", "work"])
+        assert json.loads(accounts.BOARD_SCHEDULE_PATH.read_text())["windows"] == [
+            {"days": [6, 7], "start": 0, "end": 1440, "show": "all"},
+            {"days": [1, 2, 3, 4, 5], "start": 540, "end": 1020, "show": ["work"]},
+        ]
+        accounts.main(["schedule", "remove", "1"])
+        assert [w["show"] for w in json.loads(accounts.BOARD_SCHEDULE_PATH.read_text())["windows"]] == [["work"]]
+        capsys.readouterr()
+        accounts.main(["schedule", "clear"])
+        assert not accounts.BOARD_SCHEDULE_PATH.exists()
+        assert "no board schedule" in capsys.readouterr().out
+
+    def test_a_window_may_only_name_stored_accounts(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(accounts, "BOARD_SCHEDULE_PATH", tmp_path / "board-schedule.json")
+        monkeypatch.setattr(accounts, "retire_legacy_route_agent", lambda: None)
+        monkeypatch.setattr(accounts, "load_blobs", lambda: {"accounts": {"work": {}}})
+        with pytest.raises(SystemExit):
+            accounts.main(["schedule", "add", "mon", "--show", "work,wrok"])
+        assert "no stored account named wrok" in capsys.readouterr().err
+        assert not accounts.BOARD_SCHEDULE_PATH.exists()
+
+    def test_the_board_zone_prefers_the_statusline_setting(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(accounts, "HOME", tmp_path)
+        monkeypatch.setenv("TZ", "UTC")
+        monkeypatch.setenv("STATUSLINE_TZ", "Asia/Tokyo")
+        assert str(accounts.board_zone()) == "Asia/Tokyo"
