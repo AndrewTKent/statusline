@@ -74,6 +74,16 @@ file_mtime() {
     printf '%s' "$mtime"
 }
 
+# file_size PATH — bytes, empty when unreadable. Same GNU-first probe order as
+# file_mtime: BSD-first (`stat -f %z`) prints GNU's filesystem report before it
+# fails, so the captured value was never a number.
+file_size() {
+    local size
+    size=$(stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null)
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$size"
+}
+
 format_tokens() {
     local num=$1
     if [ "$num" -ge 1000000 ] 2>/dev/null; then
@@ -1638,9 +1648,16 @@ profile_cache_file="/tmp/claude/statusline-profile-cache-${ACCOUNT_CACHE_KEY}.js
 prev_poll_file="/tmp/claude/statusline-usage-prev-${ACCOUNT_CACHE_KEY}.json"
 lock_file="/tmp/claude/statusline-refresh-${ACCOUNT_CACHE_KEY}.lock"
 token_hash_file="/tmp/claude/statusline-token-hash-${ACCOUNT_CACHE_KEY}"
+# A failed poll (HTTP 429, network down) writes no cache, so without a marker
+# every render past cache_max_age polls again and keeps the endpoint limiting us.
+usage_backoff_file="/tmp/claude/statusline-usage-backoff-${ACCOUNT_CACHE_KEY}"
+usage_backoff_secs=300
 creds_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 creds_mtime_file="/tmp/claude/statusline-creds-mtime-${ACCOUNT_CACHE_KEY}"
 cache_max_age=60
+# stdin's rate_limits already carries the 5h and 7d windows (see below), so the
+# poll only feeds extra_usage and the account ledger and can run 5x less often.
+[[ "$input" == *'"rate_limits"'* ]] && cache_max_age=300
 profile_cache_max_age=300
 needs_refresh=false
 needs_profile_refresh=false
@@ -1654,7 +1671,7 @@ if [ -f "$creds_file" ]; then
     creds_mtime=$(file_mtime "$creds_file")
     old_creds_mtime=$(cat "$creds_mtime_file" 2>/dev/null)
     if [ "$old_creds_mtime" != "$creds_mtime" ]; then
-        rm -f "$cache_file" "$profile_cache_file" "$lock_file"
+        rm -f "$cache_file" "$profile_cache_file" "$lock_file" "$usage_backoff_file"
         echo "$creds_mtime" > "$creds_mtime_file"
         needs_refresh=true
         needs_profile_refresh=true
@@ -1668,7 +1685,7 @@ if [ -n "$current_token" ] && [ "$current_token" != "null" ]; then
     old_hash=$(cat "$token_hash_file" 2>/dev/null)
     if [ "$old_hash" != "$current_hash" ]; then
         profile_identity_unverified=true
-        rm -f "$cache_file" "$profile_cache_file" "$lock_file"
+        rm -f "$cache_file" "$profile_cache_file" "$lock_file" "$usage_backoff_file"
         echo "$current_hash" > "$token_hash_file"
         needs_refresh=true
         p_response=$(curl -s --max-time 2 \
@@ -2195,6 +2212,10 @@ if [ -f "$cache_file" ]; then
 else
     needs_refresh=true
 fi
+if $needs_refresh && [ -f "$usage_backoff_file" ]; then
+    backoff_mtime=$(file_mtime "$usage_backoff_file" || echo 0)
+    [ $(( now - backoff_mtime )) -lt "$usage_backoff_secs" ] && needs_refresh=false
+fi
 
 if [ -f "$profile_cache_file" ]; then
     p_mtime=$(file_mtime "$profile_cache_file")
@@ -2242,7 +2263,14 @@ if $needs_refresh || $needs_profile_refresh; then
                         -H "anthropic-beta: oauth-2025-04-20" \
                         -H "User-Agent: claude-code/2.1.34" \
                         "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+                    usage_ok=false
                     if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
+                        usage_ok=true
+                        rm -f "$usage_backoff_file"
+                    else
+                        touch "$usage_backoff_file"
+                    fi
+                    if $usage_ok; then
                         # Save previous poll for interpolation
                         if [ -f "$cache_file" ]; then
                             prev_ts=$(file_mtime "$cache_file")
@@ -2312,7 +2340,7 @@ if $needs_refresh || $needs_profile_refresh; then
                                     extra_limit:     ($u.extra_usage.monthly_limit // 0)
                                 }' >> "$hist_file" 2>/dev/null
                             if [ -f "$hist_file" ]; then
-                                hist_size=$(stat -f %z "$hist_file" 2>/dev/null || stat -c %s "$hist_file" 2>/dev/null || echo 0)
+                                hist_size=$(file_size "$hist_file" || echo 0)
                                 if [ "$hist_size" -gt 5000000 ] 2>/dev/null; then
                                     # Byte-truncate then drop the partial first line so readers
                                     # don't have to defend against a corrupt leading record.
@@ -2333,9 +2361,12 @@ usage_data=""
 _usage_cache_seen=0
 _usage_data_source=""
 if [ -f "$cache_file" ]; then
-    _usage_cache_id_before=$(stat -f '%i:%m' "$cache_file" 2>/dev/null || stat -c '%i:%Y' "$cache_file" 2>/dev/null || echo "")
+    # GNU spelling first: on Linux and Git Bash, BSD's `stat -f` is --file-system
+    # and prints a report (free blocks included) ahead of failing, so before and
+    # after could differ and the cache was dropped at random.
+    _usage_cache_id_before=$(stat -c '%i:%Y' "$cache_file" 2>/dev/null || stat -f '%i:%m' "$cache_file" 2>/dev/null || echo "")
     usage_data=$(cat "$cache_file" 2>/dev/null)
-    _usage_cache_id_after=$(stat -f '%i:%m' "$cache_file" 2>/dev/null || stat -c '%i:%Y' "$cache_file" 2>/dev/null || echo "")
+    _usage_cache_id_after=$(stat -c '%i:%Y' "$cache_file" 2>/dev/null || stat -f '%i:%m' "$cache_file" 2>/dev/null || echo "")
     if [ -n "$_usage_cache_id_before" ] && [ "$_usage_cache_id_before" = "$_usage_cache_id_after" ]; then
         _usage_cache_seen="${_usage_cache_id_after##*:}"
         _usage_data_source="cache"
@@ -2372,6 +2403,31 @@ if [ -n "$ACCT_EMAIL" ]; then
             _usage_data_source="ledger"
         fi
     fi
+fi
+
+# Claude Code sends the 5h and 7d windows on stdin as
+# .rate_limits.{five_hour,seven_day}.{used_percentage,resets_at (epoch s)}.
+# Prefer them over the poll: current on every render, no token, no network.
+# Reshaped into the /api/oauth/usage schema so everything below is unchanged;
+# the polled cache still supplies extra_usage and scoped limits, which stdin
+# doesn't carry. Source "stdin" also skips the poll-to-poll interpolation,
+# which would only drift a value that is already current.
+_stdin_usage=$(jq -c '
+    def win: if . == null then null else
+        {utilization: .used_percentage,
+         resets_at: (.resets_at | if type == "number" then todate else . end)} end;
+    .rate_limits // empty
+    | select(.five_hour or .seven_day)
+    | {five_hour: (.five_hour | win), seven_day: (.seven_day | win)}
+    | with_entries(select(.value != null))
+' <<< "$input" 2>/dev/null)
+if [ -n "$_stdin_usage" ]; then
+    if [ -n "$usage_data" ] && jq -e . >/dev/null 2>&1 <<< "$usage_data"; then
+        usage_data=$(jq -cn --argjson c "$usage_data" --argjson s "$_stdin_usage" '$c * $s' 2>/dev/null || printf '%s' "$_stdin_usage")
+    else
+        usage_data="$_stdin_usage"
+    fi
+    _usage_data_source="stdin"
 fi
 
 # ── Account display — show full email with a color chosen by tag ──
