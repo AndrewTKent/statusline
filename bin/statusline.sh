@@ -36,6 +36,10 @@ export AGENT_SESSIONS_PATH                # live-state.py runs as a subprocess
 
 FOCUS_FILE="$HOME/.claude/focus"
 
+# The epoch the shared renderer and the remote boards read ages, resets and windows against; STATUSLINE_NOW fixes it.
+RENDER_NOW="${STATUSLINE_NOW:-}"
+case "$RENDER_NOW" in ''|*[!0-9]*) RENDER_NOW=$(date +%s) ;; esac
+
 # The routing mode as the router reads it, "<mode><TAB><label>": with ACCOUNTS_PINS=0 a stored set is auto.
 read_route_mode() {
     local mode label
@@ -645,11 +649,11 @@ fmt_epoch() {  # $1=epoch  $2=strftime format — rendered in $_SL_TZ
 # The board schedule (`accounts schedule`) names, for the first window that holds the current day and
 # time in $_SL_TZ, the local rows the board shows: "show:*" for every account, "show:<labels>"
 # otherwise. Nothing prints when no window holds now, and the board follows ACCOUNTS_HIDE_OTHERS
-# and ACCOUNTS_HIDE as before. BOARD_SCHEDULE_NOW sets the epoch it is read at.
+# and ACCOUNTS_HIDE as before. It is read at RENDER_NOW.
 board_schedule_show() {
     local file="${BOARD_SCHEDULE_FILE:-$HOME/.accounts/board-schedule.json}" epoch day minute
     [ -f "$file" ] || return 0
-    epoch="${BOARD_SCHEDULE_NOW:-$(date +%s)}"
+    epoch="$RENDER_NOW"
     day=$(fmt_epoch "$epoch" %u)
     minute=$(( 10#$(fmt_epoch "$epoch" %H) * 60 + 10#$(fmt_epoch "$epoch" %M) ))
     jq -r --argjson day "$day" --argjson minute "$minute" '
@@ -670,8 +674,7 @@ format_reset_time() {
     # If the reset time is in the past, project forward in 5-hour increments.
     # 30s grace so a reset that just elapsed rolls forward instead of
     # displaying as "now" for half a minute.
-    local now
-    now=$(date +%s)
+    local now="$RENDER_NOW"
     while [ "$epoch" -le "$((now + 30))" ]; do
         epoch=$((epoch + 18000))
     done
@@ -781,7 +784,7 @@ shared_reset_relative() {
     [ -z "$resets_at" ] || [ "$resets_at" = "null" ] && { printf '—'; return; }
     epoch=$(iso_to_epoch "$resets_at")
     [ -z "$epoch" ] && { printf '—'; return; }
-    now=$(date +%s)
+    now="$RENDER_NOW"
     delta=$(( epoch - now ))
     [ "$delta" -le 0 ] && { printf 'now'; return; }
     if [ "$delta" -lt 3600 ]; then
@@ -811,7 +814,7 @@ remote_age_text() {
 remote_epoch_relative() {
     local epoch="$1" now delta
     case "$epoch" in ''|*[!0-9]*|0) printf '—'; return ;; esac
-    now=$(date +%s)
+    now="$RENDER_NOW"
     delta=$(( epoch - now ))
     [ "$delta" -le 0 ] && { printf 'now'; return; }
     remote_age_text "$delta"
@@ -871,7 +874,7 @@ remote_board_dirs() {
 remote_board_labels() {
     local root="$1" board_dir now_epoch
     [ -d "$root" ] || return 0
-    now_epoch=$(date +%s)
+    now_epoch="$RENDER_NOW"
     local -a board_dirs
     board_dirs=()
     while IFS= read -r board_dir; do board_dirs+=( "$board_dir" ); done < <(remote_board_dirs "$root")
@@ -977,7 +980,7 @@ remote_board_lines() {
     local RB_SEP=$'\037'
     [ -d "$root" ] || return 0
     case "$max_age" in ''|*[!0-9]*|0) max_age=900 ;; esac
-    now_epoch=$(date +%s)
+    now_epoch="$RENDER_NOW"
     local board_dir board_name fetched_at board_error board_up board_probe board_state age fresh
     local rows codex_rows row_label row_five row_five_stale row_five_reset row_seven row_fable row_fable_reset row_expired
     local cx_label cx_week cx_week_reset cx_error
@@ -1154,7 +1157,7 @@ render_shared_account_snapshot() {
     case "$snapshot_max_age" in
         ''|*[!0-9]*|0) snapshot_max_age=180 ;;
     esac
-    now_epoch=$(date +%s)
+    now_epoch="$RENDER_NOW"
     if [ "$snapshot_state" = "stable" ]; then
         snapshot_values=$(jq -r --arg label "$routed_label" --argjson status "$input" '
             if .version != 1 or (.accounts | type != "object") then error("invalid snapshot") else . end |
@@ -1426,7 +1429,7 @@ render_shared_account_snapshot() {
     local metrics_db="${AGENT_METRICS_DB:-$HOME/Library/Application Support/statusline/agent-metrics/metrics.sqlite3}"
     if [ "${AGENT_METRICS_RECORDER:-0}" = "1" ] && [ -r "$metrics_db" ] && command -v sqlite3 >/dev/null 2>&1; then
         today_tokens=$(sqlite3 -cmd '.timeout 1000' "$metrics_db" \
-            "select coalesce(sum(input_tokens + output_tokens), 0) from minute_metrics where provider='claude' and minute >= strftime('%s','now','localtime','start of day','utc') * 1000" \
+            "select coalesce(sum(input_tokens + output_tokens), 0) from minute_metrics where provider='claude' and minute >= strftime('%s',$RENDER_NOW,'unixepoch','localtime','start of day','utc') * 1000" \
             2>/dev/null)
     fi
     if [[ ! "$today_tokens" =~ ^[0-9]+$ ]] && [ -r "$HOME/.claude/token-scan-summary.json" ]; then

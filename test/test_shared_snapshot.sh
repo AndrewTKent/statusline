@@ -55,10 +55,15 @@ mkdir -p "$TEST_HOME/.claude/projects/$project_dir"
 cat > "$TEST_HOME/.claude/projects/$project_dir/session-test.jsonl" <<JSON
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git -C $WORKTREE/nested status"}}]}}
 JSON
+# Every render reads its clock from STATUSLINE_NOW, so an age the fixtures below set holds however slow the run.
+# It runs two days behind the wall clock, a different local date even across a 25-hour day, so a render
+# that reads the wall clock instead fails at any speed.
+NOW=$(( $(date +%s) - 2 * 86400 ))
+export STATUSLINE_NOW="$NOW"
 sqlite3 "$TEST_HOME/metrics.sqlite3" >/dev/null <<SQL
 pragma journal_mode=wal;
 create table minute_metrics(provider text, minute integer, input_tokens integer, output_tokens integer);
-insert into minute_metrics values('claude', strftime('%s','now','localtime','start of day','utc') * 1000, 1200, 34);
+insert into minute_metrics values('claude', strftime('%s',$NOW,'unixepoch','localtime','start of day','utc') * 1000, 1200, 34);
 SQL
 sqlite3 "$TEST_HOME/metrics.sqlite3" "pragma wal_checkpoint(truncate);" >/dev/null
 rm -f "$TEST_HOME/metrics.sqlite3-wal" "$TEST_HOME/metrics.sqlite3-shm"
@@ -68,7 +73,6 @@ pr_cache_key=$(printf '%s\0%s' "$worktree_root" "$branch" | cksum)
 pr_cache_key="${pr_cache_key%% *}"
 printf '{"state":"OPEN","number":9,"title":"Cached local PR"}\n' > "$TEST_TMP/statusline-pr-${pr_cache_key}.json"
 
-NOW=$(date +%s)
 cat > "$TEST_HOME/.accounts/statusline-snapshot.json" <<JSON
 {
   "version": 1,
@@ -77,7 +81,7 @@ cat > "$TEST_HOME/.accounts/statusline-snapshot.json" <<JSON
   "mode": {"mode": "auto", "label": null, "global_generation": 7},
   "accounts": {
     "work": {
-      "five_hour": {"used_pct": 42.5, "resets_at": "2099-01-01T12:00:00Z", "observed_at": $NOW, "stale": false, "pending_reset": false},
+      "five_hour": {"used_pct": 42.5, "resets_at": "$(jq -nr --argjson t $(( NOW - 3600 )) '$t | todate')", "observed_at": $NOW, "stale": false, "pending_reset": false},
       "seven_day": {"used_pct": 66, "resets_at": "2099-01-07T12:00:00Z", "observed_at": $NOW, "stale": false, "pending_reset": false},
       "scoped": [{"kind": "fable", "label": "Fable", "used_pct": 17, "resets_at": "2099-01-07T12:00:00Z", "observed_at": $NOW, "stale": false, "pending_reset": false}],
       "expired": false,
@@ -159,7 +163,13 @@ lapsed_line=$(printf '%s\n' "$plain_output" | grep 'Lapsed' || true)
 }
 [[ "$plain_output" != *'project ›'* ]] || { printf 'default renderer collapsed checkout identity\n' >&2; exit 1; }
 [[ "$output" == *$'\033]0;metrics-pane'* ]] || { printf 'shared renderer did not refresh terminal title\n' >&2; exit 1; }
-[[ "$output" != *"2099-01-01 12:00:00 · stale"* ]] || { printf 'fresh current window rendered stale\n' >&2; exit 1; }
+session_line=$(grep '^session ' <<< "$plain_output" || true)
+[[ -n "$session_line" && "$session_line" != *stale* ]] || { printf 'a fresh snapshot rendered its 5-hour row stale: %s\n' "$session_line" >&2; exit 1; }
+clock_text() {  # $1=epoch, as a reset time renders in the renderer's default zone
+    local zone="${STATUSLINE_TZ:-${TZ:-America/Los_Angeles}}"
+    { TZ="$zone" date -d "@$1" '+%l:%M%p %Z' 2>/dev/null || TZ="$zone" date -r "$1" '+%l:%M%p %Z'; } | sed 's/^ //; s/AM /am /; s/PM /pm /'
+}
+[[ "$session_line" == *"resets $(clock_text $(( NOW + 4 * 3600 )))" ]] || { printf 'a 5-hour reset that has passed did not roll forward from the render clock: %s\n' "$session_line" >&2; exit 1; }
 [[ "$output" != *"2099-01-01"* ]] || { printf 'raw reset timestamp leaked into renderer\n' >&2; exit 1; }
 [[ "$output" != *$'cost   '* ]] || { printf 'shared renderer added cost noise\n' >&2; exit 1; }
 general_line=""
@@ -169,6 +179,8 @@ done <<< "$plain_output"
 [[ -n "$general_line" && "$general_line" != *"~ stale"* ]] || { printf 'fresh account without a scoped limit rendered stale\n' >&2; exit 1; }
 ultra_line=$(awk '/^[·*] Ultra /{$1 = $1; print}' <<< "$plain_output")
 [[ "$ultra_line" == "· Ultra 5% 8% "[0-9]* && "$ultra_line" != *"—"* ]] || { printf 'a polled account with no 5-hour window did not leave its 5h cells blank: %s\n' "$ultra_line" >&2; exit 1; }
+ultra_reset_days=$(( ($(jq -n '"2099-01-07T12:00:00Z" | fromdate') - NOW) / 86400 ))
+[[ "$ultra_line" == *" ${ultra_reset_days}d" ]] || { printf 'a local row did not count its reset from the render clock: %s\n' "$ultra_line" >&2; exit 1; }
 personal_line=$(awk '/^[·*] Personal /{$1 = $1; print}' <<< "$plain_output")
 [[ "$personal_line" == "· Personal 91% pending — — —"* ]] || { printf 'an unpolled weekly window lost its dash: %s\n' "$personal_line" >&2; exit 1; }
 local_order=$(awk '/^[·*] (General|Personal|Work) /{printf "%s ", $2}' <<< "$plain_output")
@@ -256,7 +268,7 @@ local_epoch() {  # $1="YYYY-MM-DD HH:MM" $2=zone
 }
 shows_every_row() { [[ "$1" == *$'\n· General '* && "$1" == *$'\n· Personal '* ]]; }
 schedule_render() {  # $1=local time in $2's zone, $2=board zone
-    BOARD_SCHEDULE_NOW=$(local_epoch "$1" "$2") STATUSLINE_TZ="$2" render_with_boards
+    STATUSLINE_NOW=$(local_epoch "$1" "$2") STATUSLINE_TZ="$2" render_with_boards
 }
 mkdir -p "$TEST_HOME/.accounts"
 # Saturday, Sunday, Tuesday, Friday all day, and Monday, Wednesday, Thursday from 20:00.
@@ -309,6 +321,11 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "account": "team-1", "origin_session": "another-session", "sent_at": $(( NOW - 600 )),
       "updated_at": $NOW, "handoffs": 0, "report": false, "workflows": []
     },
+    "their-lane-just-landed": {
+      "state": "done", "branch": "andrew/landed", "head": "2345bcd",
+      "account": "team-1", "origin_session": "another-session", "sent_at": $(( NOW - 600 )),
+      "updated_at": $(( NOW - 60 )), "handoffs": 0, "report": true, "workflows": []
+    },
     "pane-job": {
       "state": "running", "branch": "andrew/pane", "head": "5678def",
       "account": "team-1", "origin_session": "a-session-this-pane-ran-earlier", "origin_pane": "$PANE_TEST_ID",
@@ -354,7 +371,9 @@ jobs_output=$(render_with_boards)
 [[ "$jobs_output" != *"pane-job"* ]] || { printf "another pane's job rendered here\n" >&2; exit 1; }
 pane_jobs_output=$(TMUX="" ITERM_SESSION_ID="w0t0p0:PANE-TEST" render_with_boards)
 [[ "$pane_jobs_output" == *"pane-job"* ]] || { printf 'a job sent from this pane by an earlier session did not render\n' >&2; exit 1; }
-all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
+# 22 characters, wider than the held job: a lane that finished recently sizes the column too.
+all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 REMOTE_JOB_NAME_MAX=22 render_with_boards)
+[[ "$all_jobs_output" =~ demo-job\ {15}running ]] || { printf 'a lane that finished recently did not widen the job column\n' >&2; exit 1; }
 [[ "$all_jobs_output" == *"their-job"* ]] || { printf 'REMOTE_JOBS_SHOW_ALL=1 did not render every job\n' >&2; exit 1; }
 [[ "$(printf '%s\n' "$all_jobs_output" | grep -c 'this session')" = "1" && "$all_jobs_output" == *"demo-job"*"this session"* ]] || { printf 'with every job on screen, only the one this session sent is marked\n' >&2; exit 1; }
 [[ "$jobs_output" == *"2 handoffs"* ]] || { printf 'a running job did not count the moves the router made\n' >&2; exit 1; }
