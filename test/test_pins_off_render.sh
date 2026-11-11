@@ -18,7 +18,8 @@ sed "s#__CWD__#$sandbox/proj#g" "$here/fixtures/input.json" >"$input"
 
 render() {  # $1: statusline.conf contents, $2: ACCOUNTS_PIN
     printf 'MAX_COLS=200\n%s\n' "$1" >"$sandbox/.claude/statusline.conf"
-    (cd "$sandbox/proj" && HOME="$sandbox" TZ=UTC ACCOUNTS_ROUTED_LABEL=a ACCOUNTS_PIN="$2" \
+    (cd "$sandbox/proj" && env -u CLAUDE_CONFIG_DIR -u ACCOUNTS_ROUTER_STATE -u ACCOUNTS_ROUTED_ORG_UUID \
+        HOME="$sandbox" TZ=UTC ACCOUNTS_ROUTED_LABEL=a ACCOUNTS_ROUTED_EMAIL=a@example.com ACCOUNTS_PIN="$2" \
         bash "$script" <"$input") 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
 }
 
