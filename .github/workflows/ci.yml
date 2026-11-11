@@ -64,8 +64,12 @@ jobs:
         run: bash test/test_ledger.sh
       - name: Test file_mtime portability
         run: bash test/test_file_mtime.sh
+      - name: Test stdin rate limits and usage-poll backoff
+        run: bash test/test_stdin_rate_limits.sh
       - name: Test unsupervised badge
         run: bash test/test_unsupervised_badge.sh
+      - name: Test the status line with pins off
+        run: bash test/test_pins_off_render.sh
       - name: Test shared account snapshot renderer
         run: bash test/test_shared_snapshot.sh
       - name: Test stable status line height

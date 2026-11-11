@@ -2453,6 +2453,30 @@ class TestLegacyRouteCleanup:
 
         assert calls == [True]
 
+def _pins_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+    accounts.CONF_PATH.write_text("ACCOUNTS_PINS=0\n")
+
+
+def _pins_unreadable(tmp_path, monkeypatch):
+    real = accounts._read_conf_var
+    monkeypatch.setattr(
+        accounts, "_read_conf_var", lambda name: None if name == "ACCOUNTS_PINS" else real(name)
+    )
+
+
+def test_a_conf_read_that_times_out_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+    accounts.CONF_PATH.write_text("ACCOUNTS_PINS=0\n")
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("bash", 5)
+
+    monkeypatch.setattr(accounts.subprocess, "run", timeout)
+
+    assert accounts._read_conf_var("ACCOUNTS_PINS") is None
+
+
 class TestCmdSet:
     def _paths(self, tmp_path, monkeypatch):
         monkeypatch.setattr(accounts, "LOCK_PATH", tmp_path / "accounts.lock")
@@ -2507,6 +2531,18 @@ class TestCmdSet:
         }
         assert (accounts.PROFILES_PATH / "B" / ".credentials.json").read_text() == live
         assert not accounts.CRED_FILE.exists()
+
+    def test_pins_off_refuses_a_global_pin(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch)
+        _pins_off(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            accounts, "load_blobs", lambda: {"accounts": {"B": {"blob": _live_blob("a")}}}
+        )
+
+        with pytest.raises(accounts.AccountsError, match="ACCOUNTS_PINS=0"):
+            accounts.cmd_set(types.SimpleNamespace(label="B"))
+
+        assert not accounts.MODE_PATH.exists()
 
 
 class TestCmdRoutingMode:
@@ -2893,6 +2929,43 @@ class TestNativeProfiles:
         assert accounts.load_mode() == {"mode": "set", "label": "target"}
         assert (current_profile / ".credentials.json").read_text() == current_blob
         assert (target_profile / ".credentials.json").read_text() == target_blob
+
+    @pytest.mark.parametrize("pins_setting", [_pins_off, _pins_unreadable])
+    def test_known_profile_login_with_pins_off_leaves_routing_alone(
+        self, tmp_path, monkeypatch, pins_setting
+    ):
+        self._paths(tmp_path, monkeypatch)
+        monkeypatch.setattr(accounts, "MODE_PATH", tmp_path / "mode.json")
+        current_blob = _live_blob("current")
+        current_profile = accounts.ensure_native_profile("current", {"blob": current_blob})
+        accounts.ensure_native_profile("target", {"blob": _live_blob("target")})
+        accounts._write_0600(current_profile / ".credentials.json", _live_blob("login"))
+        blobs = {
+            "accounts": {
+                "current": {"blob": current_blob, "email": "current@example.com", "org_uuid": "current-org"},
+                "target": {"blob": _live_blob("target"), "email": "target@example.com", "org_uuid": "target-org"},
+            }
+        }
+        monkeypatch.setattr(
+            accounts,
+            "fetch_profile",
+            lambda _token: {
+                "account": {"email": "target@example.com"},
+                "organization": {"uuid": "target-org"},
+            },
+        )
+        monkeypatch.setattr(
+            accounts,
+            "load_label_pairs",
+            lambda: [("target", "target@example.com", "target-org")],
+        )
+        accounts.save_mode("auto", None)
+        before = accounts.MODE_PATH.read_text()
+        pins_setting(tmp_path, monkeypatch)
+
+        assert accounts.sync_profile_credentials(blobs, persist=False) == set()
+
+        assert accounts.MODE_PATH.read_text() == before
 
     def test_known_fallback_profile_login_preserves_pane_scope(
         self,
@@ -3379,6 +3452,52 @@ class TestPanePolicy:
         assert list(accounts.PANE_PINS_PATH.glob("*.json")) == []
         assert json.loads(accounts.MODE_PATH.read_text())["version"] == 2
 
+    def test_pins_off_ignores_this_panes_pin(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch)
+        monkeypatch.setattr(accounts, "load_label_pairs", list)
+        accounts.save_blobs({"accounts": {"work": {}}})
+        monkeypatch.setattr(accounts, "pane_key", lambda env=None: "a" * 64)
+        accounts.save_mode("auto", None)
+        accounts.save_pane_pin("work")
+        _pins_off(tmp_path, monkeypatch)
+
+        mode, generation = accounts.load_mode_snapshot()
+
+        assert (mode["mode"], mode["label"], mode["policy_scope"]) == ("auto", None, "global")
+        assert generation == (mode["global_generation"], None)
+
+    def test_pins_off_reads_a_stored_set_as_auto(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch)
+        accounts.save_mode("set", "work")
+        _pins_off(tmp_path, monkeypatch)
+
+        mode, _ = accounts.load_mode_snapshot()
+
+        assert (mode["mode"], mode["label"]) == ("auto", None)
+
+    @pytest.mark.parametrize(
+        ("pins_setting", "reason"),
+        [(_pins_off, "ACCOUNTS_PINS=0"), (_pins_unreadable, "could not read statusline.conf")],
+    )
+    def test_pins_off_refuses_a_pane_pin(self, tmp_path, monkeypatch, pins_setting, reason):
+        self._paths(tmp_path, monkeypatch)
+        pins_setting(tmp_path, monkeypatch)
+
+        with pytest.raises(accounts.AccountsError, match=reason):
+            accounts.cmd_pane_set(types.SimpleNamespace(label="work"))
+
+        assert not accounts.PANE_PINS_PATH.exists()
+
+    def test_pins_off_ignores_a_launch_pin(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch)
+        monkeypatch.setenv("ACCOUNTS_PIN", "work")
+        accounts.save_mode("auto", None)
+        _pins_off(tmp_path, monkeypatch)
+
+        _, pin, hard = accounts._route_preferences()
+
+        assert (pin, hard) == (None, False)
+
     def test_pane_pin_precedes_legacy_launch_pin(self, monkeypatch):
         monkeypatch.setenv("ACCOUNTS_PIN", "legacy")
         monkeypatch.setattr(
@@ -3403,6 +3522,18 @@ class TestStatuslineSnapshot:
         monkeypatch.setattr(accounts, "PANE_PINS_PATH", tmp_path / "pane-pins")
         monkeypatch.setattr(accounts, "LOCK_PATH", tmp_path / "accounts.lock")
         monkeypatch.setattr(accounts, "_lock_depth", 0)
+
+    def test_pins_off_publishes_a_stored_set_as_auto(self, tmp_path, monkeypatch):
+        self._paths(tmp_path, monkeypatch)
+        monkeypatch.setattr(accounts, "load_label_pairs", lambda: [("work", "w@example.com", None)])
+        accounts.save_mode("set", "work")
+        _pins_off(tmp_path, monkeypatch)
+
+        snapshot = accounts.write_statusline_snapshot(
+            {"accounts": {"work": {"blob": _live_blob("w"), "email": "w@example.com"}}}, error=None
+        )
+
+        assert (snapshot["mode"]["mode"], snapshot["mode"]["label"]) == ("auto", None)
 
     def test_schema_redaction_reset_semantics_and_hard_limit(self, tmp_path, monkeypatch):
         self._paths(tmp_path, monkeypatch)

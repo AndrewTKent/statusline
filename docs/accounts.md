@@ -69,8 +69,8 @@ count the status line shows.
 
 | Command | What it does |
 |---------|---------------|
-| `accounts set <label>` | Force every supervised session onto `<label>` |
-| `accounts pane set <label>` | Pin only the current terminal pane to `<label>` |
+| `accounts set <label>` | Force every supervised session onto `<label>`; refused where `ACCOUNTS_PINS=0` |
+| `accounts pane set <label>` | Pin only the current terminal pane to `<label>`; refused where `ACCOUNTS_PINS=0` |
 | `accounts pane clear` | Return the current pane to the global policy |
 | `accounts auto` | Clear global and pane pins, then route supervised sessions to the freshest account |
 | `accounts fable` | Switch live supervised sessions to Fable while headroom is available |

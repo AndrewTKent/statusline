@@ -413,7 +413,8 @@ def identity_from_profile(profile: dict) -> dict:
 # ── metadata / config ─────────────────────────────────────────────────────
 
 
-def _conf_var(name: str) -> str:
+def _read_conf_var(name: str) -> str | None:
+    """None when the conf exists but could not be read."""
     if not CONF_PATH.exists():
         return ""
     try:
@@ -425,7 +426,11 @@ def _conf_var(name: str) -> str:
         )
         return out.stdout
     except Exception:
-        return ""
+        return None
+
+
+def _conf_var(name: str) -> str:
+    return _read_conf_var(name) or ""
 
 
 def hard_session_limit_enabled() -> bool:
@@ -452,6 +457,35 @@ def hold_for_reset_enabled() -> bool:
         "ACCOUNTS_HOLD_FOR_RESET"
     )
     return value == "1"
+
+
+def pins_enabled() -> bool:
+    """On unless set to 0: `accounts set <label>` and `accounts pane set` can
+    hold routing on one account. Off, AUTO picks by headroom on every launch."""
+    return _conf_var("ACCOUNTS_PINS") != "0"
+
+
+def _pin_writes_allowed() -> bool:
+    # An unreadable conf may be one that turns pins off, so nothing writes a pin on it.
+    setting = _read_conf_var("ACCOUNTS_PINS")
+    return setting is not None and setting != "0"
+
+
+def _routed_global_mode(pins: bool) -> tuple[dict, int]:
+    mode, generation = _load_global_mode_snapshot()
+    if not pins and mode["mode"] == "set":
+        mode = {**mode, "mode": "auto", "label": None}
+    return mode, generation
+
+
+def _refuse_if_pins_off() -> None:
+    setting = _read_conf_var("ACCOUNTS_PINS")
+    if setting is None:
+        raise AccountsError("could not read statusline.conf to check ACCOUNTS_PINS; try again")
+    if setting == "0":
+        raise AccountsError(
+            "pins are off on this machine (ACCOUNTS_PINS=0); AUTO picks the account with headroom"
+        )
 
 
 def load_label_pairs() -> list[tuple[str, str, str | None]]:
@@ -1099,6 +1133,8 @@ def _pin_known_profile_login(
         target["plan"] = identity.get("plan") or target.get("plan")
         write_profile_credentials(target_label, login_blob)
         transferred = True
+    if not _pin_writes_allowed():
+        return target_label, transferred
     if mode.get("policy_scope") == "pane":
         if mode.get("label") == source_label:
             _save_pane_pin(target_label)
@@ -1401,7 +1437,10 @@ def _migrate_mode_store() -> None:
 
 def load_mode_snapshot() -> tuple[dict, tuple[int, tuple[int, int] | None]]:
     _migrate_mode_store()
-    global_mode, global_generation = _load_global_mode_snapshot()
+    pins = pins_enabled()
+    global_mode, global_generation = _routed_global_mode(pins)
+    if not pins:
+        return {**global_mode, "policy_scope": "global"}, (global_generation, None)
     pin, pane_generation = _load_pane_pin(global_generation)
     if pin is not None:
         return {
@@ -2105,7 +2144,7 @@ def _snapshot_previous_success() -> int | None:
 def write_statusline_snapshot(blobs: dict, *, error: str | None) -> dict:
     now_ts = int(time.time())
     _migrate_mode_store()
-    mode, global_generation = _load_global_mode_snapshot()
+    mode, global_generation = _routed_global_mode(pins_enabled())
     declared = declared_labels(blobs)
     mode_label = mode.get("label")
     if mode_label not in declared:
@@ -2912,7 +2951,7 @@ def _route_preferences() -> tuple[dict, str | None, bool]:
     mode = load_mode()
     if mode.get("policy_scope") == "pane":
         return mode, mode.get("label"), True
-    session_pin = os.environ.get("ACCOUNTS_PIN") or None
+    session_pin = (os.environ.get("ACCOUNTS_PIN") or None) if pins_enabled() else None
     if session_pin is not None:
         return mode, session_pin, False
     if mode.get("mode") == "set":
@@ -3437,6 +3476,7 @@ def _fable_rank(r: dict) -> tuple:
 
 
 def cmd_pane_set(args) -> None:
+    _refuse_if_pins_off()
     if args.label not in declared_labels():
         raise AccountsError(f"'{args.label}' is not a declared account label")
     with locked():
@@ -3476,6 +3516,7 @@ def cmd_brief(args) -> None:
 
 def cmd_set(args) -> None:
     """Force supervised sessions onto <label>."""
+    _refuse_if_pins_off()
     with locked():
         blobs = load_blobs()
         blocked_labels = sync_profile_credentials(blobs, persist=True)
