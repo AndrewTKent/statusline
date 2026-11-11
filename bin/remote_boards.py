@@ -236,12 +236,13 @@ def prune(names: set[str]) -> None:
 
 
 def has_running_job(name: str) -> bool:
+    """A lane at a prompt is live too: someone may be answering it."""
     document = read_json(REMOTE_ROOT / name / JOBS, {})
     jobs = document.get("jobs") if isinstance(document, dict) else None
     if not isinstance(jobs, dict):
         return False
     return any(
-        isinstance(job, dict) and job.get("state") == "running" for job in jobs.values()
+        isinstance(job, dict) and job.get("state") in {"running", "prompt"} for job in jobs.values()
     )
 
 

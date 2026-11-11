@@ -841,7 +841,7 @@ remote_job_slugs() {
         --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
         --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" '
         (.jobs // {}) | to_entries[]
-        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or .value.state == "waiting" or ((.value.updated_at // 0) >= $cutoff))
+        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or .value.state == "waiting" or .value.state == "prompt" or ((.value.updated_at // 0) >= $cutoff))
         | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
                  or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
         | .key[0:$cap]
@@ -901,7 +901,7 @@ remote_job_lines() {
         --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" --arg read "$read_ids" '
         ($read | split("\n") | map({key: ., value: true}) | from_entries) as $seen
         | (.jobs // {}) | to_entries[]
-        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or .value.state == "waiting" or ((.value.updated_at // 0) >= $cutoff))
+        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or .value.state == "waiting" or .value.state == "prompt" or ((.value.updated_at // 0) >= $cutoff))
         # A job belongs to the session that sent it; one with no sender shows everywhere.
         | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
                  or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
@@ -915,7 +915,7 @@ remote_job_lines() {
              then "#\(.value.pr.number)" + (if (.value.pr.verdict // "") != "" then " \(.value.pr.verdict)" else "" end)
              else "" end)]
            | join("")),
-          (select(.value.state == "running")
+          (select(.value.state == "running" or .value.state == "prompt")
            | (.value.workflows // [])[] | select(.running == true)
            | ["wf", (.name // ""), ((.agents_done // 0) | tostring),
               ((.agents_started // 0) | tostring), ((.agents_failed // 0) | tostring),
@@ -932,7 +932,7 @@ remote_job_lines() {
             job)
                 case "$two" in
                     running) job_color="$green" ;;
-                    blocked) job_color="$red" ;;
+                    blocked|prompt) job_color="$red" ;;
                     *)       job_color="$dim" ;;
                 esac
                 $fresh || job_color="$dim"

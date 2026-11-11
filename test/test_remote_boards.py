@@ -195,9 +195,11 @@ class TestRefreshAll:
 
 
 class TestRunningJobs:
-    def test_a_board_running_a_job_is_pulled_again_inside_the_board_interval(self, root):
+    @pytest.mark.parametrize("state", ["running", "prompt"])
+    def test_a_board_running_a_job_is_pulled_again_inside_the_board_interval(self, root, state):
         settings = conf({"REMOTE_ACCOUNT_BOARDS": "devbox:devbox-host", "REMOTE_BOARD_PULL_INTERVAL": "120"})
-        pull = lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, JOBS))
+        jobs = {**JOBS, "jobs": {"demo": {"state": state}}}
+        pull = lambda argv, timeout: ok(encoded(SNAPSHOT, CODEX_USAGE, jobs))
         remote_boards.refresh_all(settings, now=2000.0, runner=pull)
 
         results = remote_boards.refresh_all(settings, now=2060.0, runner=pull)

@@ -39,9 +39,16 @@ def live(monkeypatch, *sessions):
     def run(argv):
         if argv[0] == "tmux":
             return "".join(f"{PANES[session]} {session}\n" for session in sessions)
-        return "abc1234\n"
+        return "abc1234\n" if argv[0] == "git" else ""
 
     monkeypatch.setattr(remote_jobs, "run", run)
+
+
+def pane_reader_says(monkeypatch, state):
+    """tmux lists the demo lane, and the pane reader prints `state` for it."""
+    live(monkeypatch, "demo")
+    tmux_and_git = remote_jobs.run
+    monkeypatch.setattr(remote_jobs, "run", lambda argv: state + "\n" if argv[0] == "bash" else tmux_and_git(argv))
 
 
 def write_process(box, pid, parent, command="bash", started=0.0):
@@ -218,6 +225,40 @@ class TestState:
         row = only_job(remote_jobs.build(2000.0))
 
         assert (row["state"], row["after"]) == ("waiting", "iri-8386")
+
+    @pytest.mark.parametrize("pane,expected", [("prompt", "prompt"), ("busy", "running")])
+    def test_a_running_lane_whose_pane_reader_sees_a_dialog_publishes_prompt(
+        self, box, monkeypatch, pane, expected
+    ):
+        write_job(box)
+        write_process(box, 102, PANE, "codex")
+        live(monkeypatch, "demo")
+        tmux_and_git = remote_jobs.run
+
+        def run(argv):
+            if argv == ["bash", str(box / "handoffs" / "lane-pane.sh"), "state", "demo"]:
+                return pane + "\n"
+            return tmux_and_git(argv)
+
+        monkeypatch.setattr(remote_jobs, "run", run)
+
+        assert only_job(remote_jobs.build(2000.0))["state"] == expected
+
+    def test_a_report_wins_over_a_dialog_still_on_its_pane(self, box, monkeypatch):
+        directory = write_job(box)
+        (directory / "report.md").write_text("status: done\n")
+        write_process(box, 102, PANE, "codex")
+        pane_reader_says(monkeypatch, "prompt")
+
+        assert only_job(remote_jobs.build(2000.0))["state"] == "done"
+
+    def test_a_lane_at_a_prompt_keeps_its_workflows_running(self, box, monkeypatch):
+        write_job(box)
+        write_router_state(box, "s-1")
+        write_workflow(box, "s-1", "review loop", started=["a1", "a2"], done=["a1"])
+        pane_reader_says(monkeypatch, "prompt")
+
+        assert [w["running"] for w in only_job(remote_jobs.build(2000.0))["workflows"]] == [True]
 
     def test_a_report_wins_over_a_session_that_is_still_alive(self, box, monkeypatch):
         directory = write_job(box)

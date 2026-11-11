@@ -33,6 +33,8 @@ MESSAGE_TEXT_MAX = 1000
 MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 SENT_FILES = {"brief.md", "launch.sh"}
+# The pane reader agent-workflows installs beside the lanes; the box's lane watch reads panes with it too.
+PANE_READER = "lane-pane.sh"
 ROUTER_STATE = re.compile(r"account-router-(\d+)\.json")
 WORKFLOW_NAME = re.compile(r"name:\s*['\"]([^'\"]+)['\"]")
 SCRIPT_HEAD_BYTES = 2048
@@ -347,6 +349,12 @@ def parent_slug(directory: Path) -> str:
         return ""
 
 
+def pane_state(session: str) -> str:
+    """What the session's pane shows, by the pane reader: prompt for a permission dialog nobody
+    on the box will answer. Empty when the reader is not installed."""
+    return run(["bash", str(handoffs_dir() / PANE_READER), "state", session]).strip()
+
+
 def session_state(tmux_alive: bool, router: dict, queued: bool, after: str, codex: bool) -> str:
     """A tmux session left at a bare shell after its router exited is not running."""
     if not tmux_alive:
@@ -380,6 +388,8 @@ def job_row(
     state = report or session_state(
         directory.name in sessions, router, queued, after, directory.name in codex
     )
+    if state == "running" and pane_state(directory.name) == "prompt":
+        state = "prompt"
     session = session_dir(str(router.get("session_id") or ""))
     return {
         "state": state,
@@ -395,7 +405,7 @@ def job_row(
         "updated_at": last_change(directory, session),
         "handoffs": as_int(router.get("handoffs")),
         "report": report is not None,
-        "workflows": workflows_for(session, state == "running"),
+        "workflows": workflows_for(session, state in ("running", "prompt")),
         "messages": lane_messages(directory / OUTBOX_FILE),
         "pr": lane_pr(directory / PR_FILE),
     }
