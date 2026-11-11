@@ -4119,16 +4119,387 @@ class TestRouterState:
     def test_the_move_count_is_seeded_where_the_status_line_carries_it_forward(self, tmp_path):
         state = tmp_path / "account-router-1.json"
 
-        claude_router.seed_router_state(state, 2, "s-1")
+        claude_router.seed_router_state(state, 2, "s-1", str(tmp_path))
 
         assert json.loads(state.read_text())["handoffs"] == 2
 
     def test_a_session_that_never_moved_still_publishes_a_state_file(self, tmp_path):
         state = tmp_path / "account-router-1.json"
 
-        claude_router.seed_router_state(state, 0, "s-1")
+        claude_router.seed_router_state(state, 0, "s-1", str(tmp_path))
 
-        assert json.loads(state.read_text())["cwd"] == os.getcwd()
+        assert json.loads(state.read_text())["cwd"] == str(tmp_path)
+
+
+# The first launch removes the directory the router runs in, then either switches
+# the mode and keeps working for a while, or records a session limit and exits.
+_REMOVED_CWD_FAKE_CLAUDE = (
+    "#!/usr/bin/env python3\n"
+    "import json, os, shutil, sys, time\n"
+    "from datetime import datetime, timezone\n"
+    "from pathlib import Path\n"
+    "args = sys.argv[1:]\n"
+    "sid = next(args[args.index(f) + 1] for f in ('--session-id', '--resume') if f in args)\n"
+    "home = Path(os.environ['HOME'])\n"
+    "log = Path(os.environ['ROUTER_TEST_LOG'])\n"
+    "def note(event):\n"
+    "    with log.open('a') as f:\n"
+    "        f.write(json.dumps({'event': event, 'label': os.environ['ACCOUNTS_ROUTED_LABEL'], 'session_id': sid}) + '\\n')\n"
+    "note('launch')\n"
+    "Path(os.environ['ACCOUNTS_ROUTER_STATE']).write_text(\n"
+    "    json.dumps({'session_id': sid, 'model': 'Opus', 'effort': 'high'})\n"
+    ")\n"
+    "shutil.rmtree(os.getcwd())\n"
+    "if os.environ.get('ROUTER_TEST_LIMIT_TEXT'):\n"
+    "    # Unpinned, so the limit has another account to move to.\n"
+    "    (home / '.accounts' / 'mode.json').write_text(\n"
+    "        json.dumps({'version': 2, 'mode': 'auto', 'global_generation': 1})\n"
+    "    )\n"
+    "    project = home / '.claude' / 'projects' / 'p'\n"
+    "    project.mkdir(parents=True, exist_ok=True)\n"
+    "    (project / f'{sid}.jsonl').write_text(json.dumps({\n"
+    "        'type': 'assistant', 'isApiErrorMessage': True, 'apiErrorStatus': 429,\n"
+    "        'error': 'rate_limit', 'timestamp': datetime.now(timezone.utc).isoformat(),\n"
+    "        'message': {'content': [{'type': 'text', 'text': os.environ['ROUTER_TEST_LIMIT_TEXT']}]},\n"
+    "    }) + '\\n')\n"
+    "    sys.exit(0)\n"
+    "(home / '.accounts' / 'mode.json').write_text(\n"
+    "    json.dumps({'version': 2, 'mode': 'set', 'label': 'second', 'global_generation': 2})\n"
+    ")\n"
+    "time.sleep(1.5)\n"
+    "note('finished')\n"
+)
+
+
+def _run_router_whose_directory_is_removed(tmp_path, *, limit_text=""):
+    home = _two_account_home(tmp_path)
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    log_path = tmp_path / "launches.jsonl"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(_REMOVED_CWD_FAKE_CLAUDE)
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("ACCOUNTS_PIN", None)
+    env.update(
+        {
+            "HOME": str(home),
+            "CLAUDE_REAL_BIN": str(fake_claude),
+            "ACCOUNTS_ROUTER_INTERVAL": "0.2",
+            "ROUTER_TEST_LOG": str(log_path),
+            "ROUTER_TEST_LIMIT_TEXT": limit_text,
+            "PYTHONPATH": str(REPO / "bin"),
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, str(REPO / "bin" / "claude-router.py")],
+        cwd=lane,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    return result, events
+
+
+def test_a_session_whose_directory_was_removed_works_on_through_a_planned_move(tmp_path):
+    result, events = _run_router_whose_directory_is_removed(tmp_path)
+
+    assert [(e["event"], e["label"]) for e in events] == [
+        ("launch", "first"),
+        ("finished", "first"),
+    ]
+    assert result.returncode == 0
+
+
+def test_a_session_whose_directory_was_removed_is_left_saved_instead_of_relaunched(tmp_path):
+    result, events = _run_router_whose_directory_is_removed(
+        tmp_path, limit_text=claude_router.SESSION_LIMIT_TEXT
+    )
+
+    assert [(e["event"], e["label"]) for e in events] == [("launch", "first")]
+    assert result.returncode == 1
+    assert f"resume it with `claude --resume {events[0]['session_id']}`" in result.stderr
+
+
+def _removed_directory_harness(
+    monkeypatch, tmp_path, session_id, ticks, *, mode=None, removed_on="poll"
+):
+    """A supervised child on FIRST whose directory is removed on its first poll,
+    or while the router stops it."""
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    monkeypatch.chdir(lane)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    stopped = []
+    scopes = []
+    polls = []
+
+    def remove_lane():
+        if lane.exists():
+            lane.rmdir()
+
+    class Child:
+        def poll(self):
+            polls.append(True)
+            if removed_on == "poll":
+                remove_lane()
+            return None if len(polls) <= ticks else 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        claude_router,
+        "initial_session_args",
+        lambda args: ([*args, "--resume", session_id], session_id),
+    )
+    monkeypatch.setattr(claude_router.accounts, "select_profile", lambda **_kw: SECOND)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        mode or (lambda: ({"mode": "auto"}, (1, 1))),
+    )
+    monkeypatch.setattr(claude_router.accounts, "upsert_session_lease", lambda *_a: None)
+    monkeypatch.setattr(claude_router.accounts, "remove_session_lease", lambda *_a: None)
+    monkeypatch.setattr(claude_router, "first_route", lambda *_a: (FIRST, None))
+    monkeypatch.setattr(claude_router.subprocess, "Popen", lambda *_a, **_kw: Child())
+    monkeypatch.setattr(claude_router.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _path: {"session_id": session_id, "model": "Opus 5"},
+    )
+    monkeypatch.setattr(
+        claude_router, "write_policy_scope", lambda _path, scope: scopes.append(scope)
+    )
+
+    def stop(child):
+        stopped.append(child)
+        if removed_on == "stop":
+            remove_lane()
+
+    monkeypatch.setattr(claude_router, "stop_for_handoff", stop)
+    return stopped, scopes, polls
+
+
+def test_a_strict_wall_stops_a_session_whose_directory_was_removed_and_says_why(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("ACCOUNTS_STRICT_QUOTA", "1")
+    stopped, _scopes, _polls = _removed_directory_harness(
+        monkeypatch, tmp_path, str(uuid.uuid4()), 3
+    )
+    monkeypatch.setattr(claude_router.accounts, "hard_session_limit_enabled", lambda: True)
+    monkeypatch.setattr(
+        claude_router.accounts, "profile_session_limit_reached", lambda label: label == "first"
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 1
+
+    err = capsys.readouterr().err
+    assert len(stopped) == 1
+    assert "working directory was removed" in err
+    assert "bill the overage" not in err
+
+
+def test_a_directory_removed_while_the_child_is_stopped_ends_the_move(
+    tmp_path, monkeypatch, capsys
+):
+    stopped, _scopes, polls = _removed_directory_harness(
+        monkeypatch,
+        tmp_path,
+        str(uuid.uuid4()),
+        3,
+        mode=lambda: ({"mode": "auto"}, (1, 1) if not polls else (2, 2)),
+        removed_on="stop",
+    )
+    monkeypatch.setattr(
+        claude_router, "take_handoff_brief", lambda _s: pytest.fail("the brief was used up")
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 1
+
+    assert len(stopped) == 1
+    assert "working directory was removed" in capsys.readouterr().err
+
+
+def test_a_fable_wall_crossed_in_place_and_read_at_exit_ends_cleanly(tmp_path, monkeypatch):
+    _stopped, _scopes, _polls = _removed_directory_harness(
+        monkeypatch, tmp_path, str(uuid.uuid4()), 3
+    )
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    monkeypatch.setattr(claude_router, "session_transcript_path", lambda _sid: transcript)
+    # Three ticks read nothing; the read at exit finds the rejection.
+    limits = iter([None, None, None, "fable"])
+    monkeypatch.setattr(
+        claude_router,
+        "read_new_session_limit",
+        lambda _path, offset, **_kw: (next(limits, None), offset),
+    )
+    monkeypatch.setattr(claude_router, "mark_detected_limit", lambda *_a: None)
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "fable"]) == 0
+
+
+def _auto_then_fable(polls):
+    return ({"mode": "auto"}, (1, 1)) if not polls else ({"mode": "fable"}, (2, 2))
+
+
+def _auto_changed(polls):
+    return ({"mode": "auto"}, (1, 1) if not polls else (2, 2))
+
+
+# Each case drives one planning branch: (args, rendered model, mode, pick,
+# handoff target, fable exhausted, near the wall).
+PLANNED_MOVE_BRANCHES = {
+    "fable-mode-then-departure": (
+        [],
+        "Opus 5",
+        _auto_then_fable,
+        lambda polls, kw: None if kw.get("require_fable") and len(polls) < 2 else SECOND,
+        None,
+        False,
+        False,
+    ),
+    "auto-change-on-fable": (
+        ["--model", "fable"],
+        "Fable 5",
+        _auto_changed,
+        lambda _polls, kw: None if kw.get("require_fable") else SECOND,
+        None,
+        False,
+        False,
+    ),
+    "fable-handoff-target": (
+        ["--model", "fable"],
+        "Fable 5",
+        lambda _polls: ({"mode": "auto"}, (1, 1)),
+        lambda _polls, _kw: SECOND,
+        "second",
+        False,
+        False,
+    ),
+    "fable-exhausted": (
+        # No render yet, so the fallback the user passed is not known to be in place.
+        ["--model", "fable", "--fallback-model", "sonnet"],
+        None,
+        lambda _polls: ({"mode": "auto"}, (1, 1)),
+        lambda _polls, _kw: SECOND,
+        None,
+        True,
+        False,
+    ),
+    "set-pin-elsewhere": (
+        [],
+        "Opus 5",
+        lambda _polls: ({"mode": "set", "label": "second"}, (1, 1)),
+        lambda _polls, _kw: SECOND,
+        "second",
+        False,
+        False,
+    ),
+    "auto-near-wall": (
+        [],
+        "Opus 5",
+        lambda _polls: ({"mode": "auto"}, (1, 1)),
+        lambda _polls, _kw: SECOND,
+        "second",
+        False,
+        True,
+    ),
+}
+
+
+@pytest.mark.parametrize("branch", list(PLANNED_MOVE_BRANCHES))
+def test_a_planned_pick_for_a_removed_directory_leaves_the_lease_alone(
+    tmp_path, monkeypatch, branch
+):
+    args, rendered, mode, pick, target, exhausted, near_wall = PLANNED_MOVE_BRANCHES[branch]
+    session_id = str(uuid.uuid4())
+    _stopped, _scopes, polls = _removed_directory_harness(
+        monkeypatch, tmp_path, session_id, 3, mode=lambda: mode(polls)
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _path: {"session_id": session_id, "model": rendered},
+    )
+    picks = []
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **kw: picks.append(kw.get("lease_pid")) or pick(polls, kw),
+    )
+    monkeypatch.setattr(claude_router.accounts, "handoff_target", lambda *_a, **_kw: target)
+    monkeypatch.setattr(claude_router.accounts, "profile_fable_exhausted", lambda _l: exhausted)
+    monkeypatch.setattr(claude_router.accounts, "profile_near_wall", lambda _l: near_wall)
+
+    claude_router.run_supervised("/real/claude", args)
+
+    assert set(picks) <= {None}
+
+
+def test_a_mode_change_onto_the_current_account_still_applies_after_the_directory_was_removed(
+    tmp_path, monkeypatch
+):
+    _stopped, scopes, polls = _removed_directory_harness(
+        monkeypatch,
+        tmp_path,
+        str(uuid.uuid4()),
+        4,
+        mode=lambda: (
+            ({"mode": "auto"}, (1, 1))
+            if len(polls) < 3
+            else ({"mode": "set", "label": "first", "policy_scope": "pane"}, (2, 2))
+        ),
+    )
+    # First the child crosses a fable wall itself, then the pin lands on its account.
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    monkeypatch.setattr(claude_router, "session_transcript_path", lambda _sid: transcript)
+    limits = iter(["fable"])
+    monkeypatch.setattr(
+        claude_router,
+        "read_new_session_limit",
+        lambda _path, offset, **_kw: (next(limits, None), offset),
+    )
+    monkeypatch.setattr(claude_router, "mark_detected_limit", lambda *_a: None)
+    monkeypatch.setattr(claude_router.accounts, "select_profile", lambda **_kw: FIRST)
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "fable"]) == 0
+
+    assert scopes[-1] == "pane"
+
+
+def test_the_removed_directory_notice_names_no_session_that_was_never_saved(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    notice = claude_router.removed_directory_notice(str(uuid.uuid4()))
+
+    assert "--resume" not in notice
+
+
+def test_a_launch_in_a_removed_directory_exits_without_starting_claude(
+    tmp_path, monkeypatch, capsys
+):
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    monkeypatch.chdir(lane)
+    lane.rmdir()
+    monkeypatch.setattr(
+        claude_router,
+        "first_route",
+        lambda *_a: pytest.fail("a launch from a removed directory was routed"),
+    )
+
+    assert claude_router.run_supervised("claude", []) == 1
+    assert "working directory was removed" in capsys.readouterr().err
 
 
 class FakeClock:
@@ -4286,6 +4657,7 @@ class TestHoldForReset:
 
         assert seen[0]["held_until"] == int(clock.now)
         assert seen[0]["held_reason"] == "session limit"
+        assert seen[0]["cwd"] == os.getcwd()
 
     def test_the_hold_line_names_the_resume_time_on_the_local_clock(
         self, tmp_path, monkeypatch, capsys
@@ -4407,6 +4779,40 @@ class TestHoldForReset:
 
         assert claude_router.run_passthrough("/real/claude", ["--print", "hello"]) == 0
         assert calls[0]["env"]["CLAUDE_CONFIG_DIR"] == HELD["profile"]
+
+
+    def test_a_hold_started_in_a_removed_directory_never_waits(self, tmp_path, monkeypatch):
+        lane = tmp_path / "lane"
+        lane.mkdir()
+        monkeypatch.chdir(lane)
+        lane.rmdir()
+        fake_hold_board(monkeypatch, FakeClock(), [HELD])
+        monkeypatch.setattr(
+            claude_router, "sleep_until", lambda _wake_at: pytest.fail("the hold waited")
+        )
+
+        assert claude_router.hold_for_route(
+            "general", 1, tmp_path / "account-router-1.json", {}, "session limit"
+        ) is None
+
+    def test_a_hold_whose_directory_is_removed_while_it_waits_ends_at_the_wake(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        clock = FakeClock()
+        lane = tmp_path / "lane"
+        lane.mkdir()
+        monkeypatch.chdir(lane)
+        fake_hold_board(monkeypatch, clock, [HELD])
+        monkeypatch.setattr(
+            claude_router, "sleep_until", lambda _wake_at: lane.exists() and lane.rmdir()
+        )
+
+        held = claude_router.hold_for_route(
+            "general", 1, tmp_path / "account-router-1.json", {}, "session limit"
+        )
+
+        assert held is None
+        assert "working directory was removed" in capsys.readouterr().err
 
 
 def test_the_supervisor_reloads_routing_only_after_a_reinstall(monkeypatch):

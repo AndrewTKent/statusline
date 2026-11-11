@@ -285,6 +285,33 @@ and what was lost, so an unattended session can restart what was in flight.
 `ACCOUNTS_HANDOFF_NOTICE=0` turns it off; the setting is read at each handoff. A
 session with no transcript to resume never gets one.
 
+Claude Code will not start in a directory that no longer exists, but a running
+session keeps working after its directory is removed (a lane that cleaned up its
+own worktree). The supervisor then treats every account as unable to take the
+session, since no other directory is the session's own and a path re-created at
+the same place may be another checkout:
+
+- No planned move is made: the session works on until it exits. A wall is
+  handled as when no account is free: the session runs on, or stops under
+  `ACCOUNTS_STRICT_QUOTA=1` or `ACCOUNTS_HOLD_FOR_RESET=1`.
+- A hold ends at its next wake (two minutes past the soonest reset, or 15
+  minutes at most) instead of resuming.
+- When the session ends on a limit another account could take, it is not
+  relaunched. A Fable wall the child crossed itself, on the fallback model the
+  supervisor gave it, is no limit here.
+- The session's lease stays on the account it runs on, so `accounts forget` or
+  `accounts move` of that account waits up to its timeout for the session to
+  end, and refuses if it has not. Under `ACCOUNTS_STRICT_QUOTA=1` or
+  `ACCOUNTS_HOLD_FOR_RESET=1` the forget is a wall like any other: the session
+  stops and the forget completes.
+
+Each of those endings (the stop, the hold, the limit exit) and a move whose
+directory goes while the child is being stopped print one line naming the
+`claude --resume <id>` to run from an existing directory, or no id when the
+supervisor finds no saved transcript for it (a held `claude -p` launch never
+names one). A supervised launch from a removed directory exits with the same
+line; a `claude -p` launch that is not held leaves the refusal to Claude.
+
 A move that is not a plan wall (an `accounts set`, a mode change, a Fable
 departure) waits while the session has a Workflow in flight: a run its
 transcript launched whose transcript directory exists and whose completed state
