@@ -333,8 +333,10 @@ class TestPullRequest:
     def test_a_lane_with_no_pr_file_has_no_pr(self, box):
         assert self.pr(box, None) == {}
 
-    def test_a_state_or_verdict_that_is_not_githubs_or_soleis_is_dropped(self, box):
-        pr = self.pr(box, json.dumps({"number": 40, "state": "\x1b[2J", "verdict": "\x1b[31m"}))
+    def test_a_state_or_verdict_that_is_not_githubs_or_soleis_is_dropped(self, tmp_path):
+        path = tmp_path / "pr.json"
+        path.write_text(json.dumps({"number": 40, "state": "\x1b[2J", "verdict": "\x1b[31m"}))
+        pr = remote_jobs.lane_pr(path)
         assert (pr["state"], pr["verdict"]) == ("", "")
 
 
