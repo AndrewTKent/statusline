@@ -1040,6 +1040,8 @@ def run_supervised(binary: str, args: list[str]) -> int:
     state_path = Path(f"/tmp/claude/account-router-{router_pid}.json")
     interval = float(os.environ.get("ACCOUNTS_ROUTER_INTERVAL", ROUTER_INTERVAL_S))
     mode, applied_mode_generation = accounts.load_mode_snapshot()
+    planned_mode_generation = applied_mode_generation
+    waiting_mode_generation = None
     hard_session_limit = accounts.hard_session_limit_enabled()
     hold_for_reset = accounts.hold_for_reset_enabled()
     handoff_count = 0
@@ -1093,6 +1095,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
     accounts_loaded_mtime = accounts_mtime()
     try:
         while True:
+            if waiting_mode_generation is not None:
+                # Any relaunch, a wall's or a limit's too, makes the move that waited.
+                applied_mode_generation = waiting_mode_generation
             state_path.unlink(missing_ok=True)
             seed_router_state(state_path, handoff_count, session_id)
             write_policy_scope(state_path, mode.get("policy_scope", "global"))
@@ -1278,6 +1283,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     return 1
                 if not session_id:
                     continue
+                # A mode change counts as applied only once its move is made or
+                # declined, so a move waiting on a Workflow is still planned next tick.
+                move_generation = applied_mode_generation
                 if hard_limit_reached:
                     next_profile, next_override = limit_route
                     next_model = next_override or current_model
@@ -1289,8 +1297,21 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 else:
                     mode, mode_generation = accounts.load_mode_snapshot()
                     mode_changed = mode_generation != applied_mode_generation
+                    newly_seen = mode_generation != planned_mode_generation
+                    if mode_changed:
+                        planned_mode_generation = mode_generation
+                    waiting_mode_generation = None
                     if mode_changed and mode.get("mode") == "fable":
-                        user_pinned_model = None
+                        if newly_seen:
+                            # Fable mode overrides a pin once; a /model switch
+                            # made while its move is pending still wins.
+                            user_pinned_model = None
+                        elif user_pinned_model is not None:
+                            applied_mode_generation = mode_generation
+                            write_policy_scope(
+                                state_path, mode.get("policy_scope", "global")
+                            )
+                            continue
                         next_profile = accounts.select_profile(
                             require_fable=True,
                             lease_pid=router_pid,
@@ -1468,7 +1489,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         next_override = model_override
                     else:
                         continue
-                    applied_mode_generation = mode_generation
+                    move_generation = mode_generation
                 if falls_back_in_process(
                     selected,
                     next_profile,
@@ -1482,6 +1503,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     model_override = next_override
                     current_model = next_model
                     current_family = "general"
+                    applied_mode_generation = move_generation
                     continue
                 moved_by = hard_limit_kind if hard_limit_reached else limit_rejected
                 in_flight = in_flight_workflows(session_id)
@@ -1489,6 +1511,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     # A planned move can wait for the work the stop would kill.
                     pending_since = pending_since or time.time()
                     if time.time() - pending_since < handoff_grace_s():
+                        waiting_mode_generation = move_generation
                         write_router_state(
                             state_path,
                             {
@@ -1502,6 +1525,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         )
                         continue
                 pending_since = None
+                applied_mode_generation = move_generation
                 stop_for_handoff(child)
                 brief_prompt, brief_model = take_handoff_brief(session_id)
                 next_model = brief_model or next_model
