@@ -4639,6 +4639,9 @@ class RemoteCodexBoardTest(unittest.TestCase):
             "same-pane": {"state": "held", "origin_session": "previous", "origin_pane": "pane", "held_until": 6000},
             "unowned": {"state": "done", "updated_at": 4900},
             "waiting": {"state": "queued", "queue_position": 2, "updated_at": 1},
+            "stalled": {"state": "prompt", "updated_at": 1, "workflows": [
+                {"name": "stuck-panel", "running": True, "agents_done": 1, "agents_started": 2, "started_at": 4900},
+            ]},
             "foreign": {"state": "running", "origin_session": "other"},
             "old": {"state": "done", "updated_at": 1},
         }
@@ -4649,10 +4652,13 @@ class RemoteCodexBoardTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"REMOTE_BOARDS_DIR": tmp}):
                 board = codex_statusline.remote_codex_boards(now=5000)[0]
         text = "\n".join(codex_statusline.remote_job_lines(board, "current", "pane", False, 120, codex_statusline.Palette(False), now=5000))
-        for included in ("mine", "same-pane", "unowned", "live-panel", "1/3 agents", "1 failed", "resumes", "#2 in line"):
+        for included in ("mine", "same-pane", "unowned", "live-panel", "1/3 agents", "1 failed", "resumes", "#2 in line", "stalled", "stuck-panel"):
             self.assertIn(included, text)
         for excluded in ("foreign", "old", "finished-panel"):
             self.assertNotIn(excluded, text)
+        colored = codex_statusline.Palette(True)
+        colored_text = "\n".join(codex_statusline.remote_job_lines(board, "current", "pane", False, 120, colored, now=5000))
+        self.assertIn(colored.red + "prompt", colored_text)
         all_text = "\n".join(codex_statusline.remote_job_lines(board, "current", "pane", True, 120, codex_statusline.Palette(False), now=5000))
         self.assertIn("foreign", all_text)
         self.assertNotIn("old", all_text)

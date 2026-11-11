@@ -201,7 +201,7 @@ session cooperating:
 
 | field | derived from |
 |---|---|
-| `state` | `report.md` first (`status: blocked` → blocked, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session → gone; the session without either → gone, or waiting for a stacked lane); `held` and `queued` come from the router state and the lane queue |
+| `state` | `report.md` first (`status: blocked` → blocked, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session → gone; the session without either → gone, or waiting for a stacked lane); `held` and `queued` come from the router state and the lane queue; a running job whose pane the pane reader agent-workflows installs (`~/handoffs/lane-pane.sh state <session>`) sees at a permission dialog → prompt, and with no reader installed the state is unchanged |
 | `head` | `git rev-parse --short HEAD` in the job's worktree |
 | `account`, `handoffs` | the live router state file whose pid descends from a pane of the job's tmux session |
 | `workflows` | the Workflow journals under that session's project directory |
@@ -215,7 +215,7 @@ dropped, and control characters in the text become spaces, so a line from the bo
 path or drives a terminal here.
 
 A workflow counts as **running** when agents it started have no `result` or
-`failed` line *and* the job itself is still running. Journal lines carry no
+`failed` line *and* the job itself is still running or at a prompt. Journal lines carry no
 timestamps and an agent can work for an hour without writing one, so mtime
 cannot tell working apart from killed; the owning session's liveness can.
 `started_at` is the mtime of the workflow's script, which is written at launch.

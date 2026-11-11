@@ -219,7 +219,7 @@ render_with_boards() {
     HOME="$TEST_HOME" PATH="$STUBS:$PATH" SHARED_TEST_VIOLATIONS="$VIOLATIONS" \
         ACCOUNTS_ROUTED_LABEL=work ACCOUNTS_POLICY_SCOPE=global \
         REMOTE_BOARDS_DIR="${1:-$REMOTE_ROOT_DIR}" \
-        "$SANDBOX/statusline.sh" < "$SANDBOX/input.json" | sed $'s/\033\\[[0-9;]*m//g'
+        "$SANDBOX/statusline.sh" < "$SANDBOX/input.json" | { if [ -n "${KEEP_COLORS:-}" ]; then cat; else sed $'s/\033\\[[0-9;]*m//g'; fi; }
 }
 
 write_board_meta "$NOW" true
@@ -329,6 +329,13 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
       "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
     },
+    "prompt-job": {
+      "state": "prompt", "branch": "andrew/prompt", "head": "0fedcbd",
+      "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false,
+      "workflows": [{"name": "stuck panel", "started_at": $(( NOW - 600 )),
+                     "agents_started": 2, "agents_done": 1, "agents_failed": 0, "running": true}]
+    },
     "old-job": {
       "state": "done", "branch": "andrew/old", "head": "9abcdef",
       "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 90000 )),
@@ -358,8 +365,16 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
 [[ "$jobs_output" =~ held-job-on-a-devbox\ +held\ ·\ resumes\ [0-9]{1,2}:[0-9]{2}[ap]m\ [A-Z]+ ]] || { printf 'a held job did not say when it resumes\n' >&2; exit 1; }
 [[ "$jobs_output" =~ queued-job\ +queued\ ·\ \#3\ in\ line ]] || { printf 'a queued job did not say its place in line\n' >&2; exit 1; }
 [[ "$jobs_output" =~ waiting-job\ +waiting\ ·\ after\ iri-8386 ]] || { printf 'a stacked lane did not say which lane it waits on\n' >&2; exit 1; }
+[[ "$jobs_output" =~ prompt-job\ +prompt ]] || { printf 'a lane stopped at a dialog, which writes nothing, aged off the status line\n' >&2; exit 1; }
+[[ "$jobs_output" == *"stuck panel"*"1/2 agents"* ]] || { printf "a lane at a prompt hid its running workflow\n" >&2; exit 1; }
+[[ "$(KEEP_COLORS=1 render_with_boards | grep prompt-job)" == *$'\033[38;2;255;85;85mprompt'* ]] || { printf 'a lane stopped at a dialog did not render its state in red\n' >&2; exit 1; }
 # 20 characters, the widest name on either board: a held job sizes the column like a running one.
 [[ "$jobs_output" =~ demo-job\ {13}running ]] || { printf "a held job's name did not widen the job column\n" >&2; exit 1; }
+prompt_root="$SANDBOX/remote-prompt"
+cp -R "$REMOTE_ROOT_DIR" "$prompt_root"
+jq '.jobs |= (del(."held-job-on-a-devbox") | with_entries(if .key == "prompt-job" then .key = "prompt-job-on-devbox" else . end))' \
+    "$REMOTE_ROOT_DIR/devbox/jobs.json" > "$prompt_root/devbox/jobs.json"
+[[ "$(render_with_boards "$prompt_root")" =~ demo-job\ {13}running ]] || { printf "a prompt job's name did not widen the job column\n" >&2; exit 1; }
 board_table_line=$(printf '%s\n' "$board_output" | grep -n 'Work' | head -1 | cut -d: -f1)
 board_header_line=$(printf '%s\n' "$board_output" | grep -n 'devbox · ' | head -1 | cut -d: -f1)
 [ "$board_header_line" -gt "$board_table_line" ] || { printf 'the board block did not render under the local table\n' >&2; exit 1; }

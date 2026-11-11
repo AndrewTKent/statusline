@@ -3610,13 +3610,13 @@ def remote_job_lines(
     lines = []
     for name, job in (board.get("jobs") or {}).items():
         state = job.get("state", "")
-        if state not in {"running", "held", "queued"} and job.get("updated_at", 0) < now - 1800:
+        if state not in {"running", "held", "queued", "prompt"} and job.get("updated_at", 0) < now - 1800:
             continue
         origin_session, origin_pane = job.get("origin_session"), job.get("origin_pane")
         mine = bool(thread_id and origin_session == thread_id) or bool(pane_id and origin_pane == pane_id)
         if not (show_all or mine or (not origin_session and not origin_pane)):
             continue
-        color = p.green if state == "running" else p.red if state == "blocked" else p.dim
+        color = p.green if state == "running" else p.red if state in {"blocked", "prompt"} else p.dim
         color = color if board["fresh"] else p.dim
         detail = ""
         if state == "running":
@@ -3640,7 +3640,7 @@ def remote_job_lines(
         lines.append(footer_spans([(p.dim, f"  · ▸ {short_text(name, 20)} "),
                                    (color, state), (p.dim, detail),
                                    (p.yellow, f" · {unread} unread" if unread else "")], width, p))
-        if state != "running":
+        if state not in {"running", "prompt"}:
             continue
         for workflow in job.get("workflows") or []:
             if not workflow.get("running"):
