@@ -205,6 +205,14 @@ session cooperating:
 | `head` | `git rev-parse --short HEAD` in the job's worktree |
 | `account`, `handoffs` | the live router state file whose pid descends from a pane of the job's tmux session |
 | `workflows` | the Workflow journals under that session's project directory |
+| `messages` | the last 20 lines of the job's `outbox.jsonl`, which the lane appends with `handoff.sh notify` |
+
+`messages` carries every recent line, read or not: which ones a session has seen is known only
+on the machine that reads them. There, `handoff.sh wait` and the `photon-jobs-notify` hook deliver
+each id once and leave a marker at `~/.local/state/photon-jobs/read/<id>`, and both renderers
+count a job's messages with no marker as unread on its row. An id that is not a plain name is
+dropped, and control characters in the text become spaces, so a line from the box never names a
+path or drives a terminal here.
 
 A workflow counts as **running** when agents it started have no `result` or
 `failed` line *and* the job itself is still running. Journal lines carry no

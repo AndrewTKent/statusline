@@ -24,6 +24,14 @@ JOB_FILE = "job.json"
 REPORT_FILE = "report.md"
 QUEUE_FILE = "lane-queue.txt"
 AFTER_FILE = "after"
+OUTBOX_FILE = "outbox.jsonl"
+PR_FILE = "pr.json"
+PR_STATES = {"OPEN", "MERGED", "CLOSED"}
+VERDICTS = {"☀️", "🌤️", "⛅", "🌧️"}
+MESSAGES_KEPT = 20
+MESSAGE_TEXT_MAX = 1000
+MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 SENT_FILES = {"brief.md", "launch.sh"}
 ROUTER_STATE = re.compile(r"account-router-(\d+)\.json")
 WORKFLOW_NAME = re.compile(r"name:\s*['\"]([^'\"]+)['\"]")
@@ -289,6 +297,48 @@ def codex_sessions(panes: dict[str, set[int]], table: dict[int, Process]) -> set
     return {session for pid in codex for session in owners(pid, panes, table)}
 
 
+def lane_messages(path: Path) -> list[dict]:
+    """The last lines a lane posted with `handoff.sh notify`, oldest first. Which ones a session
+    has read is known only where it reads them, so recent lines are all published and the
+    reader delivers each id once."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    messages = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        message_id = str(entry.get("id") or "")
+        if not MESSAGE_ID.fullmatch(message_id):
+            continue
+        text = CONTROL_CHARS.sub(" ", str(entry.get("text") or ""))
+        messages.append(
+            {"id": message_id, "ts": as_int(entry.get("ts")), "text": text[:MESSAGE_TEXT_MAX]}
+        )
+    return messages[-MESSAGES_KEPT:]
+
+
+def lane_pr(path: Path) -> dict:
+    """The lane's newest PR as the box's lane-retire timer last read it from GitHub, or {}."""
+    data = read_json(path, {})
+    if not isinstance(data, dict) or as_int(data.get("number")) <= 0:
+        return {}
+    state = str(data.get("state") or "")
+    verdict = str(data.get("verdict") or "")
+    return {
+        "number": as_int(data.get("number")),
+        "state": state if state in PR_STATES else "",
+        "url": str(data.get("url") or ""),
+        "verdict": verdict if verdict in VERDICTS else "",
+        "checked_at": as_int(data.get("checked_at")),
+    }
+
+
 def parent_slug(directory: Path) -> str:
     """The lane a stacked lane waits on to raise, named in its `after` file."""
     try:
@@ -346,6 +396,8 @@ def job_row(
         "handoffs": as_int(router.get("handoffs")),
         "report": report is not None,
         "workflows": workflows_for(session, state == "running"),
+        "messages": lane_messages(directory / OUTBOX_FILE),
+        "pr": lane_pr(directory / PR_FILE),
     }
 
 

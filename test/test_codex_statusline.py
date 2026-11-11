@@ -4657,6 +4657,23 @@ class RemoteCodexBoardTest(unittest.TestCase):
         self.assertIn("foreign", all_text)
         self.assertNotIn("old", all_text)
 
+    def test_a_job_row_counts_the_lane_messages_not_yet_delivered_here(self) -> None:
+        job = {"state": "running", "messages": [{"id": "m1"}, {"id": "m2"}]}
+        board = {"fresh": True, "jobs": {"talker": job}}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "read").mkdir()
+            (Path(tmp) / "read" / "m1").touch()
+            with mock.patch.dict(os.environ, {"PHOTON_STATE_DIR": tmp}):
+                text = "\n".join(codex_statusline.remote_job_lines(
+                    board, "", "", True, 120, codex_statusline.Palette(False), now=5000))
+        self.assertIn("talker running · 1 unread", text)
+
+    def test_a_job_row_shows_its_pr_and_verdict(self) -> None:
+        board = {"fresh": True, "jobs": {"lane": {"state": "running", "pr": {"number": 7, "verdict": "🌧️"}}}}
+        text = "\n".join(codex_statusline.remote_job_lines(
+            board, "", "", True, 120, codex_statusline.Palette(False), now=5000))
+        self.assertIn("lane running · #7 🌧️", text)
+
     def test_remote_job_origin_uses_main_pane_not_footer(self) -> None:
         codex_statusline.remote_job_origin_pane.cache_clear()
         panes = "%1\tbash runner.sh /tmp/owned/owner.pid\n%2\tpython3 codex_statusline.py --footer --owner-pid-file /tmp/owned/owner.pid\n"

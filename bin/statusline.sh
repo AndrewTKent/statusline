@@ -890,12 +890,17 @@ remote_job_lines() {
     local board_dir="$1" name_width="$2" fresh="$3" now_epoch="$4"
     local RJ_SEP=$'\037'
     [ -r "$board_dir/jobs.json" ] || return 0
-    local rows kind one two three four five six seven eight nine
+    local rows kind one two three four five six seven eight nine ten eleven
     local padded detail state_color job_color age plural
+    # A lane message counts as read once this machine has delivered it: handoff.sh wait and the
+    # photon-jobs-notify hook leave a marker named for its id.
+    local read_ids
+    read_ids=$(ls "${PHOTON_STATE_DIR:-$HOME/.local/state/photon-jobs}/read" 2>/dev/null)
     rows=$(jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
         --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
-        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" '
-        (.jobs // {}) | to_entries[]
+        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" --arg read "$read_ids" '
+        ($read | split("\n") | map({key: ., value: true}) | from_entries) as $seen
+        | (.jobs // {}) | to_entries[]
         | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or .value.state == "waiting" or ((.value.updated_at // 0) >= $cutoff))
         # A job belongs to the session that sent it; one with no sender shows everywhere.
         | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
@@ -904,7 +909,11 @@ remote_job_lines() {
             ((.value.handoffs // 0) | tostring), ((.value.updated_at // 0) | tostring),
             (if $all == "1" and (.value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
              then "mine" else "" end), ((.value.held_until // 0) | tostring),
-            ((.value.queue_position // 0) | tostring), (.value.after // "")]
+            ((.value.queue_position // 0) | tostring), (.value.after // ""),
+            ((.value.messages // []) | map(select($seen[.id | tostring] | not)) | length | tostring),
+            (if ((.value.pr.number // 0) | type) == "number" and .value.pr.number > 0
+             then "#\(.value.pr.number)" + (if (.value.pr.verdict // "") != "" then " \(.value.pr.verdict)" else "" end)
+             else "" end)]
            | join("")),
           (select(.value.state == "running")
            | (.value.workflows // [])[] | select(.running == true)
@@ -913,11 +922,12 @@ remote_job_lines() {
               ((.started_at // 0) | tostring)]
            | join(""))
     ' "$board_dir/jobs.json" 2>/dev/null)
-    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine; do
+    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine ten eleven; do
         case "$four" in ''|*[!0-9]*) four=0 ;; esac
         case "$five" in ''|*[!0-9]*) five=0 ;; esac
         case "$seven" in ''|*[!0-9]*) seven=0 ;; esac
         case "$eight" in ''|*[!0-9]*) eight=0 ;; esac
+        case "$ten" in ''|*[!0-9]*) ten=0 ;; esac
         case "$kind" in
             job)
                 case "$two" in
@@ -942,6 +952,8 @@ remote_job_lines() {
                 else
                     detail=" ${dim}· $(remote_age_text "$(( now_epoch - five ))") ago${reset}"
                 fi
+                [ -n "$eleven" ] && detail+=" ${dim}· ${eleven}${reset}"
+                [ "$ten" -gt 0 ] && detail+=" ${dim}·${reset} ${yellow}${ten} unread${reset}"
                 # Only worth saying when every session's jobs are on screen.
                 [ "$six" = "mine" ] && detail+=" ${white}\xe2\x86\x90 this session${reset}"
                 printf -v padded '%-*s' "$name_width" "$one"

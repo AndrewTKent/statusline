@@ -3458,6 +3458,7 @@ def reset_credit_text(expires_at: list[int]) -> str:
 
 
 REMOTE_BOARD_MAX_AGE_S = 900.0
+LANE_MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def remote_board_age_text(seconds: float) -> str:
@@ -3593,6 +3594,14 @@ def remote_job_origin_pane(owner_pid_file: str, tmux: str, pane: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
+def unread_lane_messages(job: dict[str, Any]) -> int:
+    """Lane messages this machine has not delivered: handoff.sh wait and the photon-jobs-notify
+    hook leave a marker named for each id they deliver."""
+    read = Path(os.environ.get("PHOTON_STATE_DIR") or Path.home() / ".local" / "state" / "photon-jobs") / "read"
+    ids = [str(message.get("id") or "") for message in job.get("messages") or [] if isinstance(message, dict)]
+    return sum(1 for message_id in ids if LANE_MESSAGE_ID.fullmatch(message_id) and not (read / message_id).exists())
+
+
 def remote_job_lines(
     board: dict[str, Any], thread_id: str, pane_id: str, show_all: bool,
     width: int, p: Palette, *, now: float | None = None,
@@ -3622,10 +3631,15 @@ def remote_job_lines(
             detail = f" · resumes {format_clock(datetime.fromtimestamp(job['held_until']).astimezone())}"
         else:
             detail = f" · {remote_board_age_text(now - job.get('updated_at', 0))} ago"
+        unread = unread_lane_messages(job)
+        pr = job.get("pr") if isinstance(job.get("pr"), dict) else {}
+        if isinstance(pr.get("number"), int) and pr["number"] > 0:
+            detail += f" · #{pr['number']}" + (f" {pr['verdict']}" if pr.get("verdict") else "")
         if show_all and mine:
             detail += " ← this session"
         lines.append(footer_spans([(p.dim, f"  · ▸ {short_text(name, 20)} "),
-                                   (color, state), (p.dim, detail)], width, p))
+                                   (color, state), (p.dim, detail),
+                                   (p.yellow, f" · {unread} unread" if unread else "")], width, p))
         if state != "running":
             continue
         for workflow in job.get("workflows") or []:
