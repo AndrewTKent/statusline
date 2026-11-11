@@ -3550,6 +3550,225 @@ def test_a_rendered_sonnet_in_a_fable_child_still_pins(monkeypatch):
     assert not [tick for tick, kwargs in selections if tick > 0 and kwargs.get("require_fable")]
 
 
+THIRD = {"profile": "/p/third", "label": "third", "email": "third@x", "org_uuid": "o3"}
+
+
+def _mode_schedule(polls, schedule):
+    """The mode snapshot each tick: the last (from_tick, mode, generation) reached."""
+
+    def load_mode_snapshot():
+        reached = [entry for entry in schedule if len(polls) >= entry[0]]
+        return reached[-1][1], reached[-1][2]
+
+    return load_mode_snapshot
+
+
+def _launched_on(launches):
+    profiles = {p["profile"]: p["label"] for p in (FIRST, SECOND, THIRD)}
+    return [
+        (
+            profiles[kwargs["env"]["CLAUDE_CONFIG_DIR"]],
+            claude_router.option_value(command, "--model"),
+        )
+        for command, kwargs in launches
+    ]
+
+
+def test_a_mode_change_crossed_in_process_is_not_restarted_when_the_ranking_drifts(
+    monkeypatch,
+):
+    session_id = str(uuid.uuid4())
+    before = {"mode": "set", "label": "first"}
+    launches, handoffs, polls = _fallback_harness(monkeypatch, session_id, before, ticks=6)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        _mode_schedule(polls, [(0, before, (1, 1)), (2, {"mode": "auto"}, (2, 2))]),
+    )
+    # Fable is spent everywhere; the best general account changes after the fallback.
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **kw: None
+        if kw.get("require_fable") and polls
+        else (SECOND if len(polls) >= 4 else FIRST),
+    )
+    # An idle child still shows the fable it launched on.
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Fable 5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "fable"]) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
+
+
+def test_a_wall_during_a_planned_move_that_waits_stands_in_for_it(monkeypatch):
+    session_id = str(uuid.uuid4())
+    before = {"mode": "set", "label": "first"}
+    launches, handoffs, polls = _fallback_harness(monkeypatch, session_id, before, ticks=12)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        _mode_schedule(polls, [(0, before, (1, 1)), (2, {"mode": "auto"}, (2, 2))]),
+    )
+
+    def select_profile(**kwargs):
+        if not polls:
+            return FIRST
+        if "first" in (kwargs.get("avoid_labels") or ()):
+            return SECOND
+        # The board shifts right after the wall's move.
+        return SECOND if len(polls) < 5 else THIRD
+
+    monkeypatch.setattr(claude_router.accounts, "select_profile", select_profile)
+    monkeypatch.setattr(claude_router.accounts, "hard_session_limit_enabled", lambda: True)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "profile_session_limit_reached",
+        lambda label: label == "first" and len(polls) >= 4,
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "in_flight_workflows",
+        lambda _s: [{"run_id": "wf_x", "script_path": "/w/x.js"}] if len(polls) < 8 else [],
+    )
+    monkeypatch.setattr(claude_router, "write_router_state", lambda *_a: None)
+    monkeypatch.setenv("ACCOUNTS_HANDOFF_GRACE_S", "600")
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Opus 4.5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert [label for label, _model in _launched_on(launches)] == ["first", "second"]
+
+
+def test_a_wall_after_a_waiting_move_was_called_off_does_not_bring_it_back(monkeypatch):
+    session_id = str(uuid.uuid4())
+    before = {"mode": "set", "label": "first"}
+    launches, handoffs, polls = _fallback_harness(monkeypatch, session_id, before, ticks=12)
+    # auto plans a move to second that waits; `set first` then calls it off.
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        _mode_schedule(
+            polls,
+            [(0, before, (1, 1)), (2, {"mode": "auto"}, (2, 2)), (4, before, (3, 3))],
+        ),
+    )
+
+    def select_profile(**kwargs):
+        if not polls:
+            return FIRST
+        if "first" in (kwargs.get("avoid_labels") or ()):
+            return SECOND
+        return SECOND if len(polls) < 4 else FIRST
+
+    monkeypatch.setattr(claude_router.accounts, "select_profile", select_profile)
+    monkeypatch.setattr(claude_router.accounts, "hard_session_limit_enabled", lambda: True)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "profile_session_limit_reached",
+        lambda label: label == "first" and len(polls) >= 6,
+    )
+    monkeypatch.setattr(
+        claude_router,
+        "in_flight_workflows",
+        lambda _s: [{"run_id": "wf_x", "script_path": "/w/x.js"}] if len(polls) < 8 else [],
+    )
+    monkeypatch.setattr(claude_router, "write_router_state", lambda *_a: None)
+    monkeypatch.setenv("ACCOUNTS_HANDOFF_GRACE_S", "600")
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Opus 4.5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert [label for label, _model in _launched_on(launches)] == ["first", "second"]
+
+
+def test_a_mode_generation_that_comes_back_to_an_earlier_value_is_planned_afresh(
+    monkeypatch,
+):
+    session_id = str(uuid.uuid4())
+    fable = {"mode": "fable"}
+    launches, handoffs, polls = _fallback_harness(monkeypatch, session_id, fable, ticks=10)
+    # A pane pin is set and then cleared, which brings back the launch generation.
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        _mode_schedule(
+            polls,
+            [
+                (0, fable, (5, None)),
+                (2, {"mode": "set", "label": "second", "policy_scope": "pane"}, (5, (9, 9))),
+                (6, fable, (5, None)),
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        claude_router.accounts, "select_profile", lambda **_kw: FIRST if not polls else SECOND
+    )
+    monkeypatch.setattr(claude_router, "write_router_state", lambda *_a: None)
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": "Sonnet 4.5"},
+    )
+
+    assert claude_router.run_supervised("/real/claude", ["--model", "sonnet"]) == 0
+
+    assert _launched_on(launches) == [
+        ("first", "sonnet"),
+        ("second", "sonnet"),
+        ("second", "fable"),
+    ]
+
+
+def test_a_model_switch_made_while_a_fable_move_is_pending_wins_over_the_move(monkeypatch):
+    session_id = str(uuid.uuid4())
+    before = {"mode": "auto", "policy_scope": "pane"}
+    launches, handoffs, polls = _fallback_harness(monkeypatch, session_id, before, ticks=10)
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "load_mode_snapshot",
+        _mode_schedule(polls, [(0, before, (1, 1)), (2, {"mode": "fable"}, (2, 2))]),
+    )
+    # No account can take the fable move until after the user's /model switch.
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **_kw: FIRST if not polls or len(polls) >= 6 else None,
+    )
+    scopes = []
+    monkeypatch.setattr(
+        claude_router, "write_policy_scope", lambda _path, scope: scopes.append(scope)
+    )
+    monkeypatch.setattr(claude_router, "write_router_state", lambda *_a: None)
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {
+            "session_id": session_id,
+            "model": "Opus 4.5" if len(polls) < 4 else "Sonnet 4.5",
+        },
+    )
+
+    assert claude_router.run_supervised("/real/claude", []) == 0
+
+    assert len(launches) == 1
+    assert handoffs == []
+    assert scopes[-1] == "global"
+
+
 def test_a_child_that_moved_onto_fable_crosses_the_fable_wall_in_process(monkeypatch):
     # Launched on opus, switched to fable in session. The account's fable is
     # spent and it is the only one, so the move to opus must not restart.
@@ -3976,9 +4195,9 @@ def _two_account_home(tmp_path):
     return home
 
 
-# The first launch leaves one workflow in flight, switches the mode (or forgets its
-# account), and finishes the workflow after a pause; the log records when each launch
-# and the finish happened.
+# The first launch leaves one workflow in flight, switches the mode to `set second`
+# or `auto` (or forgets its account), and finishes the workflow after a pause; the log
+# records when each launch and the finish happened.
 _IN_FLIGHT_FAKE_CLAUDE = (
     "#!/usr/bin/env python3\n"
     "import json, os, signal, sys, time\n"
@@ -3992,7 +4211,16 @@ _IN_FLIGHT_FAKE_CLAUDE = (
     "Path(os.environ['ACCOUNTS_ROUTER_STATE']).write_text(\n"
     "    json.dumps({'session_id': sid, 'model': 'Opus', 'effort': 'high'})\n"
     ")\n"
-    "if sum(1 for l in log.read_text().splitlines() if 'launch' in l) >= 2:\n"
+    "launches = sum(1 for l in log.read_text().splitlines() if 'launch' in l)\n"
+    "if launches == 2 and os.environ.get('ROUTER_TEST_AUTO'):\n"
+    "    # The board now favors the account just left; a move already made stays made.\n"
+    "    resets = home / '.claude' / 'account-resets.json'\n"
+    "    usage = json.loads(resets.read_text())\n"
+    "    usage['first@example.com|org-first'].update(five_hour_pct=10, last_seen=time.time())\n"
+    "    usage['second@example.com|org-second'].update(five_hour_pct=40, last_seen=time.time())\n"
+    "    resets.write_text(json.dumps(usage))\n"
+    "    time.sleep(2)\n"
+    "if launches >= 2:\n"
     "    os.kill(os.getppid(), signal.SIGTERM)\n"
     "    sys.exit(0)\n"
     "project = home / '.claude' / 'projects' / 'p'\n"
@@ -4010,6 +4238,15 @@ _IN_FLIGHT_FAKE_CLAUDE = (
     "    (home / '.accounts' / 'mode.json').write_text(\n"
     "        json.dumps({'version': 2, 'mode': 'auto', 'global_generation': 2})\n"
     "    )\n"
+    "elif os.environ.get('ROUTER_TEST_AUTO'):\n"
+    "    # Busier than second, but short of the near-wall departure, so only the mode moves it.\n"
+    "    resets = home / '.claude' / 'account-resets.json'\n"
+    "    usage = json.loads(resets.read_text())\n"
+    "    usage['first@example.com|org-first'].update(five_hour_pct=40, last_seen=time.time())\n"
+    "    resets.write_text(json.dumps(usage))\n"
+    "    (home / '.accounts' / 'mode.json').write_text(\n"
+    "        json.dumps({'version': 2, 'mode': 'auto', 'global_generation': 2})\n"
+    "    )\n"
     "else:\n"
     "    (home / '.accounts' / 'mode.json').write_text(\n"
     "        json.dumps({'version': 2, 'mode': 'set', 'label': 'second', 'global_generation': 2})\n"
@@ -4023,7 +4260,7 @@ _IN_FLIGHT_FAKE_CLAUDE = (
 
 
 def _run_router_with_in_flight_workflow(
-    tmp_path, *, grace: str, finish_after: str, forget: bool = False
+    tmp_path, *, grace: str, finish_after: str, forget: bool = False, auto: bool = False
 ):
     home = _two_account_home(tmp_path)
     log_path = tmp_path / "launches.jsonl"
@@ -4042,6 +4279,7 @@ def _run_router_with_in_flight_workflow(
             "ROUTER_TEST_LOG": str(log_path),
             "ROUTER_TEST_FINISH_AFTER": finish_after,
             "ROUTER_TEST_FORGET": "1" if forget else "",
+            "ROUTER_TEST_AUTO": "1" if auto else "",
             "PYTHONPATH": str(REPO / "bin"),
         }
     )
@@ -4065,6 +4303,16 @@ def test_a_planned_move_waits_for_the_workflow_in_flight(tmp_path):
     assert [l["label"] for l in launches] == ["first", "second"]
     assert launches[1]["t"] > finished["t"]
     assert "wf_one" not in launches[1]["last"]
+
+
+def test_a_planned_auto_move_survives_the_wait_for_a_workflow_and_is_made_once(tmp_path):
+    events = _run_router_with_in_flight_workflow(
+        tmp_path, grace="60", finish_after="2", auto=True
+    )
+
+    launches = [e for e in events if e["event"] == "launch"]
+
+    assert [l["label"] for l in launches] == ["first", "second"]
 
 
 def test_a_move_past_the_grace_names_the_workflow_it_killed(tmp_path):
