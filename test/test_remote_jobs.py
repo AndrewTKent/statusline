@@ -349,8 +349,8 @@ class TestMessages:
         assert [m["id"] for m in self.messages()] == ["m1"]
 
     def test_control_characters_in_the_text_become_spaces(self, box):
-        self.write_outbox(box, self.entry("m1", "red\x1b[31m alert\x07"))
-        assert self.messages()[0]["text"] == "red [31m alert "
+        self.write_outbox(box, self.entry("m1", "red\x1b[31m alert\x07\x9b31m"))
+        assert self.messages()[0]["text"] == "red [31m alert  31m"
 
     def test_the_text_is_capped(self, box):
         self.write_outbox(box, self.entry("m1", "x" * 5000))
