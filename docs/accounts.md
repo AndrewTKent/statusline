@@ -238,16 +238,23 @@ every 30 seconds, and `accounts poll` here copies it alongside the two board
 files.
 
 - **State is observed, not reported.** A job is `running` while both its tmux
-  session and the router supervising it are alive, `held` while that router is
+  session and the router supervising it (or, on a Codex pass, its `codex`
+  process) are alive, `held` while that router is
   waiting for a window to reset (with the time it resumes), `done` or `blocked`
   once it writes a `report.md` (`status: blocked` on the first line means
   blocked), and `gone` otherwise. A wedged session cannot claim to be healthy.
 - **A session outliving its router reads as `gone`, not `running`.** The router
   writes `/tmp/claude/account-router-<pid>.json` from launch, and that file
-  outlives the process, so liveness is the pid in its name. A tmux session
-  sitting at a bare shell after its router exited used to publish as `running`
-  forever. A job that names no worktree cannot be matched to a router at all, so
-  there the tmux session is still the whole test.
+  outlives the process. The file is live only while the pid in its name runs a
+  process that started before the file was last written, so a pid the system
+  hands to a new process later does not revive it. A tmux session sitting at a
+  bare shell after its router exited used to publish as `running` forever.
+- **A job's router is found by its tmux pane, not its directory.** A router, or
+  a Codex process, belongs to a job when its pid descends from a pane of the
+  tmux session named for the job's slug. A session that `cd`s into another repo
+  still reads as `running`, and a router under another pane, or under none,
+  never counts. Every lane runs in that session, so a job whose session has
+  ended has no router to show.
 - **Workflow progress comes from Claude Code's own journals.** A workflow counts
   as running when agents it started have no result yet and the job is still
   running. `14/15 agents` is agents finished over agents started.

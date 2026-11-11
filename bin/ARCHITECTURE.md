@@ -201,9 +201,9 @@ session cooperating:
 
 | field | derived from |
 |---|---|
-| `state` | `report.md` first (`status: blocked` → blocked, otherwise done), else the tmux session list (present → running, absent → gone) |
+| `state` | `report.md` first (`status: blocked` → blocked, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session → gone; the session without either → gone, or waiting for a stacked lane); `held` and `queued` come from the router state and the lane queue |
 | `head` | `git rev-parse --short HEAD` in the job's worktree |
-| `account`, `handoffs` | the router state file whose `cwd` is inside that worktree |
+| `account`, `handoffs` | the live router state file whose pid descends from a pane of the job's tmux session |
 | `workflows` | the Workflow journals under that session's project directory |
 
 A workflow counts as **running** when agents it started have no `result` or
