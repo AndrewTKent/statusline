@@ -2,10 +2,11 @@
 """Publish what this machine's unattended Claude jobs are doing, for a laptop to pull.
 
 A job is one tmux session working out of `~/handoffs/<slug>/`. Everything here is
-derived from what is observable on this machine — the tmux session list, the
-report the job wrote, the git HEAD of its worktree, the router's state file and
-Claude Code's workflow journals — so a wedged session cannot report itself
-healthy. The file is replaced atomically: a reader sees one version or the next.
+derived from what is observable on this machine — the tmux panes and the
+process tree under each one, the report the job wrote, the git HEAD
+of its worktree, the router's state file and Claude Code's workflow journals —
+so a wedged session cannot report itself healthy. The file is replaced
+atomically: a reader sees one version or the next.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 JOBS_FILE = "jobs.json"
 JOB_FILE = "job.json"
@@ -31,11 +33,18 @@ MESSAGE_TEXT_MAX = 1000
 MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 SENT_FILES = {"brief.md", "launch.sh"}
-ROUTER_STATE_GLOB = "account-router-*.json"
-ROUTER_PID = re.compile(r"account-router-(\d+)\.json$")
+ROUTER_STATE = re.compile(r"account-router-(\d+)\.json")
 WORKFLOW_NAME = re.compile(r"name:\s*['\"]([^'\"]+)['\"]")
 SCRIPT_HEAD_BYTES = 2048
 COMMAND_TIMEOUT_S = 5
+PROC = Path("/proc")
+STAT_STARTTIME = 19  # field 22 of /proc/<pid>/stat, counted after the ")" that ends field 2
+
+
+class Process(NamedTuple):
+    parent: int
+    command: str
+    started: float
 
 
 def home() -> Path:
@@ -77,8 +86,56 @@ def run(argv: list[str]) -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
-def live_sessions() -> set[str]:
-    return set(run(["tmux", "list-sessions", "-F", "#{session_name}"]).split())
+def pane_pids() -> dict[str, set[int]]:
+    """The pid of the shell in each pane, by the tmux session it belongs to."""
+    panes: dict[str, set[int]] = {}
+    for line in run(["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}"]).splitlines():
+        pid, _, session = line.partition(" ")
+        panes.setdefault(session, set()).add(int(pid))
+    return panes
+
+
+def boot_time() -> float:
+    lines = (PROC / "stat").read_text().splitlines()
+    return next(float(line.split()[1]) for line in lines if line.startswith("btime "))
+
+
+def processes() -> dict[int, Process]:
+    """Every process on this machine, by pid."""
+    boot = boot_time()
+    ticks = os.sysconf("SC_CLK_TCK")
+    table = {}
+    for process in children(PROC):
+        if not process.name.isdigit():
+            continue
+        try:
+            stat = (process / "stat").read_text()
+        except OSError:
+            continue
+        # The command name can itself hold spaces and parentheses, so split at the last ")".
+        head, _, tail = stat.rpartition(")")
+        fields = tail.split()
+        table[int(process.name)] = Process(
+            int(fields[1]),
+            head.partition("(")[2],
+            boot + int(fields[STAT_STARTTIME]) / ticks,
+        )
+    return table
+
+
+def descends_from(pid: int, roots: set[int], table: dict[int, Process]) -> bool:
+    seen = set()
+    while pid not in roots:
+        if pid in seen or pid not in table:
+            return False
+        seen.add(pid)
+        pid = table[pid].parent
+    return True
+
+
+def owners(pid: int, panes: dict[str, set[int]], table: dict[int, Process]) -> set[str]:
+    """The tmux sessions whose panes the process runs under; a grouped session shares panes."""
+    return {session for session, roots in panes.items() if descends_from(pid, roots, table)}
 
 
 def read_json(path: Path, default):
@@ -125,37 +182,30 @@ def report_status(path: Path) -> str | None:
     return "blocked" if first == "status: blocked" else "done"
 
 
-def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+def live_router_pid(path: Path, table: dict[int, Process]) -> int:
+    """A state file outlives its router and the pid in its name is reused, so the file is live
+    only while that pid runs a process started before the file was last written; 0 otherwise."""
+    match = ROUTER_STATE.fullmatch(path.name)
+    process = table.get(int(match.group(1))) if match else None
+    if process is None or process.started > mtime(path):
+        return 0
+    return int(match.group(1))
 
 
-def router_alive(path: Path) -> bool:
-    """A state file outlives a router that was killed, so the pid in its name decides."""
-    match = ROUTER_PID.search(path.name)
-    return bool(match) and pid_alive(int(match.group(1)))
-
-
-def router_state_for(worktree: str) -> dict:
-    """The live routed session working in this job's worktree, found by the cwd it renders."""
-    if not worktree:
-        return {}
-    prefix = worktree.rstrip("/") + "/"
+def routers_by_session(panes: dict[str, set[int]], table: dict[int, Process]) -> dict[str, dict]:
+    """Each live router's state, by the tmux session it runs under, wherever it has cd'd to.
+    Every lane runs in a session named for its slug, so a router under no pane is no job's."""
+    routers: dict[str, dict] = {}
     for path in children(router_state_dir()):
-        if not path.match(ROUTER_STATE_GLOB) or not router_alive(path):
+        pid = live_router_pid(path, table)
+        if not pid:
             continue
         state = read_json(path, {})
         if not isinstance(state, dict):
             continue
-        cwd = str(state.get("cwd") or "")
-        if cwd == worktree or cwd.startswith(prefix):
-            return state
-    return {}
+        for session in owners(pid, panes, table):
+            routers.setdefault(session, state)
+    return routers
 
 
 def session_dir(session_id: str) -> Path | None:
@@ -241,19 +291,10 @@ def last_change(directory: Path, session: Path | None) -> int:
     return int(max((mtime(path) for path in [*written, *journals(session)]), default=0.0))
 
 
-def codex_in(worktree: str) -> bool:
-    """Codex runs unrouted, so a live codex process working in the worktree stands in for a router."""
-    prefix = worktree.rstrip("/") + "/"
-    for process in children(Path("/proc")):
-        try:
-            if (process / "comm").read_text().strip() != "codex":
-                continue
-            cwd = os.readlink(process / "cwd")
-        except OSError:
-            continue
-        if cwd == worktree or cwd.startswith(prefix):
-            return True
-    return False
+def codex_sessions(panes: dict[str, set[int]], table: dict[int, Process]) -> set[str]:
+    """Codex runs unrouted, so a live codex process under a pane stands in for a router."""
+    codex = [pid for pid, process in table.items() if process.command == "codex"]
+    return {session for pid in codex for session in owners(pid, panes, table)}
 
 
 def lane_messages(path: Path) -> list[dict]:
@@ -306,11 +347,8 @@ def parent_slug(directory: Path) -> str:
         return ""
 
 
-def session_state(
-    tmux_alive: bool, worktree: str, router: dict, queued: bool, after: str
-) -> str:
-    """A tmux session left at a bare shell after its router exited is not running.
-    A job naming no worktree cannot be matched to a router, so tmux is all there is."""
+def session_state(tmux_alive: bool, router: dict, queued: bool, after: str, codex: bool) -> str:
+    """A tmux session left at a bare shell after its router exited is not running."""
     if not tmux_alive:
         return "gone"
     if router.get("held_until"):
@@ -318,22 +356,30 @@ def session_state(
     # A gated lane's pane sits in the gate's sleep loop, with no router or codex yet.
     if queued:
         return "queued"
-    if worktree and not router and not codex_in(worktree):
+    if not router and not codex:
         # A stacked lane's pane runs a waiter until its parent raises.
         return "waiting" if after else "gone"
     return "running"
 
 
-def job_row(directory: Path, live: set[str], queue: list[str]) -> dict | None:
+def job_row(
+    directory: Path,
+    queue: list[str],
+    sessions: set[str],
+    routers: dict[str, dict],
+    codex: set[str],
+) -> dict | None:
     job = read_json(directory / JOB_FILE, None)
     if not isinstance(job, dict):
         return None
     worktree = str(job.get("worktree") or "")
     report = report_status(directory / REPORT_FILE)
-    router = router_state_for(worktree)
+    router = routers.get(directory.name, {})
     queued = directory.name in queue
     after = parent_slug(directory)
-    state = report or session_state(directory.name in live, worktree, router, queued, after)
+    state = report or session_state(
+        directory.name in sessions, router, queued, after, directory.name in codex
+    )
     session = session_dir(str(router.get("session_id") or ""))
     return {
         "state": state,
@@ -356,13 +402,17 @@ def job_row(directory: Path, live: set[str], queue: list[str]) -> dict | None:
 
 
 def build(now: float) -> dict:
-    live = live_sessions()
     queue = queued_slugs()
+    panes = pane_pids()
+    table = processes()
+    sessions = set(panes)
+    routers = routers_by_session(panes, table)
+    codex = codex_sessions(panes, table)
     jobs = {}
     for directory in children(handoffs_dir()):
         if not directory.is_dir():
             continue
-        row = job_row(directory, live, queue)
+        row = job_row(directory, queue, sessions, routers, codex)
         if row is not None:
             jobs[directory.name] = row
     return {"version": 1, "generated_at": int(now), "jobs": jobs}
