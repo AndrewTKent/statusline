@@ -720,6 +720,27 @@ def write_router_state(state_path: Path, state: dict) -> None:
     os.replace(temp, state_path)
 
 
+def working_directory() -> str | None:
+    """None once the directory has been removed: Claude will not start in one."""
+    try:
+        return os.getcwd()
+    except FileNotFoundError:
+        return None
+
+
+def removed_directory_notice(session_id: str | None) -> str:
+    notice = (
+        "accounts: the working directory was removed, and Claude will not start"
+        " in a removed one."
+    )
+    if session_transcript_path(session_id) is None:
+        return f"{notice} Start it again from an existing directory."
+    return (
+        f"{notice} The session is saved: resume it with `claude --resume {session_id}`"
+        " from an existing directory."
+    )
+
+
 def hold_for_route(
     family: str,
     lease_pid: int | None,
@@ -727,15 +748,23 @@ def hold_for_route(
     state: dict,
     reason: str,
 ) -> tuple[dict, str | None, float] | None:
-    """Wait for a window to reset and route again; None when Ctrl-C ends the hold.
+    """Wait for a window to reset and route again; None when Ctrl-C ends the hold,
+    or when its directory is removed, since nothing can resume there.
     Returns the route and when the hold began."""
     held_from = time.time()
+    route = None
     while True:
+        cwd = working_directory()
+        if cwd is None:
+            print(removed_directory_notice(state.get("session_id")), file=sys.stderr)
+            return None
+        if route is not None:
+            return route[0], route[1], held_from
         try:
             wake_at = hold_wake_at(family, time.time())
             write_router_state(
                 state_path,
-                {**state, "cwd": os.getcwd(), "held_until": int(wake_at), "held_reason": reason},
+                {**state, "cwd": cwd, "held_until": int(wake_at), "held_reason": reason},
             )
             print(
                 f"accounts: no account has quota left ({reason}); holding until"
@@ -748,15 +777,18 @@ def hold_for_route(
         except KeyboardInterrupt:
             print("accounts: hold ended by Ctrl-C.", file=sys.stderr)
             return None
-        if route is not None:
-            return route[0], route[1], held_from
 
 
-def seed_router_state(state_path: Path, handoffs: int, session_id: str | None) -> None:
+def seed_router_state(
+    state_path: Path,
+    handoffs: int,
+    session_id: str | None,
+    cwd: str,
+) -> None:
     """The child's statusline rewrites this file on every render, but the jobs
     publisher reads it to tell a live router from a dead one, so it has to exist
     from launch rather than from the child's first render."""
-    state = {"cwd": os.getcwd(), "handoffs": handoffs}
+    state = {"cwd": cwd, "handoffs": handoffs}
     if session_id:
         state["session_id"] = session_id
     write_router_state(state_path, state)
@@ -1034,6 +1066,10 @@ def run_passthrough(binary: str, args: list[str]) -> int:
 
 
 def run_supervised(binary: str, args: list[str]) -> int:
+    cwd = working_directory()
+    if cwd is None:
+        print(removed_directory_notice(explicit_session_id(args)), file=sys.stderr)
+        return 1
     args = with_default_session_name(with_default_effort(args))
     launch_args, session_id = initial_session_args(args)
     router_pid = os.getpid()
@@ -1094,7 +1130,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     try:
         while True:
             state_path.unlink(missing_ok=True)
-            seed_router_state(state_path, handoff_count, session_id)
+            seed_router_state(state_path, handoff_count, session_id, cwd)
             write_policy_scope(state_path, mode.get("policy_scope", "global"))
             env = routed_environment(
                 selected,
@@ -1201,7 +1237,17 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     hard_limit_kind = None
                 hard_limit_reached = hard_limit_kind is not None
                 limit_family = "fable" if in_process_fallback else current_family
-                if hard_limit_reached:
+                directory_removed = working_directory() is None
+                # A pick that cannot be followed must not move the session's lease.
+                plan_lease_pid = None if directory_removed else router_pid
+                if directory_removed:
+                    # Claude will not start in a removed directory, and no other one
+                    # is the session's own, so no account can take the session.
+                    limit_route = None
+                    if limit_rejected == "fable" and in_process_fallback:
+                        # The child crosses its fable wall itself.
+                        limit_rejected = None
+                elif hard_limit_reached:
                     limit_route = session_limit_route(
                         selected,
                         limit_family,
@@ -1267,6 +1313,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         handoff_count += 1
                         handoff = True
                         break
+                    if directory_removed:
+                        print(removed_directory_notice(session_id), file=sys.stderr)
+                        return 1
                     # The stop is a cost guard, not a routing failure: continuing
                     # past a plan wall bills overage, which is the user's call.
                     print(
@@ -1293,7 +1342,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         user_pinned_model = None
                         next_profile = accounts.select_profile(
                             require_fable=True,
-                            lease_pid=router_pid,
+                            lease_pid=plan_lease_pid,
                         )
                         if next_profile is None:
                             next_model = os.environ.get(
@@ -1304,7 +1353,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             next_profile = accounts.select_profile(
                                 require_fable=False,
                                 prefer_fable=False,
-                                lease_pid=router_pid,
+                                lease_pid=plan_lease_pid,
                             )
                         else:
                             next_model = "fable"
@@ -1335,7 +1384,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         next_override = model_override
                         next_profile = accounts.select_profile(
                             require_fable=current_family == "fable",
-                            lease_pid=router_pid,
+                            lease_pid=plan_lease_pid,
                         )
                         if next_profile is None and current_family == "fable":
                             next_model = os.environ.get(
@@ -1346,7 +1395,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             next_profile = accounts.select_profile(
                                 require_fable=False,
                                 prefer_fable=False,
-                                lease_pid=router_pid,
+                                lease_pid=plan_lease_pid,
                             )
                         if next_profile is None:
                             continue
@@ -1370,7 +1419,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     ):
                         next_profile = accounts.select_profile(
                             require_fable=True,
-                            lease_pid=router_pid,
+                            lease_pid=plan_lease_pid,
                         )
                         if next_profile is None:
                             continue
@@ -1397,7 +1446,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             next_profile = accounts.select_profile(
                                 avoid_labels={selected["label"]},
                                 require_fable=True,
-                                lease_pid=router_pid,
+                                lease_pid=plan_lease_pid,
                             )
                             if (
                                 next_profile is None
@@ -1418,7 +1467,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             next_profile = accounts.select_profile(
                                 require_fable=False,
                                 prefer_fable=False,
-                                lease_pid=router_pid,
+                                lease_pid=plan_lease_pid,
                             )
                             if next_profile is None:
                                 continue
@@ -1440,7 +1489,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         next_profile = accounts.select_profile(
                             avoid_labels={selected["label"]},
                             require_fable=current_family == "fable",
-                            lease_pid=router_pid,
+                            lease_pid=plan_lease_pid,
                         )
                         if next_profile is None or next_profile["label"] != target:
                             continue
@@ -1460,7 +1509,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         next_profile = accounts.select_profile(
                             avoid_labels={selected["label"]},
                             require_fable=False,
-                            lease_pid=router_pid,
+                            lease_pid=plan_lease_pid,
                         )
                         if next_profile is None or next_profile["label"] != target:
                             continue
@@ -1483,6 +1532,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     current_model = next_model
                     current_family = "general"
                     continue
+                if directory_removed:
+                    # A planned move cannot relaunch the session; the child works on.
+                    continue
                 moved_by = hard_limit_kind if hard_limit_reached else limit_rejected
                 in_flight = in_flight_workflows(session_id)
                 if moved_by is None and in_flight:
@@ -1503,6 +1555,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         continue
                 pending_since = None
                 stop_for_handoff(child)
+                if working_directory() is None:
+                    print(removed_directory_notice(session_id), file=sys.stderr)
+                    return 1
                 brief_prompt, brief_model = take_handoff_brief(session_id)
                 next_model = brief_model or next_model
                 launch_args = handoff_session_args(
@@ -1570,6 +1625,10 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if detected_limit is not None and limit_rejected is None:
                         limit_rejected = detected_limit
                         mark_detected_limit(selected, detected_limit)
+                directory_removed = working_directory() is None
+                if directory_removed and limit_rejected == "fable" and in_process_fallback:
+                    # The child crossed its fable wall itself; no move was due.
+                    limit_rejected = None
                 if limit_rejected:
                     limit_route = session_limit_route(
                         selected,
@@ -1579,6 +1638,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     )
                 if not limit_rejected or limit_route is None:
                     return child.wait()
+                if directory_removed:
+                    print(removed_directory_notice(session_id), file=sys.stderr)
+                    return 1
                 next_profile, next_override = limit_route
                 brief_prompt, brief_model = take_handoff_brief(session_id)
                 next_model = brief_model or next_override or current_model
