@@ -4668,6 +4668,12 @@ class RemoteCodexBoardTest(unittest.TestCase):
                     board, "", "", True, 120, codex_statusline.Palette(False), now=5000))
         self.assertIn("talker running · 1 unread", text)
 
+    def test_a_job_row_shows_its_pr_and_verdict(self) -> None:
+        board = {"fresh": True, "jobs": {"lane": {"state": "running", "pr": {"number": 7, "verdict": "🌧️"}}}}
+        text = "\n".join(codex_statusline.remote_job_lines(
+            board, "", "", True, 120, codex_statusline.Palette(False), now=5000))
+        self.assertIn("lane running · #7 🌧️", text)
+
     def test_remote_job_origin_uses_main_pane_not_footer(self) -> None:
         codex_statusline.remote_job_origin_pane.cache_clear()
         panes = "%1\tbash runner.sh /tmp/owned/owner.pid\n%2\tpython3 codex_statusline.py --footer --owner-pid-file /tmp/owned/owner.pid\n"

@@ -301,7 +301,8 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "state": "done", "branch": "andrew/done", "head": "def5678",
       "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 7200 )),
       "updated_at": $(( NOW - 120 )), "handoffs": 0, "report": true, "workflows": [],
-      "messages": [{"id": "m1", "ts": $NOW, "text": "delivered already"}, {"id": "m2", "ts": $NOW, "text": "not yet"}]
+      "messages": [{"id": "m1", "ts": $NOW, "text": "delivered already"}, {"id": "m2", "ts": $NOW, "text": "not yet"}],
+      "pr": {"number": 7, "state": "OPEN", "url": "u", "verdict": "☀️", "checked_at": $NOW}
     },
     "their-job": {
       "state": "running", "branch": "andrew/theirs", "head": "1234abc",
@@ -338,7 +339,8 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
 JSON
 mkdir -p "$TEST_HOME/.local/state/photon-jobs/read" && : > "$TEST_HOME/.local/state/photon-jobs/read/m1"
 jobs_output=$(render_with_boards)
-[[ "$jobs_output" =~ just-done\ +done\ ·\ 2m\ ago\ ·\ 1\ unread ]] || { printf 'a lane message this machine has not delivered was not counted on its row\n' >&2; exit 1; }
+[[ "$jobs_output" =~ just-done\ +done\ ·\ 2m\ ago\ ·\ \#7\ ☀️ ]] || { printf "a lane's PR and its verdict did not render on its row\n" >&2; exit 1; }
+[[ "$jobs_output" =~ just-done\ +done\ .*·\ 1\ unread ]] || { printf 'a lane message this machine has not delivered was not counted on its row\n' >&2; exit 1; }
 [[ "$jobs_output" == *"demo-job"*"running"*"team-2"* ]] || { printf 'a running job did not name the account it is on\n' >&2; exit 1; }
 [[ "$jobs_output" != *"their-job"* ]] || { printf "another session's job rendered here\n" >&2; exit 1; }
 [[ "$jobs_output" != *"this session"* ]] || { printf 'a session showing only its own jobs still marked one as its own\n' >&2; exit 1; }

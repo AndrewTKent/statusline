@@ -319,6 +319,25 @@ class TestMessages:
         assert len(self.messages()[0]["text"]) == remote_jobs.MESSAGE_TEXT_MAX
 
 
+class TestPullRequest:
+    def pr(self, box, content):
+        directory = write_job(box)
+        if content is not None:
+            (directory / "pr.json").write_text(content)
+        return remote_jobs.build(1)["jobs"]["demo"]["pr"]
+
+    def test_the_lanes_pr_and_verdict_are_published(self, box):
+        written = {"number": 40, "state": "OPEN", "url": "u", "verdict": "🌧️", "checked_at": 5}
+        assert self.pr(box, json.dumps(written)) == written
+
+    def test_a_lane_with_no_pr_file_has_no_pr(self, box):
+        assert self.pr(box, None) == {}
+
+    def test_a_state_or_verdict_that_is_not_githubs_or_soleis_is_dropped(self, box):
+        pr = self.pr(box, json.dumps({"number": 40, "state": "\x1b[2J", "verdict": "\x1b[31m"}))
+        assert (pr["state"], pr["verdict"]) == ("", "")
+
+
 def test_a_directory_without_a_job_file_is_not_a_job(box):
     (box / "handoffs" / "scratch").mkdir()
 

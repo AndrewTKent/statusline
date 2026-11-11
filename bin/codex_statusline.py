@@ -3632,6 +3632,9 @@ def remote_job_lines(
         else:
             detail = f" · {remote_board_age_text(now - job.get('updated_at', 0))} ago"
         unread = unread_lane_messages(job)
+        pr = job.get("pr") if isinstance(job.get("pr"), dict) else {}
+        if isinstance(pr.get("number"), int) and pr["number"] > 0:
+            detail += f" · #{pr['number']}" + (f" {pr['verdict']}" if pr.get("verdict") else "")
         if show_all and mine:
             detail += " ← this session"
         lines.append(footer_spans([(p.dim, f"  · ▸ {short_text(name, 20)} "),
