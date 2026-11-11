@@ -22,6 +22,11 @@ JOB_FILE = "job.json"
 REPORT_FILE = "report.md"
 QUEUE_FILE = "lane-queue.txt"
 AFTER_FILE = "after"
+OUTBOX_FILE = "outbox.jsonl"
+MESSAGES_KEPT = 20
+MESSAGE_TEXT_MAX = 1000
+MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 SENT_FILES = {"brief.md", "launch.sh"}
 ROUTER_STATE_GLOB = "account-router-*.json"
 ROUTER_PID = re.compile(r"account-router-(\d+)\.json$")
@@ -248,6 +253,32 @@ def codex_in(worktree: str) -> bool:
     return False
 
 
+def lane_messages(path: Path) -> list[dict]:
+    """The last lines a lane posted with `handoff.sh notify`, oldest first. Which ones a session
+    has read is known only where it reads them, so recent lines are all published and the
+    reader delivers each id once."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    messages = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        message_id = str(entry.get("id") or "")
+        if not MESSAGE_ID.fullmatch(message_id):
+            continue
+        text = CONTROL_CHARS.sub(" ", str(entry.get("text") or ""))
+        messages.append(
+            {"id": message_id, "ts": as_int(entry.get("ts")), "text": text[:MESSAGE_TEXT_MAX]}
+        )
+    return messages[-MESSAGES_KEPT:]
+
+
 def parent_slug(directory: Path) -> str:
     """The lane a stacked lane waits on to raise, named in its `after` file."""
     try:
@@ -300,6 +331,7 @@ def job_row(directory: Path, live: set[str], queue: list[str]) -> dict | None:
         "handoffs": as_int(router.get("handoffs")),
         "report": report is not None,
         "workflows": workflows_for(session, state == "running"),
+        "messages": lane_messages(directory / OUTBOX_FILE),
     }
 
 

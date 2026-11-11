@@ -283,6 +283,42 @@ class TestWorkflows:
         assert [row["agents_started"] for row in workflows] == [1]
 
 
+class TestMessages:
+    def write_outbox(self, box, *lines):
+        directory = write_job(box)
+        (directory / "outbox.jsonl").write_text("".join(line + "\n" for line in lines))
+
+    def entry(self, message_id, text="hello", ts=1000):
+        return json.dumps({"id": message_id, "ts": ts, "slug": "demo", "text": text})
+
+    def messages(self):
+        return remote_jobs.build(1)["jobs"]["demo"]["messages"]
+
+    def test_a_lane_that_posted_nothing_has_no_messages(self, box):
+        write_job(box)
+        assert self.messages() == []
+
+    def test_the_last_lines_are_published_oldest_first(self, box):
+        self.write_outbox(box, *(self.entry(f"m{n}") for n in range(25)))
+        assert [m["id"] for m in self.messages()] == [f"m{n}" for n in range(5, 25)]
+
+    def test_a_line_that_is_not_json_is_skipped(self, box):
+        self.write_outbox(box, "{half a line", self.entry("m1"))
+        assert [m["id"] for m in self.messages()] == ["m1"]
+
+    def test_an_id_that_could_name_a_path_is_dropped(self, box):
+        self.write_outbox(box, self.entry("../../etc/passwd"), self.entry("m1"))
+        assert [m["id"] for m in self.messages()] == ["m1"]
+
+    def test_control_characters_in_the_text_become_spaces(self, box):
+        self.write_outbox(box, self.entry("m1", "red\x1b[31m alert\x07"))
+        assert self.messages()[0]["text"] == "red [31m alert "
+
+    def test_the_text_is_capped(self, box):
+        self.write_outbox(box, self.entry("m1", "x" * 5000))
+        assert len(self.messages()[0]["text"]) == remote_jobs.MESSAGE_TEXT_MAX
+
+
 def test_a_directory_without_a_job_file_is_not_a_job(box):
     (box / "handoffs" / "scratch").mkdir()
 
