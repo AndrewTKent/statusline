@@ -3543,6 +3543,25 @@ class TestWatch:
         assert polls == [True]
         assert snapshots == [(blobs, "RuntimeError")]
 
+    def test_failed_poll_still_pulls_remote_boards(self, monkeypatch):
+        pulls = []
+        monkeypatch.setattr(accounts, "locked", lambda blocking=True: nullcontext())
+        monkeypatch.setattr(accounts, "load_blobs", lambda: {"accounts": {}})
+        monkeypatch.setattr(accounts, "sync_profile_credentials", lambda *_args, **_kwargs: set())
+        monkeypatch.setattr(accounts, "refresh_dormant_profiles", lambda: 0)
+        monkeypatch.setattr(accounts, "shared_snapshot_enabled", lambda: False)
+        monkeypatch.setattr(
+            accounts,
+            "poll_blobs_usage",
+            lambda _blobs: (_ for _ in ()).throw(accounts.AccountsError("usage poll failed for 5 account(s)")),
+        )
+        monkeypatch.setattr(accounts.remote_boards, "refresh_all", lambda conf_var: pulls.append(conf_var))
+
+        with pytest.raises(accounts.AccountsError):
+            accounts.poll_and_write_snapshot(collector_locked=True)
+
+        assert pulls == [accounts._conf_var]
+
     def test_snapshot_is_not_written_without_opt_in(self, monkeypatch):
         blobs = {"accounts": {}}
         snapshots = []
