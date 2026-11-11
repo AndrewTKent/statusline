@@ -728,8 +728,10 @@ def poll_and_write_snapshot(*, collector_locked: bool = False) -> int:
             except Exception:
                 pass
         raise
-    # Other machines' boards ride the same poll: the render path never reaches the network.
-    remote_boards.refresh_all(_conf_var)
+    finally:
+        # Other machines' boards ride the same poll: the render path never reaches the network.
+        # They come from ssh, not the usage API, so a failed usage read must not leave them stale.
+        remote_boards.refresh_all(_conf_var)
     return n
 
 
