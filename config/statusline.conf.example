@@ -100,6 +100,12 @@
 # Off by default.
 # ACCOUNTS_HOLD_FOR_RESET=1
 
+# Set 0 on a machine whose sessions should always go to the account with the
+# most headroom, such as a box of unattended sessions: `accounts set <label>`
+# and `accounts pane set` refuse there, and the router and the board ignore any
+# pin already stored, global or per pane, and ACCOUNTS_PIN. On by default.
+# ACCOUNTS_PINS=0
+
 # ─── Remote account boards ─────────────────────────────────────────────────
 # Show another machine's account board under this one's. That machine runs the
 # same router and polls its own accounts; `accounts poll` here copies the two

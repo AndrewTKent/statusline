@@ -81,7 +81,7 @@ The script sets the terminal tab title (via ANSI escape) to `repo-name` on main/
 
 ### Automatic account detection
 
-When you `/login` inside a routed profile, the status bar detects the credential change before writing its ledgers, refreshes the profile, and updates the rate limits and account label on the next render. Sessions using that same native profile see the refreshed login. If the login belongs to another stored account, the router repairs the current profile and pins the logged-in account at the active policy scope: pane-local for a pane pin, otherwise global.
+When you `/login` inside a routed profile, the status bar detects the credential change before writing its ledgers, refreshes the profile, and updates the rate limits and account label on the next render. Sessions using that same native profile see the refreshed login. If the login belongs to another stored account, the router repairs the current profile and pins the logged-in account at the active policy scope: pane-local for a pane pin, otherwise global. With `ACCOUNTS_PINS=0` it repairs the login and leaves routing alone.
 
 ## How it works
 

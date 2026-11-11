@@ -66,6 +66,8 @@ jobs:
         run: bash test/test_file_mtime.sh
       - name: Test unsupervised badge
         run: bash test/test_unsupervised_badge.sh
+      - name: Test the status line with pins off
+        run: bash test/test_pins_off_render.sh
       - name: Test shared account snapshot renderer
         run: bash test/test_shared_snapshot.sh
       - name: Test stable status line height

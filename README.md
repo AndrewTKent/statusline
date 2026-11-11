@@ -127,6 +127,8 @@ accounts status
 | `accounts move <label> --to <host>` | Move an account to another machine (`--from <host>` pulls one here) |
 | `accounts login --box <host> <label>` | Log a box in to `<label>` with its own `/login` there; the browser step runs here and no credential leaves either machine |
 
+A machine that should never pin, such as a box of unattended sessions, sets `ACCOUNTS_PINS=0` in `~/.claude/statusline.conf`. There `accounts set` and `accounts pane set` refuse, and any pin already stored is ignored, so every launch and every handoff goes to the account with headroom.
+
 A login lives on one machine. Claude's OAuth refresh rotates the refresh token, so two machines holding one login race: the first to refresh wins and the other is signed out. `accounts export` and `accounts import` therefore run only inside `accounts move`, which forgets the source; a second machine that needs the same account gets its own login with `accounts login --box`, a separate lineage on the same quota.
 
 Reference: [docs/accounts.md](docs/accounts.md) (all commands, Codex setup, the overage guard, Fable fallback, remote boards, unattended jobs, the handoff notice).

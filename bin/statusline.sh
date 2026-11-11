@@ -36,6 +36,18 @@ export AGENT_SESSIONS_PATH                # live-state.py runs as a subprocess
 
 FOCUS_FILE="$HOME/.claude/focus"
 
+# The routing mode as the router reads it, "<mode><TAB><label>": with ACCOUNTS_PINS=0 a stored set is auto.
+read_route_mode() {
+    local mode label
+    mode=$(jq -r '.mode // ""' "$HOME/.accounts/mode.json" 2>/dev/null)
+    label=$(jq -r '.label // ""' "$HOME/.accounts/mode.json" 2>/dev/null)
+    if [ "$mode" = set ] && [ "${ACCOUNTS_PINS:-}" = 0 ]; then
+        mode=auto
+        label=""
+    fi
+    printf '%s\t%s\n' "$mode" "$label"
+}
+
 # ── True Colors (24-bit RGB) ───────────────────────────
 blue='\033[38;2;0;153;255m'
 orange='\033[38;2;255;176;85m'
@@ -2734,8 +2746,7 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
         # match the ledger rows below.
         accounts_blobs="$HOME/.accounts/blobs.json"
         session_limits_file="$HOME/.accounts/session-limits.json"
-        _route_mode=$(jq -r '.mode // ""' "$HOME/.accounts/mode.json" 2>/dev/null)
-        _route_label=$(jq -r '.label // ""' "$HOME/.accounts/mode.json" 2>/dev/null)
+        IFS=$'\t' read -r _route_mode _route_label < <(read_route_mode)
         _US=$'\x1f'
         _name_w=9
         ACCOUNTS_EXPIRED_LOOKUP=""
@@ -3380,19 +3391,18 @@ _routed_label="${ACCT_TAG:-${ACCOUNTS_ROUTED_LABEL:-}}"
 if [ -n "$_routed_label" ]; then
     _rlabel=""
     ROUTE_MODE_SUFFIX=" ${dim}· ${_routed_label}${reset}"
-    if [ -n "${ACCOUNTS_PIN:-}" ]; then
+    if [ -n "${ACCOUNTS_PIN:-}" ] && [ "${ACCOUNTS_PINS:-}" != 0 ]; then
         if [ "$ACCOUNTS_PIN" != "$_routed_label" ]; then
             _rlabel="pin ${ACCOUNTS_PIN} bypassed"
         else
             _rlabel="pinned"
         fi
     elif [ -f "$_mode_file" ]; then
-        _rmode=$(jq -r '.mode // ""' "$_mode_file" 2>/dev/null)
+        IFS=$'\t' read -r _rmode _pin_target < <(read_route_mode)
         case "$_rmode" in
             fable) _rlabel="fable" ;;
             auto)  _rlabel="auto" ;;
             set)
-                _pin_target=$(jq -r '.label // ""' "$_mode_file" 2>/dev/null)
                 if [ -n "$_pin_target" ] && [ "$_pin_target" != "$_routed_label" ]; then
                     _rlabel="set ${_pin_target} pending"
                 else
