@@ -346,6 +346,30 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
       "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
     },
+    "quota-job": {
+      "state": "waiting", "branch": "andrew/quota", "head": "0fedcbe",
+      "quota": {"since": $(( NOW - 600 )), "next_poll": $(( NOW + 60 )), "walled": ["claude", "codex"], "resumes_at": $NOW},
+      "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
+    "quota-job-later": {
+      "state": "waiting", "branch": "andrew/quota-3", "head": "0fedcc0",
+      "quota": {"since": $(( NOW - 600 )), "next_poll": $(( NOW + 60 )), "walled": ["claude"], "resumes_at": $(( NOW + 3 * 86400 ))},
+      "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
+    "resume-job": {
+      "state": "waiting", "branch": "andrew/resume", "head": "0fedcc1",
+      "quota": {"since": $(( NOW - 30 )), "next_poll": $(( NOW + 30 )), "walled": [], "resumes_at": 0},
+      "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
+    "quota-job-no-reset": {
+      "state": "waiting", "branch": "andrew/quota-2", "head": "0fedcbf",
+      "quota": {"since": $(( NOW - 600 )), "next_poll": $(( NOW + 60 )), "walled": ["claude"], "resumes_at": 0},
+      "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
     "prompt-job": {
       "state": "prompt", "branch": "andrew/prompt", "head": "0fedcbd",
       "account": "", "origin_session": "", "sent_at": $(( NOW - 90000 )),
@@ -384,6 +408,12 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 REMOTE_JOB_NAME_MAX=22 render_with_boar
 [[ "$jobs_output" =~ held-job-on-a-devbox\ +held\ ·\ resumes\ [0-9]{1,2}:[0-9]{2}[ap]m\ [A-Z]+ ]] || { printf 'a held job did not say when it resumes\n' >&2; exit 1; }
 [[ "$jobs_output" =~ queued-job\ +queued\ ·\ \#3\ in\ line ]] || { printf 'a queued job did not say its place in line\n' >&2; exit 1; }
 [[ "$jobs_output" =~ waiting-job\ +waiting\ ·\ after\ iri-8386 ]] || { printf 'a stacked lane did not say which lane it waits on\n' >&2; exit 1; }
+# A resume later than today names its date; one today, the time alone.
+{ [[ "$jobs_output" =~ quota-job\ +waiting\ ·\ quota\ ·\ resumes\ ~[0-9]{1,2}:[0-9]{2}[ap]m\ [A-Z]+ ]] \
+    && [[ "$jobs_output" =~ quota-job-later\ +waiting\ ·\ quota\ ·\ resumes\ ~[A-Z][a-z]{2}\ [0-9]{1,2}\ [0-9]{1,2}:[0-9]{2}[ap]m\ [A-Z]+ ]] \
+    && printf '%s\n' "$jobs_output" | grep -qE 'quota-job-no-reset +waiting · quota$'; } \
+    || { printf 'a lane paused at the quota wall did not say so, and when it resumes where the board knows\n' >&2; exit 1; }
+printf '%s\n' "$jobs_output" | grep -qE 'resume-job +waiting · between runs$' || { printf 'a lane whose launcher is between runs short of a wall did not say so\n' >&2; exit 1; }
 [[ "$jobs_output" =~ prompt-job\ +prompt ]] || { printf 'a lane stopped at a dialog, which writes nothing, aged off the status line\n' >&2; exit 1; }
 [[ "$jobs_output" == *"stuck panel"*"1/2 agents"* ]] || { printf "a lane at a prompt hid its running workflow\n" >&2; exit 1; }
 [[ "$(KEEP_COLORS=1 render_with_boards | grep prompt-job)" == *$'\033[38;2;255;85;85mprompt'* ]] || { printf 'a lane stopped at a dialog did not render its state in red\n' >&2; exit 1; }

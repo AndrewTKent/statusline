@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ RUN_ID = "wf_0123456789a"
 PANES = {"demo": 4242, "other": 4343, "0": 4242}  # "0" is grouped with demo: same pane
 PANE = PANES["demo"]
 ROUTER = 7000
+LAUNCHER = 7100
 
 
 @pytest.fixture
@@ -112,6 +114,64 @@ def write_workflow(box, session_id, name, started, done=(), failed=()):
     (scripts / f"slug-{RUN_ID}.js").write_text(
         "export const meta = {\n  name: '%s',\n}\n" % name
     )
+
+
+def write_quota_wait(box, slug="demo", walled=("claude", "codex"), next_poll=2100):
+    """The marker box/launch.lib.sh keeps while the lane's launcher sleeps for quota."""
+    marker = box / "handoffs" / slug / "quota-wait.json"
+    marker.write_text(
+        json.dumps({"since": 1900, "next_poll": next_poll, "walled": list(walled), "pid": LAUNCHER})
+    )
+    return marker
+
+
+def iso(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def write_account_snapshots(box, codex_shift):
+    """The box's account snapshots at t=2000. The Claude account that frees first frees at 4700, the
+    Codex one at 4200 plus codex_shift; every other row is one its router would not pick even after
+    its reset, so the earliest reset skips it."""
+    def window(used, reset, stale=False):
+        return {"used_pct": used, "resets_at": iso(reset), "stale": stale, "observed_at": 1990.0}
+
+    def codex_row(primary, secondary=None, fetched_at=1990, **extra):
+        limits = {"primary": primary, "secondary": secondary}
+        return {"fetched_at": fetched_at, "rate_limits": limits, **extra}
+
+    def limit(used, reset):
+        return {"used_percent": used, "resets_at": reset + codex_shift}
+
+    claude = {
+        # At the router's hard wall, short of 100%: it frees when that window resets.
+        "frees-at-4800": {"five_hour": window(98.0, 4800), "seven_day": window(30.0, 9900)},
+        # Both windows at the wall: it frees only when the later resets.
+        "frees-at-9000": {"five_hour": window(100.0, 4000), "seven_day": window(100.0, 9000)},
+        "expired": {"expired": True, "five_hour": window(100.0, 3000), "seven_day": window(0.0, 9900)},
+        "canceled": {"canceled": True, "five_hour": window(100.0, 3100), "seven_day": window(0.0, 9900)},
+        "stale": {"five_hour": window(100.0, 3200, stale=True), "seven_day": window(0.0, 9900, stale=True)},
+        # Polled with no 5-hour limit: the router reads that window as 0, so the weekly reset, at its
+        # hard wall short of 100%, frees it.
+        "no-five-hour-limit": {"five_hour": window(None, 9900), "seven_day": window(98.0, 4700)},
+        "weekly-unread": {"five_hour": window(100.0, 3400), "seven_day": window(None, 3400)},
+        "reset-already-passed": {"five_hour": window(100.0, 1000), "seven_day": window(0.0, 9900)},
+        "under-the-wall": {"five_hour": window(96.0, 2500), "seven_day": window(0.0, 2600)},
+    }
+    codex = {
+        "frees-at-4500": codex_row(limit(100, 4500)),
+        "frees-at-4200": codex_row(limit(50, 9800), limit(100, 4200)),
+        "stale": codex_row(limit(100, 4100), fetched_at=1000),
+        "errored": codex_row(limit(100, 4000), error="usage read failed"),
+        "flagged": codex_row(limit(100, 4050)),
+        "spend-controlled": codex_row(limit(100, 4150)),
+    }
+    codex["flagged"]["rate_limits"]["rate_limit_reached_type"] = "primary"
+    codex["spend-controlled"]["rate_limits"]["spend_control_reached"] = True
+    (box / ".accounts").mkdir(parents=True, exist_ok=True)
+    (box / ".accounts" / "statusline-snapshot.json").write_text(json.dumps({"accounts": claude}))
+    (box / ".codex-accounts").mkdir(parents=True, exist_ok=True)
+    (box / ".codex-accounts" / "usage.json").write_text(json.dumps(codex))
 
 
 def only_job(payload):
@@ -225,6 +285,70 @@ class TestState:
         row = only_job(remote_jobs.build(2000.0))
 
         assert (row["state"], row["after"]) == ("waiting", "iri-8386")
+
+    @pytest.mark.parametrize("walled,codex_shift,resumes_at", [
+        (["claude", "codex"], None, 0),
+        (["claude"], 0, 4700),
+        (["claude", "codex"], 0, 4200),
+        (["codex"], 2000, 6200),
+    ])
+    def test_a_lane_whose_launcher_sleeps_at_the_quota_wall_publishes_waiting_and_when_it_resumes(
+        self, box, monkeypatch, walled, codex_shift, resumes_at
+    ):
+        write_job(box)
+        write_quota_wait(box, walled=walled)
+        write_process(box, LAUNCHER, PANE)
+        live(monkeypatch, "demo")
+        if codex_shift is not None:
+            write_account_snapshots(box, codex_shift)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["quota"]) == (
+            "waiting",
+            {"since": 1900, "next_poll": 2100, "walled": walled, "resumes_at": resumes_at},
+        )
+
+    @pytest.mark.parametrize("walled,published", [(None, []), (["gpu", "claude"], ["claude"])])
+    def test_a_marker_names_only_the_pools_it_knows(self, box, walled, published):
+        directory = write_job(box)
+        marker = write_quota_wait(box)
+        marker.write_text(json.dumps({**json.loads(marker.read_text()), "walled": walled}))
+        write_process(box, LAUNCHER, PANE)
+
+        wait = remote_jobs.quota_wait(directory, {"demo": {PANE}}, remote_jobs.processes(), 2000.0)
+
+        assert wait["walled"] == published
+
+    @pytest.mark.parametrize("case", ["stale", "launcher exited", "another lane's pane", "pid reused"])
+    def test_a_quota_wait_marker_without_its_launcher_live_in_the_lanes_pane_is_gone(
+        self, box, monkeypatch, case
+    ):
+        write_job(box)
+        write_job(box, "other", "/o")
+        marker = write_quota_wait(box, next_poll=1700 if case == "stale" else 2100)
+        os.utime(marker, (1000, 1000))
+        if case != "launcher exited":
+            parent = PANES["other"] if case == "another lane's pane" else PANE
+            write_process(box, LAUNCHER, parent, started=1500.0 if case == "pid reused" else 0.0)
+        live(monkeypatch, "demo", "other")
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["quota"]) == ("gone", {})
+
+    def test_a_lane_that_reported_while_its_launcher_slept_at_the_wall_is_done_with_no_wait(
+        self, box, monkeypatch
+    ):
+        directory = write_job(box)
+        write_quota_wait(box)
+        write_process(box, LAUNCHER, PANE)
+        (directory / "report.md").write_text("status: done\n")
+        live(monkeypatch, "demo")
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["quota"]) == ("done", {})
 
     @pytest.mark.parametrize("pane,expected", [("prompt", "prompt"), ("busy", "running")])
     def test_a_running_lane_whose_pane_reader_sees_a_dialog_publishes_prompt(

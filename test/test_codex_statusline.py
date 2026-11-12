@@ -4674,6 +4674,37 @@ class RemoteCodexBoardTest(unittest.TestCase):
                     board, "", "", True, 120, codex_statusline.Palette(False), now=5000))
         self.assertIn("talker running · 1 unread", text)
 
+    def test_a_lane_paused_at_the_quota_wall_says_so_and_when_it_resumes(self) -> None:
+        wall = {"since": 1, "next_poll": 2, "walled": ["claude"]}
+        later = 5000 + 3 * 86400
+        board = {"fresh": True, "jobs": {
+            "today": {"state": "waiting", "updated_at": 1, "quota": {**wall, "resumes_at": 5000}},
+            "later": {"state": "waiting", "updated_at": 1, "quota": {**wall, "resumes_at": later}},
+            "no-reset": {"state": "waiting", "updated_at": 1, "quota": {**wall, "resumes_at": 0}},
+        }}
+        lines = codex_statusline.remote_job_lines(board, "", "", True, 120, codex_statusline.Palette(False), now=5000)
+        today = codex_statusline.format_clock(datetime.fromtimestamp(5000).astimezone())
+        later_at = datetime.fromtimestamp(later).astimezone()
+        self.assertEqual(
+            [line.strip() for line in lines],
+            [
+                f"· ▸ today waiting · quota · resumes ~{today}",
+                f"· ▸ later waiting · quota · resumes ~{later_at.strftime('%b')} {later_at.day} {codex_statusline.format_clock(later_at)}",
+                "· ▸ no-reset waiting · quota",
+            ],
+        )
+
+    def test_a_lane_whose_launcher_is_between_runs_short_of_a_wall_says_so(self) -> None:
+        quota = {"since": 1, "next_poll": 2, "walled": [], "resumes_at": 0}
+        board = {"fresh": True, "jobs": {"between": {"state": "waiting", "updated_at": 4900, "quota": quota}}}
+        lines = codex_statusline.remote_job_lines(board, "", "", True, 120, codex_statusline.Palette(False), now=5000)
+        self.assertEqual([line.strip() for line in lines], ["· ▸ between waiting · between runs"])
+
+    def test_a_stacked_lane_says_which_lane_it_waits_on(self) -> None:
+        board = {"fresh": True, "jobs": {"stacked": {"state": "waiting", "updated_at": 4900, "after": "iri-8386"}}}
+        lines = codex_statusline.remote_job_lines(board, "", "", True, 120, codex_statusline.Palette(False), now=5000)
+        self.assertEqual([line.strip() for line in lines], ["· ▸ stacked waiting · after iri-8386"])
+
     def test_a_job_row_shows_its_pr_and_verdict(self) -> None:
         board = {"fresh": True, "jobs": {"lane": {"state": "running", "pr": {"number": 7, "verdict": "🌧️"}}}}
         text = "\n".join(codex_statusline.remote_job_lines(
