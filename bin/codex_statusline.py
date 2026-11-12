@@ -3610,7 +3610,7 @@ def remote_job_lines(
     lines = []
     for name, job in (board.get("jobs") or {}).items():
         state = job.get("state", "")
-        if state not in {"running", "held", "queued", "prompt"} and job.get("updated_at", 0) < now - 1800:
+        if state not in {"running", "held", "queued", "waiting", "prompt"} and job.get("updated_at", 0) < now - 1800:
             continue
         origin_session, origin_pane = job.get("origin_session"), job.get("origin_pane")
         mine = bool(thread_id and origin_session == thread_id) or bool(pane_id and origin_pane == pane_id)
@@ -3618,6 +3618,7 @@ def remote_job_lines(
             continue
         color = p.green if state == "running" else p.red if state in {"blocked", "prompt"} else p.dim
         color = color if board["fresh"] else p.dim
+        quota = job.get("quota") if isinstance(job.get("quota"), dict) else {}
         detail = ""
         if state == "running":
             if job.get("account"):
@@ -3629,6 +3630,17 @@ def remote_job_lines(
             detail = f" · #{job['queue_position']} in line"
         elif state == "held" and job.get("held_until"):
             detail = f" · resumes {format_clock(datetime.fromtimestamp(job['held_until']).astimezone())}"
+        elif state == "waiting" and quota.get("walled"):
+            detail = " · quota"
+            if quota.get("resumes_at"):
+                resume = datetime.fromtimestamp(quota["resumes_at"]).astimezone()
+                today = datetime.fromtimestamp(now).astimezone().date()
+                day = "" if resume.date() == today else f"{resume.strftime('%b')} {resume.day} "
+                detail += f" · resumes ~{day}{format_clock(resume)}"
+        elif state == "waiting" and quota.get("since"):
+            detail = " · between runs"
+        elif state == "waiting" and job.get("after"):
+            detail = f" · after {job['after']}"
         else:
             detail = f" · {remote_board_age_text(now - job.get('updated_at', 0))} ago"
         unread = unread_lane_messages(job)

@@ -893,8 +893,8 @@ remote_job_lines() {
     local board_dir="$1" name_width="$2" fresh="$3" now_epoch="$4"
     local RJ_SEP=$'\037'
     [ -r "$board_dir/jobs.json" ] || return 0
-    local rows kind one two three four five six seven eight nine ten eleven
-    local padded detail state_color job_color age plural
+    local rows kind one two three four five six seven eight nine ten eleven twelve thirteen
+    local padded detail state_color job_color age plural resume_format
     # A lane message counts as read once this machine has delivered it: handoff.sh wait and the
     # photon-jobs-notify hook leave a marker named for its id.
     local read_ids
@@ -916,7 +916,9 @@ remote_job_lines() {
             ((.value.messages // []) | map(select($seen[.id | tostring] | not)) | length | tostring),
             (if ((.value.pr.number // 0) | type) == "number" and .value.pr.number > 0
              then "#\(.value.pr.number)" + (if (.value.pr.verdict // "") != "" then " \(.value.pr.verdict)" else "" end)
-             else "" end)]
+             else "" end),
+            (if (.value.quota.walled // [] | length) > 0 then "quota" elif (.value.quota.since // 0) > 0 then "resume" else "" end),
+            ((.value.quota.resumes_at // 0) | tostring)]
            | join("")),
           (select(.value.state == "running" or .value.state == "prompt")
            | (.value.workflows // [])[] | select(.running == true)
@@ -925,12 +927,13 @@ remote_job_lines() {
               ((.started_at // 0) | tostring)]
            | join(""))
     ' "$board_dir/jobs.json" 2>/dev/null)
-    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine ten eleven; do
+    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine ten eleven twelve thirteen; do
         case "$four" in ''|*[!0-9]*) four=0 ;; esac
         case "$five" in ''|*[!0-9]*) five=0 ;; esac
         case "$seven" in ''|*[!0-9]*) seven=0 ;; esac
         case "$eight" in ''|*[!0-9]*) eight=0 ;; esac
         case "$ten" in ''|*[!0-9]*) ten=0 ;; esac
+        case "$thirteen" in ''|*[!0-9]*) thirteen=0 ;; esac
         case "$kind" in
             job)
                 case "$two" in
@@ -948,6 +951,15 @@ remote_job_lines() {
                     fi
                 elif [ "$two" = "queued" ] && [ "$eight" -gt 0 ]; then
                     detail=" ${dim}· #${eight} in line${reset}"
+                elif [ "$two" = "waiting" ] && [ "$twelve" = "quota" ]; then
+                    detail=" ${dim}· quota${reset}"
+                    if [ "$thirteen" -gt 0 ]; then
+                        resume_format="%l:%M%p %Z"
+                        [ "$(fmt_epoch "$thirteen" %F)" = "$(fmt_epoch "$now_epoch" %F)" ] || resume_format="%b %-d %l:%M%p %Z"
+                        detail+=" ${dim}· resumes ~$(fmt_epoch "$thirteen" "$resume_format" | sed 's/  */ /g; s/^ //; s/AM/am/; s/PM/pm/')${reset}"
+                    fi
+                elif [ "$two" = "waiting" ] && [ "$twelve" = "resume" ]; then
+                    detail=" ${dim}· between runs${reset}"
                 elif [ "$two" = "waiting" ] && [ -n "$nine" ]; then
                     detail=" ${dim}· after ${nine}${reset}"
                 elif [ "$two" = "held" ] && [ "$seven" -gt 0 ]; then
