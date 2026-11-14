@@ -755,12 +755,18 @@ def test_api_session_limit_hands_off_the_same_conversation(
         "set_synchronized_output",
         lambda _enabled: False,
     )
+    seeded = []
+    monkeypatch.setattr(claude_router, "seed_router_state", lambda _path, times, *_a: seeded.append(list(times)))
+    before = int(time.time())
 
     assert claude_router.run_supervised(
         "/real/claude",
         ["--model", "opus"],
     ) == 0
 
+    # The relaunch onto the second account carries the time of the move.
+    assert len(seeded) == 2 and seeded[0] == [] and len(seeded[1]) == 1
+    assert before <= seeded[1][0] <= time.time()
     assert limited == [("first@example.com", "org-first")]
     assert route_families == ["fable"]
     assert [launch[1]["env"]["ACCOUNTS_ROUTED_LABEL"] for launch in launches] == [
@@ -1945,6 +1951,30 @@ def test_statusline_publishes_the_live_session_identity_and_effort(
         assert state["label"] == "first"
     finally:
         state_path.unlink(missing_ok=True)
+
+
+def test_a_statusline_render_keeps_the_routers_move_record(tmp_path):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    project = tmp_path / "project"
+    project.mkdir()
+    # The script hardcodes /tmp/claude; a copy pointed at the test's own directory leaves the machine's alone.
+    claude_tmp = tmp_path / "claude"
+    claude_tmp.mkdir()
+    script = tmp_path / "statusline.sh"
+    script.write_text((REPO / "bin" / "statusline.sh").read_text().replace("/tmp/claude", str(claude_tmp)))
+    state_path = claude_tmp / "account-router-1.json"
+    state_path.write_text(json.dumps({"handoffs": 25, "handoff_times": [1000, 2000]}))
+    fixture = json.loads((REPO / "test" / "fixtures" / "input.json").read_text())
+    fixture["workspace"]["current_dir"] = str(project)
+    # A supervised session's ACCOUNTS_*/CLAUDE_* vars point the statusline at a real login.
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("ACCOUNTS_", "CLAUDE_"))}
+    env.update({"HOME": str(home), "ACCOUNTS_ROUTER_STATE": str(state_path)})
+
+    subprocess.run(["bash", str(script)], input=json.dumps(fixture), text=True, capture_output=True, env=env, check=True)
+
+    state = json.loads(state_path.read_text())
+    assert (state["session_id"], state["handoffs"], state["handoff_times"]) == (fixture["session_id"], 25, [1000, 2000])
 
 
 def test_statusline_labels_an_ultracode_session(tmp_path):
@@ -4364,17 +4394,20 @@ class TestLaunchPromptWalk:
 
 
 class TestRouterState:
-    def test_the_move_count_is_seeded_where_the_status_line_carries_it_forward(self, tmp_path):
+    def test_every_move_is_counted_and_the_last_twenty_timed_where_the_status_line_carries_them_forward(
+        self, tmp_path
+    ):
         state = tmp_path / "account-router-1.json"
 
-        claude_router.seed_router_state(state, 2, "s-1", str(tmp_path))
+        claude_router.seed_router_state(state, list(range(100, 125)), "s-1", str(tmp_path))
 
-        assert json.loads(state.read_text())["handoffs"] == 2
+        seeded = json.loads(state.read_text())
+        assert (seeded["handoffs"], seeded["handoff_times"]) == (25, list(range(105, 125)))
 
     def test_a_session_that_never_moved_still_publishes_a_state_file(self, tmp_path):
         state = tmp_path / "account-router-1.json"
 
-        claude_router.seed_router_state(state, 0, "s-1", str(tmp_path))
+        claude_router.seed_router_state(state, [], "s-1", str(tmp_path))
 
         assert json.loads(state.read_text())["cwd"] == str(tmp_path)
 
@@ -4841,12 +4874,15 @@ class TestHoldForReset:
             lambda _path: {"session_id": session_id, "model": "Opus 5"},
         )
         monkeypatch.setattr(claude_router, "stop_for_handoff", lambda _child: None)
+        seeded = []
+        monkeypatch.setattr(claude_router, "seed_router_state", lambda _path, times, *_a: seeded.append(list(times)))
 
         assert claude_router.run_supervised("/real/claude", ["brief"]) == 0
         relaunch = launches[1][1:]
         assert claude_router.prompt_arg_index(relaunch) == len(relaunch) - 1
         assert relaunch[-1].startswith("The account router held this session from ")
         assert "(session limit)" in relaunch[-1]
+        assert [len(times) for times in seeded] == [0, 1]
 
     def test_the_hold_wakes_after_the_soonest_reset_by_the_margin(self, monkeypatch):
         monkeypatch.setattr(claude_router.accounts, "next_routable_at", lambda **_kw: 1300.0)

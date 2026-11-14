@@ -51,6 +51,8 @@ HANDOFF_NOTICE = (
     " it; if nothing was, reply in one line and wait."
 )
 HANDOFF_GRACE_S = 1800
+# Enough moves for the jobs board to count an hour of them on a lane bouncing between walled accounts.
+HANDOFF_TIMES_KEPT = 20
 RESUME_HINT = (
     " Workflows in flight when it stopped: {runs}. Resume each with"
     " Workflow({{scriptPath, resumeFromRunId}}); agents that finished replay from cache."
@@ -779,16 +781,21 @@ def hold_for_route(
             return None
 
 
+def move_record(handoff_times: list[int]) -> dict:
+    """How many times this router moved its session, and when it made the last of those moves."""
+    return {"handoffs": len(handoff_times), "handoff_times": handoff_times[-HANDOFF_TIMES_KEPT:]}
+
+
 def seed_router_state(
     state_path: Path,
-    handoffs: int,
+    handoff_times: list[int],
     session_id: str | None,
     cwd: str,
 ) -> None:
     """The child's statusline rewrites this file on every render, but the jobs
     publisher reads it to tell a live router from a dead one, so it has to exist
     from launch rather than from the child's first render."""
-    state = {"cwd": cwd, "handoffs": handoffs}
+    state = {"cwd": cwd, **move_record(handoff_times)}
     if session_id:
         state["session_id"] = session_id
     write_router_state(state_path, state)
@@ -1080,7 +1087,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
     waiting_mode_generation = None
     hard_session_limit = accounts.hard_session_limit_enabled()
     hold_for_reset = accounts.hold_for_reset_enabled()
-    handoff_count = 0
+    handoff_times: list[int] = []
     pending_since: float | None = None
     fallback_model = os.environ.get(
         "ACCOUNTS_FABLE_FALLBACK_MODEL",
@@ -1135,7 +1142,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 # Any relaunch, a wall's or a limit's too, makes the move that waited.
                 applied_mode_generation = waiting_mode_generation
             state_path.unlink(missing_ok=True)
-            seed_router_state(state_path, handoff_count, session_id, cwd)
+            seed_router_state(state_path, handoff_times, session_id, cwd)
             write_policy_scope(state_path, mode.get("policy_scope", "global"))
             env = routed_environment(
                 selected,
@@ -1287,7 +1294,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             {
                                 **read_router_state(state_path),
                                 "session_id": session_id,
-                                "handoffs": handoff_count,
+                                **move_record(handoff_times),
                             },
                             hold_reason(hard_limit_kind),
                         )
@@ -1315,7 +1322,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             if next_model
                             else current_family
                         )
-                        handoff_count += 1
+                        handoff_times.append(int(time.time()))
                         handoff = True
                         break
                     if directory_removed:
@@ -1605,7 +1612,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if next_model
                     else current_family
                 )
-                handoff_count += 1
+                handoff_times.append(int(time.time()))
                 handoff = True
                 break
             if not handoff:
@@ -1691,7 +1698,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if next_model
                     else current_family
                 )
-                handoff_count += 1
+                handoff_times.append(int(time.time()))
                 handoff = True
     finally:
         accounts.remove_session_lease(router_pid)

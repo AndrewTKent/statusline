@@ -4711,6 +4711,21 @@ class RemoteCodexBoardTest(unittest.TestCase):
             board, "", "", True, 120, codex_statusline.Palette(False), now=5000))
         self.assertIn("lane running · #7 🌧️", text)
 
+    def test_a_running_job_row_counts_only_the_last_hours_moves(self) -> None:
+        job = {"state": "running", "account": "team-1", "handoffs": 5, "handoffs_last_hour": 3}
+        lines = codex_statusline.remote_job_lines(
+            {"fresh": True, "jobs": {"lane": job}}, "", "", True, 120, codex_statusline.Palette(False), now=5000)
+        self.assertEqual([line.strip() for line in lines], ["· ▸ lane running · team-1 · 3 handoffs in 1h"])
+
+    def test_a_job_row_says_what_keeps_its_pr_from_being_ready(self) -> None:
+        pr = {"number": 7, "verdict": "", "verdict_stale": True, "conflicts": True}
+        board = {"fresh": True, "jobs": {"lane": {"state": "done", "updated_at": 4900, "unpushed": 2, "pr": pr}}}
+        lines = codex_statusline.remote_job_lines(board, "", "", True, 120, codex_statusline.Palette(False), now=5000)
+        self.assertEqual(
+            [line.strip() for line in lines],
+            ["· ▸ lane done · 1m ago · #7 · verdict stale · conflicts · 2 unpushed"],
+        )
+
     def test_remote_job_origin_uses_main_pane_not_footer(self) -> None:
         codex_statusline.remote_job_origin_pane.cache_clear()
         panes = "%1\tbash runner.sh /tmp/owned/owner.pid\n%2\tpython3 codex_statusline.py --footer --owner-pid-file /tmp/owned/owner.pid\n"

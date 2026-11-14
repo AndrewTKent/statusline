@@ -175,7 +175,7 @@ files that poll publishes and renders them below its local table.
 · Personal            0%       —   100%      8%     23h
 ■ devbox · 1m ago
 · Team-1             12%   3h40m    26%      4%      5d
-· ▸ fix-cache        running · Team-1 · 2 handoffs
+· ▸ fix-cache        running · Team-1 · #412 ☀️
 ·     review loop 14/15 agents · 12m
 ```
 
@@ -240,9 +240,10 @@ files.
 - **State is observed, not reported.** A job is `running` while both its tmux
   session and the router supervising it (or, on a Codex pass, its `codex`
   process) are alive, `held` while that router is
-  waiting for a window to reset (with the time it resumes), `done` or `blocked`
-  once it writes a `report.md` (`status: blocked` on the first line means
-  blocked), and `gone` otherwise. A wedged session cannot claim to be healthy.
+  waiting for a window to reset (with the time it resumes), `done`, `blocked` or
+  `stopped` once it writes a `report.md` (`status: blocked` on the first line
+  means blocked, and `status: stopped`, which `handoff.sh stop` writes, means
+  stopped), and `gone` otherwise. A wedged session cannot claim to be healthy.
 - **A session outliving its router reads as `gone`, not `running`.** The router
   writes `/tmp/claude/account-router-<pid>.json` from launch, and that file
   outlives the process. The file is live only while the pid in its name runs a
@@ -255,6 +256,15 @@ files.
   still reads as `running`, and a router under another pane, or under none,
   never counts. Every lane runs in that session, so a job whose session has
   ended has no router to show.
+- **A PR's verdict shows only for the head it was given on.** The row names the
+  lane's newest PR and the review bot's verdict emoji when the bot gave it on the
+  PR's current head commit, read from GitHub on every publish. A verdict on an
+  older head reads `verdict stale` instead, and `conflicts` (the PR conflicts with
+  its base) and `N unpushed` (commits in the lane's worktree no remote holds) say
+  what else keeps the PR from being ready.
+- **Moves between accounts show only when a lane is bouncing.** A running lane's
+  row says `N handoffs in 1h` when its router moved it more than twice in the
+  last hour; one or two moves an hour is the router riding account walls.
 - **Workflow progress comes from Claude Code's own journals.** A workflow counts
   as running when agents it started have no result yet and the job is still
   running. `14/15 agents` is agents finished over agents started.

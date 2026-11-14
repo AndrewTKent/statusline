@@ -197,14 +197,17 @@ session working out of `~/handoffs/<slug>/`, which holds the `job.json` written
 when it was sent and the `report.md` it writes when it finishes.
 
 Every field is derived from what is observable on that machine, never from the
-session cooperating:
+session cooperating; the one read from off it is each lane PR's state on GitHub:
 
 | field | derived from |
 |---|---|
-| `state` | `report.md` first (`status: blocked` → blocked, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session → gone; the session without either → gone, or waiting for a stacked lane or for a lane whose launcher is between runs, paused at the quota wall or short of one); `held` and `queued` come from the router state and the lane queue; a running job whose pane the pane reader agent-workflows installs (`~/handoffs/lane-pane.sh state <session>`) sees at a permission dialog → prompt, and with no reader installed the state is unchanged |
+| `state` | `report.md` first (`status: blocked` → blocked, `status: stopped`, which `handoff.sh stop` writes, → stopped, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session → gone; the session without either → gone, or waiting for a stacked lane or for a lane whose launcher is between runs, paused at the quota wall or short of one); `held` and `queued` come from the router state and the lane queue; a running job whose pane the pane reader agent-workflows installs (`~/handoffs/lane-pane.sh state <session>`) sees at a permission dialog → prompt, and with no reader installed the state is unchanged |
 | `quota` | the launcher's `quota-wait.json` (`since`, `next_poll`, and `walled`, the `claude` and `codex` it names, none until the launcher finds a wall), counted only while it is no more than 120s past its next poll and its pid is a process started before the file's last write, under one of the job's panes; `resumes_at` is when the first account in a walled pool frees, by this machine's own `~/.accounts/statusline-snapshot.json` and `~/.codex-accounts/usage.json` and each router's own pick rules: Claude walls at `accounts.HARD_WALL_PCT` on either window, with a polled null 5-hour window read as 0 and expired, canceled and stale rows skipped; Codex walls at 100% on either window, with errored, stale and flagged rows skipped (0 when they name no reset ahead); `{}` on every other job |
 | `head` | `git rev-parse --short HEAD` in the job's worktree |
+| `unpushed` | `git rev-list --count HEAD --not --remotes` in the job's worktree: commits no remote-tracking ref holds |
 | `account`, `handoffs` | the live router state file whose pid descends from a pane of the job's tmux session |
+| `handoffs_last_hour` | the same file's `handoff_times`, the times of the router's last 20 moves, which the router seeds and every render of the status line carries forward: the moves in the last hour when there are more than 2, else 0 |
+| `pr` | the lane's newest PR, as agent-workflows' lane-retire timer names it in the job's `pr.json` (`number`, `url`), then GitHub's state of it now: one GraphQL query per publish reads every lane PR. `verdict` is the emoji opening the review bot's newest review, or comment, on the PR's head commit (a review names its commit, a comment carries it in its body); `verdict_stale` is true when the bot's verdicts are all on older heads; `conflicts` is GitHub's `mergeable` reading `CONFLICTING` against the PR's base, and while GitHub reads `UNKNOWN`, recomputing after the base moved, what the last publish said of the same PR; `checked_at` is the read's time. When the read fails, the row keeps `pr.json`'s number, state, url and `checked_at`, with no verdict |
 | `workflows` | the Workflow journals under that session's project directory |
 | `messages` | the last 20 lines of the job's `outbox.jsonl`, which the lane appends with `handoff.sh notify` |
 
@@ -223,6 +226,10 @@ cannot tell working apart from killed; the owning session's liveness can.
 
 The file is replaced with `os.replace`, so a reader sees one version or the
 next. An empty `jobs` map is a valid result.
+
+The query costs one point of the GitHub login's 5,000-an-hour GraphQL budget whatever the
+number of lane PRs, so the 30s timer spends 120 an hour while any lane has a PR,
+and none while none does.
 
 ## Classification precedence
 

@@ -732,13 +732,16 @@ if [ -z "$effort_val" ] && [ "${SHARED_ACCOUNT_SNAPSHOT:-0}" != "1" ]; then
 fi
 effort_label="$effort_val"
 prior_router_effort=""
-# The router seeds the move count here and every render carries it forward.
+# The router seeds the move count and the times of its last moves here, and every render carries them forward.
 prior_router_handoffs=0
+prior_router_handoff_times='[]'
 if [[ "${ACCOUNTS_ROUTER_STATE:-}" == /tmp/claude/account-router-*.json ]] &&
    [ -f "$ACCOUNTS_ROUTER_STATE" ]; then
     prior_router_effort=$(jq -r '.effort // empty' "$ACCOUNTS_ROUTER_STATE" 2>/dev/null)
     prior_router_handoffs=$(jq -r '(.handoffs // 0) | floor' "$ACCOUNTS_ROUTER_STATE" 2>/dev/null)
     case "$prior_router_handoffs" in ''|*[!0-9]*) prior_router_handoffs=0 ;; esac
+    prior_router_handoff_times=$(jq -c '[(.handoff_times // [])[]? | numbers | floor]' "$ACCOUNTS_ROUTER_STATE" 2>/dev/null)
+    [ -n "$prior_router_handoff_times" ] || prior_router_handoff_times='[]'
 fi
 if [ "${CLAUDE_ROUTER_ULTRACODE:-}" = "1" ] && [ "$effort_val" = "xhigh" ]; then
     if [ -z "$prior_router_effort" ] || [ "$prior_router_effort" = "ultracode" ]; then
@@ -893,7 +896,7 @@ remote_job_lines() {
     local board_dir="$1" name_width="$2" fresh="$3" now_epoch="$4"
     local RJ_SEP=$'\037'
     [ -r "$board_dir/jobs.json" ] || return 0
-    local rows kind one two three four five six seven eight nine ten eleven twelve thirteen
+    local rows kind one two three four five six seven eight nine ten eleven twelve thirteen fourteen
     local padded detail state_color job_color age plural resume_format
     # A lane message counts as read once this machine has delivered it: handoff.sh wait and the
     # photon-jobs-notify hook leave a marker named for its id.
@@ -909,7 +912,7 @@ remote_job_lines() {
         | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
                  or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
         | (["job", .key[0:$cap], (.value.state // ""), (.value.account // ""),
-            ((.value.handoffs // 0) | tostring), ((.value.updated_at // 0) | tostring),
+            ((.value.handoffs_last_hour // 0) | tostring), ((.value.updated_at // 0) | tostring),
             (if $all == "1" and (.value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
              then "mine" else "" end), ((.value.held_until // 0) | tostring),
             ((.value.queue_position // 0) | tostring), (.value.after // ""),
@@ -918,7 +921,14 @@ remote_job_lines() {
              then "#\(.value.pr.number)" + (if (.value.pr.verdict // "") != "" then " \(.value.pr.verdict)" else "" end)
              else "" end),
             (if (.value.quota.walled // [] | length) > 0 then "quota" elif (.value.quota.since // 0) > 0 then "resume" else "" end),
-            ((.value.quota.resumes_at // 0) | tostring)]
+            ((.value.quota.resumes_at // 0) | tostring),
+            # What keeps a PR from reading as ready: a verdict on an older head, a conflict, work not pushed.
+            (if ((.value.pr.number // 0) | type) == "number" and .value.pr.number > 0
+             then [(if .value.pr.verdict_stale == true then "verdict stale" else empty end),
+                   (if .value.pr.conflicts == true then "conflicts" else empty end),
+                   (if ((.value.unpushed // 0) | type) == "number" and .value.unpushed > 0
+                    then "\(.value.unpushed | floor) unpushed" else empty end)] | join(" · ")
+             else "" end)]
            | join("")),
           (select(.value.state == "running" or .value.state == "prompt")
            | (.value.workflows // [])[] | select(.running == true)
@@ -927,7 +937,7 @@ remote_job_lines() {
               ((.started_at // 0) | tostring)]
            | join(""))
     ' "$board_dir/jobs.json" 2>/dev/null)
-    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine ten eleven twelve thirteen; do
+    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine ten eleven twelve thirteen fourteen; do
         case "$four" in ''|*[!0-9]*) four=0 ;; esac
         case "$five" in ''|*[!0-9]*) five=0 ;; esac
         case "$seven" in ''|*[!0-9]*) seven=0 ;; esac
@@ -945,10 +955,8 @@ remote_job_lines() {
                 if [ "$two" = "running" ]; then
                     detail=""
                     [ -n "$three" ] && detail+=" ${dim}· ${three}${reset}"
-                    if [ "$four" -gt 0 ]; then
-                        plural="handoffs"; [ "$four" = "1" ] && plural="handoff"
-                        detail+=" ${dim}· ${four} ${plural}${reset}"
-                    fi
+                    # Published only past the board's threshold, always more than one.
+                    [ "$four" -gt 0 ] && detail+=" ${dim}·${reset} ${yellow}${four} handoffs in 1h${reset}"
                 elif [ "$two" = "queued" ] && [ "$eight" -gt 0 ]; then
                     detail=" ${dim}· #${eight} in line${reset}"
                 elif [ "$two" = "waiting" ] && [ "$twelve" = "quota" ]; then
@@ -968,6 +976,7 @@ remote_job_lines() {
                     detail=" ${dim}· $(remote_age_text "$(( now_epoch - five ))") ago${reset}"
                 fi
                 [ -n "$eleven" ] && detail+=" ${dim}· ${eleven}${reset}"
+                [ -n "$fourteen" ] && detail+=" ${dim}·${reset} ${yellow}${fourteen}${reset}"
                 [ "$ten" -gt 0 ] && detail+=" ${dim}·${reset} ${yellow}${ten} unread${reset}"
                 # Only worth saying when every session's jobs are on screen.
                 [ "$six" = "mine" ] && detail+=" ${white}\xe2\x86\x90 this session${reset}"
@@ -1587,7 +1596,8 @@ if [ "${SHARED_ACCOUNT_SNAPSHOT:-0}" = "1" ]; then
             --arg label "${ACCOUNTS_ROUTED_LABEL:-}" \
             --arg cwd "$CWD" \
             --argjson handoffs "$prior_router_handoffs" \
-            '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd,handoffs:$handoffs}' \
+            --argjson handoff_times "$prior_router_handoff_times" \
+            '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd,handoffs:$handoffs,handoff_times:$handoff_times}' \
             > "$_router_state_tmp" 2>/dev/null &&
             chmod 600 "$_router_state_tmp" 2>/dev/null &&
             mv "$_router_state_tmp" "$ACCOUNTS_ROUTER_STATE" 2>/dev/null
@@ -1752,7 +1762,8 @@ if [[ "${ACCOUNTS_ROUTER_STATE:-}" == /tmp/claude/account-router-*.json ]] &&
         --arg label "$ACCT_TAG" \
         --arg cwd "$CWD" \
         --argjson handoffs "$prior_router_handoffs" \
-        '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd,handoffs:$handoffs}' \
+        --argjson handoff_times "$prior_router_handoff_times" \
+        '{session_id:$session_id,model:$model,effort:$effort,label:$label,cwd:$cwd,handoffs:$handoffs,handoff_times:$handoff_times}' \
         > "$_router_state_tmp" 2>/dev/null &&
         chmod 600 "$_router_state_tmp" 2>/dev/null &&
         mv "$_router_state_tmp" "$ACCOUNTS_ROUTER_STATE" 2>/dev/null
