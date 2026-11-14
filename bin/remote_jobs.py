@@ -5,8 +5,9 @@ A job is one tmux session working out of `~/handoffs/<slug>/`. Everything here i
 derived from what is observable on this machine — the tmux panes and the
 process tree under each one, the report the job wrote, the git HEAD
 of its worktree, the router's state file and Claude Code's workflow journals —
-so a wedged session cannot report itself healthy. The file is replaced
-atomically: a reader sees one version or the next.
+so a wedged session cannot report itself healthy. The one thing read from off the
+machine is each lane PR's state on GitHub, in one query per publish. The file is
+replaced atomically: a reader sees one version or the next.
 """
 
 from __future__ import annotations
@@ -31,7 +32,20 @@ AFTER_FILE = "after"
 OUTBOX_FILE = "outbox.jsonl"
 PR_FILE = "pr.json"
 PR_STATES = {"OPEN", "MERGED", "CLOSED"}
-VERDICTS = {"☀️", "🌤️", "⛅", "🌧️"}
+PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)")
+VERDICTS = ("☀️", "🌤️", "⛅", "🌧️")
+REVIEW_BOT = {"claude", "claude[bot]"}
+# A verdict whose review fails to post goes up as a plain comment instead, so both are read.
+POST_FIELDS = "author { login } body"
+PR_FIELDS = (
+    f"number state url headRefOid mergeable"
+    f" reviews(last: 20) {{ nodes {{ {POST_FIELDS} submittedAt commit {{ oid }} }} }}"
+    f" comments(last: 20) {{ nodes {{ {POST_FIELDS} createdAt }} }}"
+)
+REPORT_STATES = {"status: blocked": "blocked", "status: stopped": "stopped"}
+HANDOFF_WINDOW_S = 3600
+# A move or two an hour is the router riding account walls; a third means it is bouncing between walled accounts.
+HANDOFF_CHURN_MAX = 2
 MESSAGES_KEPT = 20
 MESSAGE_TEXT_MAX = 1000
 MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -187,14 +201,21 @@ def git_head(worktree: str) -> str:
     return run(["git", "-C", worktree, "rev-parse", "--short", "HEAD"]).strip()
 
 
+def unpushed_commits(worktree: str) -> int:
+    """Commits the worktree's HEAD holds that no remote-tracking ref does."""
+    if not worktree:
+        return 0
+    return as_int(run(["git", "-C", worktree, "rev-list", "--count", "HEAD", "--not", "--remotes"]).strip())
+
+
 def report_status(path: Path) -> str | None:
-    """None when the job wrote no report; otherwise done unless it says blocked."""
+    """None when the job wrote no report; otherwise done unless its first line says blocked or stopped."""
     try:
         lines = path.read_text().splitlines()
     except OSError:
         return None
     first = lines[0].strip().lower() if lines else ""
-    return "blocked" if first == "status: blocked" else "done"
+    return REPORT_STATES.get(first, "done")
 
 
 def live_router_pid(path: Path, table: dict[int, Process]) -> int:
@@ -339,18 +360,124 @@ def lane_messages(path: Path) -> list[dict]:
 
 
 def lane_pr(path: Path) -> dict:
-    """The lane's newest PR as the box's lane-retire timer last read it from GitHub, or {}."""
+    """The lane's newest PR as the box's lane-retire timer last read it from GitHub, or {}. Its verdict
+    is not carried: only a read of the PR's current head says whether one still holds."""
     data = read_json(path, {})
     if not isinstance(data, dict) or as_int(data.get("number")) <= 0:
         return {}
     state = str(data.get("state") or "")
-    verdict = str(data.get("verdict") or "")
     return {
         "number": as_int(data.get("number")),
         "state": state if state in PR_STATES else "",
         "url": str(data.get("url") or ""),
-        "verdict": verdict if verdict in VERDICTS else "",
+        "verdict": "",
+        "verdict_stale": False,
+        "conflicts": False,
         "checked_at": as_int(data.get("checked_at")),
+    }
+
+
+def pr_key(pr: dict) -> tuple[str, str, int] | None:
+    """Owner, repository and number, from the PR's URL."""
+    match = PR_URL.fullmatch(pr.get("url") or "")
+    return (match.group(1), match.group(2), int(match.group(3))) if match else None
+
+
+def read_prs(keys: set[tuple[str, str, int]]) -> dict[tuple[str, str, int], dict] | None:
+    """Every lane PR as GitHub has it now, in one GraphQL query; None when the read fails."""
+    if not keys:
+        return {}
+    params, fields, variables, aliases = [], [], [], {}
+    for i, (owner, name) in enumerate(sorted({(owner, name) for owner, name, _ in keys})):
+        params += [f"$o{i}: String!", f"$n{i}: String!"]
+        variables += ["-f", f"o{i}={owner}", "-f", f"n{i}={name}"]
+        numbers = sorted(number for o, n, number in keys if (o, n) == (owner, name))
+        aliases.update({(owner, name, number): (f"r{i}", f"p{number}") for number in numbers})
+        prs = " ".join(f"p{number}: pullRequest(number: {number}) {{ {PR_FIELDS} }}" for number in numbers)
+        fields.append(f"r{i}: repository(owner: $o{i}, name: $n{i}) {{ {prs} }}")
+    query = f"query({', '.join(params)}) {{ {' '.join(fields)} }}"
+    try:
+        data = json.loads(run(["gh", "api", "graphql", "-f", f"query={query}", *variables]))["data"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    found = {}
+    for key, (repository, pr) in aliases.items():
+        node = (data.get(repository) or {}).get(pr)
+        if isinstance(node, dict):
+            found[key] = node
+    return found
+
+
+def on_head(post: dict, head: str) -> bool:
+    """A review names the commit it reviewed; a comment names it in its body."""
+    commit = post.get("commit") if isinstance(post.get("commit"), dict) else {}
+    return bool(head) and (commit.get("oid") == head or head in str(post.get("body") or ""))
+
+
+def nodes(connection) -> list[dict]:
+    found = connection.get("nodes") if isinstance(connection, dict) else None
+    return [node for node in found or [] if isinstance(node, dict)]
+
+
+def solei_verdict(pr: dict) -> tuple[str, bool]:
+    """The emoji opening the review bot's newest verdict on the PR's head commit, or '' and whether it
+    gave one only on an older head: that one says nothing about what the PR holds now."""
+    head = str(pr.get("headRefOid") or "")
+    posts = [(str(node.get("submittedAt") or ""), node) for node in nodes(pr.get("reviews"))]
+    posts += [(str(node.get("createdAt") or ""), node) for node in nodes(pr.get("comments"))]
+    stale = False
+    for _, post in sorted(posts, key=lambda pair: pair[0], reverse=True):
+        author = post.get("author") if isinstance(post.get("author"), dict) else {}
+        if author.get("login") not in REVIEW_BOT:
+            continue
+        body = str(post.get("body") or "").lstrip()
+        # Bodies may drop the emoji variation selector.
+        verdict = next((v for v in VERDICTS if body.startswith(v.rstrip("\ufe0f"))), "")
+        if not verdict:
+            continue
+        if on_head(post, head):
+            return verdict, False
+        stale = True
+    return "", stale
+
+
+def conflicts(node: dict, published: dict, number: int) -> bool:
+    """GitHub reads UNKNOWN until it has recomputed a PR against its moved base, so for that read the
+    PR keeps what the last publish said of it."""
+    if node.get("mergeable") == "UNKNOWN":
+        return published.get("number") == number and published.get("conflicts") is True
+    return node.get("mergeable") == "CONFLICTING"
+
+
+def current_pr(pr: dict, live: dict | None, published: dict, now: float) -> dict:
+    """The lane's PR with GitHub's state of it now; as pr.json has it, with no verdict, when the read failed."""
+    key = pr_key(pr) if pr else None
+    node = live.get(key) if live and key else None
+    if node is None:
+        return pr
+    verdict, stale = solei_verdict(node)
+    return {
+        **pr,
+        "state": str(node.get("state") or ""),
+        "verdict": verdict,
+        "verdict_stale": stale,
+        "conflicts": conflicts(node, published, pr["number"]),
+        "checked_at": int(now),
+    }
+
+
+def published_prs() -> dict[str, dict]:
+    """Each lane's PR as the last publish wrote it."""
+    board = read_json(handoffs_dir() / JOBS_FILE, {})
+    jobs = board.get("jobs") if isinstance(board, dict) else None
+    if not isinstance(jobs, dict):
+        return {}
+    return {
+        slug: row["pr"]
+        for slug, row in jobs.items()
+        if isinstance(row, dict) and isinstance(row.get("pr"), dict)
     }
 
 
@@ -477,6 +604,15 @@ def earliest_reset(walled: list[str], now: float) -> int:
     return int(min(frees, default=0))
 
 
+def recent_handoffs(router: dict, now: float) -> int:
+    """The router's moves in the last hour when there are more than HANDOFF_CHURN_MAX, else 0."""
+    times = router.get("handoff_times")
+    if not isinstance(times, list):
+        return 0
+    recent = sum(1 for at in times if isinstance(at, (int, float)) and now - at <= HANDOFF_WINDOW_S)
+    return recent if recent > HANDOFF_CHURN_MAX else 0
+
+
 def session_state(
     tmux_alive: bool, router: dict, queued: bool, after: str, codex: bool, quota: dict
 ) -> str:
@@ -531,12 +667,14 @@ def job_row(
         "quota": quota,
         "branch": str(job.get("branch") or ""),
         "head": git_head(worktree),
+        "unpushed": unpushed_commits(worktree),
         "account": str(router.get("label") or ""),
         "origin_session": str(job.get("origin_session") or ""),
         "origin_pane": str(job.get("origin_pane") or ""),
         "sent_at": as_int(job.get("sent_at")),
         "updated_at": last_change(directory, session),
         "handoffs": as_int(router.get("handoffs")),
+        "handoffs_last_hour": recent_handoffs(router, now),
         "report": report is not None,
         "workflows": workflows_for(session, state in ("running", "prompt")),
         "messages": lane_messages(directory / OUTBOX_FILE),
@@ -557,6 +695,10 @@ def build(now: float) -> dict:
         row = job_row(directory, queue, panes, table, routers, codex, now)
         if row is not None:
             jobs[directory.name] = row
+    live = read_prs({key for row in jobs.values() if (key := pr_key(row["pr"]))})
+    published = published_prs()
+    for slug, row in jobs.items():
+        row["pr"] = current_pr(row["pr"], live, published.get(slug, {}), now)
     return {"version": 1, "generated_at": int(now), "jobs": jobs}
 
 

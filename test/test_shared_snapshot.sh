@@ -301,7 +301,7 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
     "demo-job": {
       "state": "running", "branch": "andrew/demo", "head": "abc1234",
       "account": "team-2", "origin_session": "session-test", "sent_at": $(( NOW - 3600 )),
-      "updated_at": $NOW, "handoffs": 2, "report": false,
+      "updated_at": $NOW, "handoffs": 5, "handoffs_last_hour": 3, "report": false,
       "workflows": [
         {"name": "review loop", "started_at": $(( NOW - 720 )),
          "agents_started": 15, "agents_done": 14, "agents_failed": 0, "running": true},
@@ -315,6 +315,12 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "updated_at": $(( NOW - 120 )), "handoffs": 0, "report": true, "workflows": [],
       "messages": [{"id": "m1", "ts": $NOW, "text": "delivered already"}, {"id": "m2", "ts": $NOW, "text": "not yet"}],
       "pr": {"number": 7, "state": "OPEN", "url": "u", "verdict": "☀️", "checked_at": $NOW}
+    },
+    "unready-pr": {
+      "state": "done", "branch": "andrew/unready", "head": "def5679", "unpushed": 2,
+      "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 7200 )),
+      "updated_at": $(( NOW - 120 )), "handoffs": 0, "report": true, "workflows": [],
+      "pr": {"number": 8, "state": "OPEN", "url": "u", "verdict": "", "verdict_stale": true, "conflicts": true, "checked_at": $NOW}
     },
     "their-job": {
       "state": "running", "branch": "andrew/theirs", "head": "1234abc",
@@ -400,7 +406,10 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 REMOTE_JOB_NAME_MAX=22 render_with_boar
 [[ "$all_jobs_output" =~ demo-job\ {15}running ]] || { printf 'a lane that finished recently did not widen the job column\n' >&2; exit 1; }
 [[ "$all_jobs_output" == *"their-job"* ]] || { printf 'REMOTE_JOBS_SHOW_ALL=1 did not render every job\n' >&2; exit 1; }
 [[ "$(printf '%s\n' "$all_jobs_output" | grep -c 'this session')" = "1" && "$all_jobs_output" == *"demo-job"*"this session"* ]] || { printf 'with every job on screen, only the one this session sent is marked\n' >&2; exit 1; }
-[[ "$jobs_output" == *"2 handoffs"* ]] || { printf 'a running job did not count the moves the router made\n' >&2; exit 1; }
+{ [[ "$jobs_output" == *"demo-job"*"team-2 · 3 handoffs in 1h"* ]] && [[ "$jobs_output" != *"5 handoffs"* ]]; } \
+    || { printf "a running job's row did not count only the last hour's moves the router made\n" >&2; exit 1; }
+[[ "$jobs_output" =~ unready-pr\ +done\ ·\ 2m\ ago\ ·\ \#8\ ·\ verdict\ stale\ ·\ conflicts\ ·\ 2\ unpushed ]] \
+    || { printf 'a PR with a verdict on an older head, a conflict and unpushed work did not say so on its row\n' >&2; exit 1; }
 [[ "$jobs_output" == *"review loop"*"14/15 agents"* ]] || { printf "a running job's running workflow did not render\n" >&2; exit 1; }
 [[ "$jobs_output" != *"scoping panel"* ]] || { printf 'a workflow that is not running still rendered\n' >&2; exit 1; }
 [[ "$jobs_output" == *"just-done"*"done"*"2m ago"* ]] || { printf 'a job that finished recently did not render its state and age\n' >&2; exit 1; }
@@ -485,11 +494,14 @@ sidecar_output=$(ACCOUNTS_ROUTER_STATE="$router_state" run_statusline work pane)
 [[ "$sidecar_output" != *"pane pinned"* ]] || { printf 'router policy sidecar did not override the launch-time scope\n' >&2; exit 1; }
 rm -rf "$(dirname "$router_state")"
 jq '.session_id = "session-test"' "$SANDBOX/input.json" > "$SANDBOX/router-input.json"
+mkdir -p "$(dirname "$router_state")"
+printf '{"handoffs": 25, "handoff_times": [1000, 2000]}\n' > "$router_state"
 HOME="$TEST_HOME" PATH="$STUBS:$PATH" SHARED_TEST_VIOLATIONS="$VIOLATIONS" \
     ACCOUNTS_ROUTED_LABEL=work ACCOUNTS_POLICY_SCOPE=global \
     ACCOUNTS_ROUTER_STATE="$router_state" \
     "$SANDBOX/statusline.sh" < "$SANDBOX/router-input.json" >/dev/null
-jq -e '.session_id == "session-test" and .label == "work"' "$router_state" >/dev/null
+jq -e '.session_id == "session-test" and .label == "work" and .handoffs == 25 and .handoff_times == [1000, 2000]' "$router_state" >/dev/null \
+    || { printf 'a shared render did not keep the router state or the move record the router seeded\n' >&2; exit 1; }
 rm -rf "$(dirname "$router_state")"
 [ ! -s "$VIOLATIONS" ] || { printf 'forbidden command invoked:\n' >&2; tee /dev/stderr < "$VIOLATIONS"; exit 1; }
 [ ! -e "$TEST_TMP/statusline-raw.json" ]

@@ -3623,9 +3623,6 @@ def remote_job_lines(
         if state == "running":
             if job.get("account"):
                 detail += f" · {job['account']}"
-            handoffs = job.get("handoffs", 0)
-            if handoffs:
-                detail += f" · {handoffs} handoff{'s' if handoffs != 1 else ''}"
         elif state == "queued" and job.get("queue_position"):
             detail = f" · #{job['queue_position']} in line"
         elif state == "held" and job.get("held_until"):
@@ -3644,13 +3641,25 @@ def remote_job_lines(
         else:
             detail = f" · {remote_board_age_text(now - job.get('updated_at', 0))} ago"
         unread = unread_lane_messages(job)
+        # Published only past the board's threshold, always more than one.
+        churn = job.get("handoffs_last_hour", 0) if state == "running" else 0
         pr = job.get("pr") if isinstance(job.get("pr"), dict) else {}
+        pr_text, warnings = "", []
         if isinstance(pr.get("number"), int) and pr["number"] > 0:
-            detail += f" · #{pr['number']}" + (f" {pr['verdict']}" if pr.get("verdict") else "")
-        if show_all and mine:
-            detail += " ← this session"
+            pr_text = f" · #{pr['number']}" + (f" {pr['verdict']}" if pr.get("verdict") else "")
+            # What keeps a PR from reading as ready: a verdict on an older head, a conflict, work not pushed.
+            if pr.get("verdict_stale") is True:
+                warnings.append("verdict stale")
+            if pr.get("conflicts") is True:
+                warnings.append("conflicts")
+            if isinstance(job.get("unpushed"), int) and job["unpushed"] > 0:
+                warnings.append(f"{job['unpushed']} unpushed")
         lines.append(footer_spans([(p.dim, f"  · ▸ {short_text(name, 20)} "),
                                    (color, state), (p.dim, detail),
+                                   (p.yellow, f" · {churn} handoffs in 1h" if churn else ""),
+                                   (p.dim, pr_text),
+                                   (p.yellow, f" · {' · '.join(warnings)}" if warnings else ""),
+                                   (p.dim, " ← this session" if show_all and mine else ""),
                                    (p.yellow, f" · {unread} unread" if unread else "")], width, p))
         if state not in {"running", "prompt"}:
             continue

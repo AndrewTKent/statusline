@@ -394,11 +394,12 @@ class TestState:
 
 
 class TestReport:
-    def test_the_first_line_can_say_the_job_is_blocked(self, tmp_path):
+    @pytest.mark.parametrize("first,state", [("status: blocked", "blocked"), ("Status: Stopped", "stopped")])
+    def test_the_first_line_can_say_the_job_is_blocked_or_was_stopped(self, tmp_path, first, state):
         report = tmp_path / "report.md"
-        report.write_text("status: blocked\nneeds a decision\n")
+        report.write_text(f"{first}\nwhy\n")
 
-        assert remote_jobs.report_status(report) == "blocked"
+        assert remote_jobs.report_status(report) == state
 
     def test_a_report_that_states_no_status_is_done(self, tmp_path):
         report = tmp_path / "report.md"
@@ -424,7 +425,27 @@ class TestUpdatedAt:
         assert only_job(remote_jobs.build(2000.0))["updated_at"] == 1500
 
 
+class TestWorktree:
+    def test_a_lane_publishes_the_commits_its_worktree_holds_that_no_remote_does(self, box, monkeypatch):
+        write_job(box)
+        tmux_and_git = remote_jobs.run
+        count = ["git", "-C", "/w", "rev-list", "--count", "HEAD", "--not", "--remotes"]
+        monkeypatch.setattr(remote_jobs, "run", lambda argv: "3\n" if argv == count else tmux_and_git(argv))
+
+        assert only_job(remote_jobs.build(2000.0))["unpushed"] == 3
+
+
 class TestRouterState:
+    @pytest.mark.parametrize("times,published", [([9900, 9000, 7000], 3), ([9900, 9000, 6399], 0)])
+    def test_a_lane_publishes_its_moves_in_the_last_hour_only_past_two(
+        self, box, monkeypatch, times, published
+    ):
+        write_job(box)
+        write_router_state(box, "s-1", handoffs=7, handoff_times=times)
+        live(monkeypatch, "demo")
+
+        assert only_job(remote_jobs.build(10000.0))["handoffs_last_hour"] == published
+
     def test_a_dead_routers_pid_reused_after_its_last_write_is_not_its_router(self, box):
         state = write_router_state(box, "s-1", parent=None)
         os.utime(state, (100, 100))
@@ -522,25 +543,132 @@ class TestMessages:
         assert len(self.messages()[0]["text"]) == remote_jobs.MESSAGE_TEXT_MAX
 
 
-class TestPullRequest:
-    def pr(self, box, content):
-        directory = write_job(box)
-        if content is not None:
-            (directory / "pr.json").write_text(content)
-        return remote_jobs.build(1)["jobs"]["demo"]["pr"]
+PR_URL = "https://github.com/o/r/pull/40"
 
-    def test_the_lanes_pr_and_verdict_are_published(self, box):
-        written = {"number": 40, "state": "OPEN", "url": "u", "verdict": "🌧️", "checked_at": 5}
-        assert self.pr(box, json.dumps(written)) == written
+
+def pr_json(directory, number=40, url=PR_URL, state="OPEN", verdict="🌧️"):
+    """What agent-workflows' lane-retire timer writes for a lane's newest PR."""
+    (directory / "pr.json").write_text(
+        json.dumps({"number": number, "state": state, "url": url, "verdict": verdict, "checked_at": 5})
+    )
+
+
+def review(body, commit, at, login="claude"):
+    return {"author": {"login": login}, "body": body, "commit": {"oid": commit}, "submittedAt": at}
+
+
+def pull(head="h2", mergeable="MERGEABLE", state="OPEN", reviews=(), comments=()):
+    return {"number": 40, "state": state, "url": PR_URL, "headRefOid": head, "mergeable": mergeable,
+            "reviews": {"nodes": list(reviews)}, "comments": {"nodes": list(comments)}}
+
+
+def github_has(monkeypatch, data):
+    """`gh api graphql` answers with `data`; returns the queries it was asked."""
+    queries = []
+    tmux_and_git = remote_jobs.run
+
+    def run(argv):
+        if argv[0] != "gh":
+            return tmux_and_git(argv)
+        queries.append(argv)
+        return json.dumps({"data": data}) if data is not None else ""
+
+    monkeypatch.setattr(remote_jobs, "run", run)
+    return queries
+
+
+class TestPullRequest:
+    def pr(self, box, monkeypatch, node, slug="demo"):
+        pr_json(write_job(box, slug))
+        github_has(monkeypatch, {"r0": {"p40": node}})
+        return remote_jobs.build(2000.0)["jobs"][slug]["pr"]
+
+    @pytest.mark.parametrize("posts", ["review", "comment"])
+    def test_a_verdict_the_review_bot_gave_on_the_prs_head_is_published_with_githubs_state(
+        self, box, monkeypatch, posts
+    ):
+        # A review names the commit it reviewed; a comment, posted when the review fails to, names it in its body.
+        reviews = [review("🌧️ Changes.", "h1", "2026-11-14T07:00:00Z")]
+        comments = []
+        if posts == "review":
+            reviews.append(review("☀️ Approve.", "h2", "2026-11-14T07:15:49Z"))
+        else:
+            comments.append({"author": {"login": "claude"}, "body": "\u2600 Approve. Reviewed h2.",
+                             "createdAt": "2026-11-14T07:15:49Z"})
+
+        pr = self.pr(box, monkeypatch, pull(state="MERGED", reviews=reviews, comments=comments))
+
+        assert pr == {"number": 40, "state": "MERGED", "url": PR_URL, "verdict": "☀️",
+                      "verdict_stale": False, "conflicts": False, "checked_at": 2000}
+
+    def test_a_verdict_given_only_on_an_older_head_is_stale_and_shows_no_emoji(self, box, monkeypatch):
+        pr = self.pr(box, monkeypatch, pull(reviews=[review("☀️ Approve.", "h1", "2026-11-14T07:15:49Z")]))
+
+        assert (pr["verdict"], pr["verdict_stale"]) == ("", True)
+
+    def test_the_newest_verdict_on_the_head_wins(self, box, monkeypatch):
+        monkeypatch.setattr(remote_jobs, "on_head", lambda _post, _head: True)
+        reviews = [review("🌤️ Approve.", "h2", "2026-11-14T07:00:00Z"), review("☀️ Approve.", "h2", "2026-11-14T07:15:00Z")]
+
+        assert self.pr(box, monkeypatch, pull(reviews=reviews))["verdict"] == "☀️"
+
+    def test_a_weather_emoji_from_anyone_but_the_review_bot_is_no_verdict(self, box, monkeypatch):
+        pr = self.pr(box, monkeypatch, pull(reviews=[review("☀️ lgtm", "h2", "2026-11-14T07:15:00Z", "AndrewTKent")]))
+
+        assert (pr["verdict"], pr["verdict_stale"]) == ("", False)
+
+    def test_a_pr_that_conflicts_with_its_base_says_so(self, box, monkeypatch):
+        assert self.pr(box, monkeypatch, pull(mergeable="CONFLICTING"))["conflicts"] is True
+
+    @pytest.mark.parametrize("published,conflicts", [(40, True), (39, False)])
+    def test_while_github_recomputes_a_pr_it_keeps_what_the_last_publish_said(
+        self, box, monkeypatch, published, conflicts
+    ):
+        board = {"jobs": {"demo": {"pr": {"number": published, "conflicts": True}}}}
+        (box / "handoffs" / "jobs.json").write_text(json.dumps(board))
+
+        assert self.pr(box, monkeypatch, pull(mergeable="UNKNOWN"))["conflicts"] is conflicts
+
+    def test_every_lanes_pr_is_read_in_one_query(self, box, monkeypatch):
+        monkeypatch.setattr(remote_jobs, "on_head", lambda _post, _head: True)
+        pr_json(write_job(box, "demo"))
+        pr_json(write_job(box, "other", "/o"), number=7, url="https://github.com/o/s/pull/7")
+        queries = github_has(monkeypatch, {
+            "r0": {"p40": pull(reviews=[review("☀️", "h2", "1")])},
+            "r1": {"p7": pull(reviews=[review("⛅", "h2", "1")])},
+        })
+
+        jobs = remote_jobs.build(2000.0)["jobs"]
+
+        assert (len(queries), jobs["demo"]["pr"]["verdict"], jobs["other"]["pr"]["verdict"]) == (1, "☀️", "⛅")
+
+    def test_no_lane_with_a_pr_means_no_github_call(self, box, monkeypatch):
+        write_job(box)
+        queries = github_has(monkeypatch, {})
+
+        remote_jobs.build(2000.0)
+
+        assert queries == []
+
+    def test_a_failed_read_keeps_the_pr_as_its_file_has_it_with_no_verdict(self, box, monkeypatch):
+        pr_json(write_job(box))
+        github_has(monkeypatch, None)
+
+        assert only_job(remote_jobs.build(2000.0))["pr"] == {
+            "number": 40, "state": "OPEN", "url": PR_URL, "verdict": "",
+            "verdict_stale": False, "conflicts": False, "checked_at": 5,
+        }
 
     def test_a_lane_with_no_pr_file_has_no_pr(self, box):
-        assert self.pr(box, None) == {}
+        write_job(box)
 
-    def test_a_state_or_verdict_that_is_not_githubs_or_soleis_is_dropped(self, tmp_path):
+        assert only_job(remote_jobs.build(1))["pr"] == {}
+
+    def test_a_state_that_is_not_githubs_is_dropped(self, tmp_path):
         path = tmp_path / "pr.json"
-        path.write_text(json.dumps({"number": 40, "state": "\x1b[2J", "verdict": "\x1b[31m"}))
-        pr = remote_jobs.lane_pr(path)
-        assert (pr["state"], pr["verdict"]) == ("", "")
+        path.write_text(json.dumps({"number": 40, "state": "\x1b[2J"}))
+
+        assert remote_jobs.lane_pr(path)["state"] == ""
 
 
 class TestProcesses:
