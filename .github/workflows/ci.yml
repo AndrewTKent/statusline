@@ -44,6 +44,9 @@ jobs:
           mkdir -m 700 "$RUNNER_TEMP/home"
           echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
       - name: Claude-side tests
         run: python3 -m pytest test/test_accounts.py test/test_claude_router.py test/test_codex_accounts.py test/test_codex_router.py test/test_scan_tokens.py test/test_agent_metrics.py test/test_remote_boards.py test/test_remote_jobs.py test/test_lane_ownership.py test/test_usage_ledger.py -q
 
