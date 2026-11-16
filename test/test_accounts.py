@@ -5614,7 +5614,10 @@ class TestMoveAccount:
             )
             accounts.save_session_leases([{"pid": os.getpid(), "label": "other", "updated_at": time.time()}])
 
-        monkeypatch.setattr(accounts.time, "sleep", supervisor_reroutes)
+        # Swap only accounts' own clock: subprocess.run sleeps on the shared time module while its child runs.
+        clock = types.SimpleNamespace(**vars(time))
+        clock.sleep = supervisor_reroutes
+        monkeypatch.setattr(accounts, "time", clock)
 
         accounts.forget_account("work")
 
