@@ -231,6 +231,31 @@ The query costs one point of the GitHub login's 5,000-an-hour GraphQL budget wha
 number of lane PRs, so the 30s timer spends 120 an hour while any lane has a PR,
 and none while none does.
 
+## Lane ownership
+
+`bin/lane_ownership.py` (installed as `lane-own`) owns `~/.accounts/lanes.json`, the
+list of what each laptop lane owns, keyed by the lane's session name:
+
+```json
+{"version": 1, "lanes": {"infra": {"prs": ["meetsol/iris#8824"], "tickets": ["IRI-12283"], "photon": ["gate-watch"]}}}
+```
+
+PR keys are lower case `owner/repo#number`. Every edit takes `lanes.json.lock` and
+replaces the file whole. `accounts poll` calls `refresh_if_due()`, which reads every
+listed PR in one `gh api graphql` query, no more than every 90 seconds unless a listed
+PR has never been read, and writes `~/.accounts/lane-prs.json`:
+
+```json
+{"version": 1, "checked_at": 1794870000, "attempted_at": 1794870000, "error": null,
+ "prs": {"meetsol/iris#8824": {"state": "OPEN", "status": "approved"}}}
+```
+
+A failed read keeps `prs` and `checked_at` and sets `attempted_at` and `error`. A PR read
+as merged or closed is dropped from the list. The status line reads both files and
+the session's name (the transcript's last `custom-title` entry, read incrementally
+from a byte offset cached in `/tmp/claude/statusline-name-<session>.txt`), and makes
+no call of its own.
+
 ## Classification precedence
 
 Every request gets two labels:

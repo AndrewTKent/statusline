@@ -435,6 +435,15 @@ class TestWorktree:
         assert only_job(remote_jobs.build(2000.0))["unpushed"] == 3
 
 
+class TestOrigin:
+    def test_a_lane_publishes_the_name_of_the_lane_that_sent_it(self, box):
+        directory = write_job(box)
+        job = json.loads((directory / "job.json").read_text())
+        (directory / "job.json").write_text(json.dumps({**job, "origin_lane": "infra"}))
+
+        assert only_job(remote_jobs.build(2000.0))["origin_lane"] == "infra"
+
+
 class TestRouterState:
     @pytest.mark.parametrize("times,published", [([9900, 9000, 7000], 3), ([9900, 9000, 6399], 0)])
     def test_a_lane_publishes_its_moves_in_the_last_hour_only_past_two(

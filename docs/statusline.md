@@ -167,6 +167,9 @@ Claude Code                    statusline.sh
 | `~/.claude/usage-ledger.json` | Durable per-day/per-model token ledger (`bin/usage-ledger.py`) | Permanent |
 | `~/.claude/statusline-tz` | Optional timezone override for reset-time display | Permanent |
 | `~/.accounts/statusline-snapshot.json` | Private declared-label routing and quota snapshot (`SHARED_ACCOUNT_SNAPSHOT=1`) | Written only by explicit `accounts poll`/`accounts watch` |
+| `~/.accounts/lanes.json` | What each lane owns, by lane name (`lane-own`) | Permanent |
+| `~/.accounts/lane-prs.json` | Each owned PR's state, read on `accounts poll` | Rewritten by the poll |
+| `/tmp/claude/statusline-name-<sid>.txt` | The session's name and how far its transcript was read | Updated when the transcript grows |
 | `~/.accounts/remote/<name>/` | Another machine's pulled board: its snapshot, its Codex usage, and the pull's `meta.json` | Rewritten by `accounts poll` |
 | `~/.claude/.credentials.json` | Claude Code's own OAuth credential — read-only, mtime-tracked | Claude-Code-managed |
 | `/tmp/claude/statusline-usage-cache-<profile>.json` | Account-keyed rate-limit API cache | 60s TTL |
