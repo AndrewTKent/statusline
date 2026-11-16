@@ -3610,14 +3610,16 @@ def remote_job_lines(
     lines = []
     for name, job in (board.get("jobs") or {}).items():
         state = job.get("state", "")
-        if state not in {"running", "held", "queued", "waiting", "prompt"} and job.get("updated_at", 0) < now - 1800:
+        if state not in {"running", "held", "queued", "waiting", "prompt", "unknown"} and job.get("updated_at", 0) < now - 1800:
             continue
         origin_session, origin_pane = job.get("origin_session"), job.get("origin_pane")
         mine = bool(thread_id and origin_session == thread_id) or bool(pane_id and origin_pane == pane_id)
         if not (show_all or mine or (not origin_session and not origin_pane)):
             continue
         color = p.green if state == "running" else p.red if state in {"blocked", "prompt"} else p.dim
-        color = color if board["fresh"] else p.dim
+        stale_since = job.get("stale_since") if isinstance(job.get("stale_since"), int) else 0
+        # A state the box could not read lately is its last known one, not a live reading.
+        color = color if board["fresh"] and not stale_since else p.dim
         quota = job.get("quota") if isinstance(job.get("quota"), dict) else {}
         detail = ""
         if state == "running":
@@ -3656,6 +3658,7 @@ def remote_job_lines(
                 warnings.append(f"{job['unpushed']} unpushed")
         lines.append(footer_spans([(p.dim, f"  · ▸ {short_text(name, 20)} "),
                                    (color, state), (p.dim, detail),
+                                   (p.yellow, f" · reads failing {remote_board_age_text(now - stale_since)}" if stale_since else ""),
                                    (p.yellow, f" · {churn} handoffs in 1h" if churn else ""),
                                    (p.dim, pr_text),
                                    (p.yellow, f" · {' · '.join(warnings)}" if warnings else ""),
@@ -3671,7 +3674,7 @@ def remote_job_lines(
             failed = workflow.get("agents_failed", 0)
             lines.append(footer_spans([
                 (p.dim, f"  ·     {workflow.get('name', '')} "),
-                (p.cyan if board["fresh"] else p.dim, counts), (p.dim, f" agents · {age}"),
+                (p.cyan if board["fresh"] and not stale_since else p.dim, counts), (p.dim, f" agents · {age}"),
                 (p.red, f" · {failed} failed" if failed else ""),
             ], width, p))
     return lines

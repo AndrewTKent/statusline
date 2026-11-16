@@ -6,13 +6,16 @@ derived from what is observable on this machine — the tmux panes and the
 process tree under each one, the report the job wrote, the git HEAD
 of its worktree, the router's state file and Claude Code's workflow journals —
 so a wedged session cannot report itself healthy. The one thing read from off the
-machine is each lane PR's state on GitHub, in one query per publish. The file is
+machine is each lane PR's state on GitHub, in one query per publish. A read that
+fails or times out says nothing about what is there, so it never makes a lane `gone`:
+the lane keeps the state the last publish gave it, marked stale. The file is
 replaced atomically: a reader sees one version or the next.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -66,14 +69,41 @@ ROUTER_STATE = re.compile(r"account-router-(\d+)\.json")
 WORKFLOW_NAME = re.compile(r"name:\s*['\"]([^'\"]+)['\"]")
 SCRIPT_HEAD_BYTES = 2048
 COMMAND_TIMEOUT_S = 5
+# Past this a publish starts no more commands, so on a saturated box it still ends inside its 30s period.
+PUBLISH_BUDGET_S = 20
+# What tmux says when no server listens on its socket: then there are no sessions to list.
+NO_TMUX_SERVER = re.compile(r"no server running on |error connecting to .* \(No such file or directory\)")
+# What a lane keeps from the last publish while a read its state depends on fails.
+CARRIED_FIELDS = (
+    "state", "held_until", "queue_position", "after", "quota", "account",
+    "handoffs", "handoffs_last_hour", "workflows",
+)
 PROC = Path("/proc")
 STAT_STARTTIME = 19  # field 22 of /proc/<pid>/stat, counted after the ")" that ends field 2
+
+# When the running publish stops starting commands; main() sets it.
+deadline = math.inf
+
+
+class ReadFailed(Exception):
+    """A read of this machine that failed or timed out: it says nothing about what is there."""
 
 
 class Process(NamedTuple):
     parent: int
     command: str
     started: float
+
+
+class Machine(NamedTuple):
+    """One publish's reads of this machine. `failed` names the reads that failed; their fields are empty."""
+    queue: list[str]
+    panes: dict[str, set[int]]
+    table: dict[int, Process]
+    routers: dict[str, dict]
+    unread_routers: set[str]
+    codex: set[str]
+    failed: set[str]
 
 
 def home() -> Path:
@@ -84,12 +114,28 @@ def handoffs_dir() -> Path:
     return Path(os.environ.get("HANDOFFS_DIR") or home() / "handoffs")
 
 
+def read_text(path: Path) -> str | None:
+    """None when the file is not there; ReadFailed when it is and could not be read."""
+    try:
+        return path.read_text(errors="replace")
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ReadFailed(path.name) from error
+
+
+def attempt(failed: set[str], name: str, read, empty):
+    """What `read` returns, or `empty`, with `name` added to `failed`, when it raised ReadFailed."""
+    try:
+        return read()
+    except ReadFailed:
+        failed.add(name)
+        return empty
+
+
 def queued_slugs() -> list[str]:
     """Lanes the box's admission gate is holding, first in line first."""
-    try:
-        lines = (handoffs_dir() / QUEUE_FILE).read_text().splitlines()
-    except OSError:
-        return []
+    lines = (read_text(handoffs_dir() / QUEUE_FILE) or "").splitlines()
     return [line.strip() for line in lines if line.strip()]
 
 
@@ -105,20 +151,28 @@ def config_roots() -> list[Path]:
     return [home() / ".claude", *sorted((home() / ".accounts" / "profiles").glob("*"))]
 
 
-def run(argv: list[str]) -> str:
+def run(argv: list[str]) -> subprocess.CompletedProcess:
+    """The finished command, whatever its exit; ReadFailed when it could not start or answer in time."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise ReadFailed(argv[0])
     try:
-        result = subprocess.run(
-            argv, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S
+        return subprocess.run(
+            argv, capture_output=True, text=True, timeout=min(COMMAND_TIMEOUT_S, left)
         )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return result.stdout if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ReadFailed(argv[0]) from error
 
 
 def pane_pids() -> dict[str, set[int]]:
-    """The pid of the shell in each pane, by the tmux session it belongs to."""
+    """The pid of the shell in each pane, by the tmux session it belongs to; none when no server runs."""
+    result = run(["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}"])
+    if result.returncode != 0:
+        if NO_TMUX_SERVER.match(result.stderr):
+            return {}
+        raise ReadFailed("tmux")
     panes: dict[str, set[int]] = {}
-    for line in run(["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}"]).splitlines():
+    for line in result.stdout.splitlines():
         pid, _, session = line.partition(" ")
         panes.setdefault(session, set()).add(int(pid))
     return panes
@@ -131,16 +185,22 @@ def boot_time() -> float:
 
 def processes() -> dict[int, Process]:
     """Every process on this machine, by pid."""
-    boot = boot_time()
+    try:
+        boot = boot_time()
+        entries = sorted(PROC.iterdir())
+    except (OSError, StopIteration) as error:
+        raise ReadFailed("processes") from error
     ticks = os.sysconf("SC_CLK_TCK")
     table = {}
-    for process in children(PROC):
+    for process in entries:
         if not process.name.isdigit():
             continue
         try:
-            stat = (process / "stat").read_text()
-        except OSError:
-            continue
+            stat = (process / "stat").read_text(errors="replace")
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # it exited after the listing
+        except OSError as error:
+            raise ReadFailed("processes") from error
         # The command name can itself hold spaces and parentheses, so split at the last ")".
         head, _, tail = stat.rpartition(")")
         fields = tail.split()
@@ -188,6 +248,16 @@ def mtime(path: Path) -> float:
         return 0.0
 
 
+def file_mtime(path: Path) -> float | None:
+    """None when the file is not there; ReadFailed when it is and could not be read."""
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ReadFailed(path.name) from error
+
+
 def as_int(value) -> int:
     try:
         return int(float(value))
@@ -195,25 +265,34 @@ def as_int(value) -> int:
         return 0
 
 
+def git_output(worktree: str, *args: str) -> str:
+    """What git prints in the worktree; empty once the worktree is removed, and ReadFailed when git
+    fails in one that is there."""
+    result = run(["git", "-C", worktree, *args])
+    if result.returncode == 0:
+        return result.stdout.strip()
+    if Path(worktree).exists():
+        raise ReadFailed("git")
+    return ""
+
+
 def git_head(worktree: str) -> str:
-    if not worktree:
-        return ""
-    return run(["git", "-C", worktree, "rev-parse", "--short", "HEAD"]).strip()
+    return git_output(worktree, "rev-parse", "--short", "HEAD") if worktree else ""
 
 
 def unpushed_commits(worktree: str) -> int:
     """Commits the worktree's HEAD holds that no remote-tracking ref does."""
     if not worktree:
         return 0
-    return as_int(run(["git", "-C", worktree, "rev-list", "--count", "HEAD", "--not", "--remotes"]).strip())
+    return as_int(git_output(worktree, "rev-list", "--count", "HEAD", "--not", "--remotes"))
 
 
 def report_status(path: Path) -> str | None:
     """None when the job wrote no report; otherwise done unless its first line says blocked or stopped."""
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
+    text = read_text(path)
+    if text is None:
         return None
+    lines = text.splitlines()
     first = lines[0].strip().lower() if lines else ""
     return REPORT_STATES.get(first, "done")
 
@@ -223,25 +302,49 @@ def live_router_pid(path: Path, table: dict[int, Process]) -> int:
     only while that pid runs a process started before the file was last written; 0 otherwise."""
     match = ROUTER_STATE.fullmatch(path.name)
     process = table.get(int(match.group(1))) if match else None
-    if process is None or process.started > mtime(path):
+    if process is None:
+        return 0
+    written = file_mtime(path)
+    if written is None or process.started > written:
         return 0
     return int(match.group(1))
 
 
-def routers_by_session(panes: dict[str, set[int]], table: dict[int, Process]) -> dict[str, dict]:
-    """Each live router's state, by the tmux session it runs under, wherever it has cd'd to.
-    Every lane runs in a session named for its slug, so a router under no pane is no job's."""
+def routers_by_session(
+    panes: dict[str, set[int]], table: dict[int, Process]
+) -> tuple[dict[str, dict], set[str]]:
+    """Each live router's state, by the tmux session it runs under, wherever it has cd'd to, and the
+    sessions under which a live router's state could not be read. Every lane runs in a session named
+    for its slug, so a router under no pane is no job's."""
+    try:
+        paths = sorted(router_state_dir().iterdir())
+    except FileNotFoundError:
+        return {}, set()
+    except OSError as error:
+        raise ReadFailed("routers") from error
     routers: dict[str, dict] = {}
-    for path in children(router_state_dir()):
-        pid = live_router_pid(path, table)
-        if not pid:
+    unread: set[str] = set()
+    for path in paths:
+        try:
+            pid = live_router_pid(path, table)
+        except ReadFailed:
+            # Only a file whose pid is running gets this far.
+            unread |= owners(int(ROUTER_STATE.fullmatch(path.name).group(1)), panes, table)
             continue
-        state = read_json(path, {})
+        sessions = owners(pid, panes, table) if pid else set()
+        if not sessions:
+            continue
+        try:
+            text = read_text(path)
+            state = json.loads(text) if text is not None else None
+        except (ReadFailed, ValueError):
+            unread |= sessions
+            continue
         if not isinstance(state, dict):
             continue
-        for session in owners(pid, panes, table):
+        for session in sessions:
             routers.setdefault(session, state)
-    return routers
+    return routers, unread
 
 
 def session_dir(session_id: str) -> Path | None:
@@ -397,8 +500,9 @@ def read_prs(keys: set[tuple[str, str, int]]) -> dict[tuple[str, str, int], dict
         fields.append(f"r{i}: repository(owner: $o{i}, name: $n{i}) {{ {prs} }}")
     query = f"query({', '.join(params)}) {{ {' '.join(fields)} }}"
     try:
-        data = json.loads(run(["gh", "api", "graphql", "-f", f"query={query}", *variables]))["data"]
-    except (ValueError, KeyError, TypeError):
+        result = run(["gh", "api", "graphql", "-f", f"query={query}", *variables])
+        data = json.loads(result.stdout)["data"] if result.returncode == 0 else None
+    except (ReadFailed, ValueError, KeyError, TypeError):
         return None
     if not isinstance(data, dict):
         return None
@@ -468,43 +572,47 @@ def current_pr(pr: dict, live: dict | None, published: dict, now: float) -> dict
     }
 
 
-def published_prs() -> dict[str, dict]:
-    """Each lane's PR as the last publish wrote it."""
+def published_jobs() -> dict[str, dict]:
+    """Each lane's row as the last publish wrote it."""
     board = read_json(handoffs_dir() / JOBS_FILE, {})
     jobs = board.get("jobs") if isinstance(board, dict) else None
     if not isinstance(jobs, dict):
         return {}
-    return {
-        slug: row["pr"]
-        for slug, row in jobs.items()
-        if isinstance(row, dict) and isinstance(row.get("pr"), dict)
-    }
+    return {slug: row for slug, row in jobs.items() if isinstance(row, dict)}
 
 
 def parent_slug(directory: Path) -> str:
     """The lane a stacked lane waits on to raise, named in its `after` file."""
-    try:
-        return (directory / AFTER_FILE).read_text().strip()
-    except OSError:
-        return ""
+    return (read_text(directory / AFTER_FILE) or "").strip()
 
 
 def pane_state(session: str) -> str:
     """What the session's pane shows, by the pane reader: prompt for a permission dialog nobody
-    on the box will answer. Empty when the reader is not installed."""
-    return run(["bash", str(handoffs_dir() / PANE_READER), "state", session]).strip()
+    on the box will answer. Empty when the reader is not installed or finds no such session."""
+    result = run(["bash", str(handoffs_dir() / PANE_READER), "state", session])
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def quota_wait(directory: Path, panes: dict[str, set[int]], table: dict[int, Process], now: float) -> dict:
     """The launcher's quota-wait.json while it is fresh and the launcher that wrote it still runs in the
     lane's pane, or {}. The pid in it is reused once its launcher exits, like a router's."""
     path = directory / QUOTA_WAIT_FILE
-    marker = read_json(path, None)
+    text = read_text(path)
+    if text is None:
+        return {}
+    try:
+        marker = json.loads(text)
+    except ValueError as error:
+        # The launcher replaces the file whole, so a marker that does not parse was not read.
+        raise ReadFailed(QUOTA_WAIT_FILE) from error
     if not isinstance(marker, dict):
         return {}
     pid = as_int(marker.get("pid"))
     process = table.get(pid)
-    if process is None or process.started > mtime(path):
+    if process is None:
+        return {}
+    written = file_mtime(path)
+    if written is None or process.started > written:
         return {}
     if directory.name not in owners(pid, panes, table):
         return {}
@@ -613,12 +721,8 @@ def recent_handoffs(router: dict, now: float) -> int:
     return recent if recent > HANDOFF_CHURN_MAX else 0
 
 
-def session_state(
-    tmux_alive: bool, router: dict, queued: bool, after: str, codex: bool, quota: dict
-) -> str:
-    """A tmux session left at a bare shell after its router exited is not running."""
-    if not tmux_alive:
-        return "gone"
+def session_state(router: dict, queued: bool, after: str, codex: bool, quota: dict) -> str:
+    """A live tmux session's state. One left at a bare shell after its router exited is not running."""
     if router.get("held_until"):
         return "held"
     # A gated lane's pane sits in the gate's sleep loop, with no router or codex yet.
@@ -631,43 +735,78 @@ def session_state(
     return "running"
 
 
-def job_row(
-    directory: Path,
-    queue: list[str],
-    panes: dict[str, set[int]],
-    table: dict[int, Process],
-    routers: dict[str, dict],
-    codex: set[str],
-    now: float,
-) -> dict | None:
-    job = read_json(directory / JOB_FILE, None)
+def read_machine() -> Machine:
+    failed: set[str] = set()
+    panes = attempt(failed, "tmux", pane_pids, {})
+    table = attempt(failed, "processes", processes, {})
+    routers, unread = attempt(failed, "routers", lambda: routers_by_session(panes, table), ({}, set()))
+    queue = attempt(failed, "queue", queued_slugs, [])
+    return Machine(queue, panes, table, routers, unread, codex_sessions(panes, table), failed)
+
+
+def carried(previous: dict, now: float, failed: set[str], ruled_out: frozenset[str] = frozenset()) -> dict:
+    """The lane's last published row, stale since its first publish whose reads failed; its state is
+    `unknown` when there is none, or when a read that answered rules it out."""
+    state = str(previous.get("state") or "unknown")
+    return {
+        **previous,
+        "state": "unknown" if state in ruled_out else state,
+        "pr": previous["pr"] if isinstance(previous.get("pr"), dict) else {},
+        "stale_since": as_int(previous.get("stale_since")) or int(now),
+        "reads_failed": sorted(failed),
+    }
+
+
+def job_row(directory: Path, machine: Machine, previous: dict, now: float) -> dict | None:
+    """The lane's row. When a read its state depends on fails, its state and what goes with it are the
+    last publish's, or `unknown`; a failed read never makes a lane `gone`."""
+    slug = directory.name
+    failed: set[str] = set()
+    text = attempt(failed, "job", lambda: read_text(directory / JOB_FILE), None)
+    if failed:
+        return carried(previous, now, failed)
+    try:
+        job = json.loads(text) if text is not None else None
+    except ValueError:
+        return None
     if not isinstance(job, dict):
         return None
     worktree = str(job.get("worktree") or "")
-    report = report_status(directory / REPORT_FILE)
-    router = routers.get(directory.name, {})
-    queued = directory.name in queue
-    after = parent_slug(directory)
-    quota = quota_wait(directory, panes, table, now)
-    state = report or session_state(
-        directory.name in panes, router, queued, after, directory.name in codex, quota
-    )
+    report = attempt(failed, "report", lambda: report_status(directory / REPORT_FILE), None)
+    after = attempt(failed, "after", lambda: parent_slug(directory), "")
+    quota = attempt(failed, "quota", lambda: quota_wait(directory, machine.panes, machine.table, now), {})
+    if slug in machine.unread_routers:
+        failed.add("router")
+    router = machine.routers.get(slug, {})
+    queued = slug in machine.queue
+    # None until a read settles it: a report that could not be read leaves it there.
+    state = report
+    if report is None and "report" not in failed:
+        if slug not in machine.panes and "tmux" not in machine.failed:
+            state = "gone"
+        else:
+            failed |= machine.failed
+            if not failed:
+                state = session_state(router, queued, after, slug in machine.codex, quota)
+            if state == "running":
+                pane = attempt(failed, "pane", lambda: pane_state(slug), "")
+                state = None if failed else "prompt" if pane == "prompt" else state
     if state == "waiting" and quota:
         quota["resumes_at"] = earliest_reset(quota["walled"], now)
     else:
         quota = {}
-    if state == "running" and pane_state(directory.name) == "prompt":
-        state = "prompt"
     session = session_dir(str(router.get("session_id") or ""))
-    return {
+    row = {
         "state": state,
+        "stale_since": 0,
+        "reads_failed": [],
         "held_until": as_int(router.get("held_until")),
-        "queue_position": queue.index(directory.name) + 1 if queued else 0,
+        "queue_position": machine.queue.index(slug) + 1 if queued else 0,
         "after": after,
         "quota": quota,
         "branch": str(job.get("branch") or ""),
-        "head": git_head(worktree),
-        "unpushed": unpushed_commits(worktree),
+        "head": attempt(failed, "git", lambda: git_head(worktree), previous.get("head", "")),
+        "unpushed": attempt(failed, "git", lambda: unpushed_commits(worktree), previous.get("unpushed", 0)),
         "account": str(router.get("label") or ""),
         "origin_session": str(job.get("origin_session") or ""),
         "origin_pane": str(job.get("origin_pane") or ""),
@@ -679,28 +818,49 @@ def job_row(
         "report": report is not None,
         "workflows": workflows_for(session, state in ("running", "prompt")),
         "messages": lane_messages(directory / OUTBOX_FILE),
-        "pr": lane_pr(directory / PR_FILE),
+        "pr": {},
     }
+    row["reads_failed"] = sorted(failed)
+    if state is None:
+        # A read that answered still holds: a session tmux listed has not ended, and a lane with no
+        # report has not reported.
+        ruled_out = set() if "report" in failed else {"done", "blocked", "stopped"}
+        if "tmux" not in machine.failed:
+            ruled_out.add("gone")
+        stale = carried(previous, now, failed, frozenset(ruled_out))
+        row.update({field: stale[field] for field in (*CARRIED_FIELDS, "stale_since") if field in stale})
+    return row
 
 
 def build(now: float) -> dict:
-    queue = queued_slugs()
-    panes = pane_pids()
-    table = processes()
-    routers = routers_by_session(panes, table)
-    codex = codex_sessions(panes, table)
+    previous = published_jobs()
     jobs = {}
-    for directory in children(handoffs_dir()):
-        if not directory.is_dir():
-            continue
-        row = job_row(directory, queue, panes, table, routers, codex, now)
+    unlisted = False
+    try:
+        directories = sorted(path for path in handoffs_dir().iterdir() if path.is_dir())
+    except FileNotFoundError:
+        directories = []
+    except OSError:
+        # With no list of its lanes, the box says nothing of any: each keeps its last row.
+        unlisted, directories = True, []
+        jobs = {slug: carried(row, now, {"handoffs"}) for slug, row in previous.items()}
+    # GitHub first, while the budget is whole: a PR read it skipped would drop every verdict.
+    prs = {directory.name: lane_pr(directory / PR_FILE) for directory in directories}
+    live = read_prs({key for pr in prs.values() if (key := pr_key(pr))})
+    machine = read_machine()
+    if unlisted:
+        machine.failed.add("handoffs")
+    if live is None:
+        machine.failed.add("github")
+    for directory in directories:
+        row = job_row(directory, machine, previous.get(directory.name, {}), now)
         if row is not None:
             jobs[directory.name] = row
-    live = read_prs({key for row in jobs.values() if (key := pr_key(row["pr"]))})
-    published = published_prs()
     for slug, row in jobs.items():
-        row["pr"] = current_pr(row["pr"], live, published.get(slug, {}), now)
-    return {"version": 1, "generated_at": int(now), "jobs": jobs}
+        published = previous.get(slug, {}).get("pr")
+        pr = prs.get(slug, row["pr"])
+        row["pr"] = current_pr(pr, live, published if isinstance(published, dict) else {}, now)
+    return {"version": 1, "generated_at": int(now), "reads_failed": sorted(machine.failed), "jobs": jobs}
 
 
 def write_atomic(path: Path, payload: dict) -> None:
@@ -711,6 +871,8 @@ def write_atomic(path: Path, payload: dict) -> None:
 
 
 def main() -> int:
+    global deadline
+    deadline = time.monotonic() + PUBLISH_BUDGET_S
     write_atomic(handoffs_dir() / JOBS_FILE, build(time.time()))
     return 0
 

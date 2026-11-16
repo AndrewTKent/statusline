@@ -383,6 +383,18 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "workflows": [{"name": "stuck panel", "started_at": $(( NOW - 600 )),
                      "agents_started": 2, "agents_done": 1, "agents_failed": 0, "running": true}]
     },
+    "stale-job": {
+      "state": "running", "stale_since": $(( NOW - 180 )), "reads_failed": ["tmux"], "branch": "andrew/stale", "head": "0fedcc2",
+      "account": "team-1", "origin_session": "another-session", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false,
+      "workflows": [{"name": "carried panel", "started_at": $(( NOW - 600 )),
+                     "agents_started": 3, "agents_done": 1, "agents_failed": 0, "running": true}]
+    },
+    "unknown-job": {
+      "state": "unknown", "stale_since": $(( NOW - 60 )), "reads_failed": ["tmux"], "branch": "andrew/unknown", "head": "0fedcc3",
+      "account": "", "origin_session": "another-session", "sent_at": $(( NOW - 90000 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
     "old-job": {
       "state": "done", "branch": "andrew/old", "head": "9abcdef",
       "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 90000 )),
@@ -423,9 +435,18 @@ all_jobs_output=$(REMOTE_JOBS_SHOW_ALL=1 REMOTE_JOB_NAME_MAX=22 render_with_boar
     && printf '%s\n' "$jobs_output" | grep -qE 'quota-job-no-reset +waiting · quota$'; } \
     || { printf 'a lane paused at the quota wall did not say so, and when it resumes where the board knows\n' >&2; exit 1; }
 printf '%s\n' "$jobs_output" | grep -qE 'resume-job +waiting · between runs$' || { printf 'a lane whose launcher is between runs short of a wall did not say so\n' >&2; exit 1; }
+# Another session's lanes, so only the render of every session's lanes draws them.
+printf '%s\n' "$all_jobs_output" | grep -qE 'stale-job +running · team-1 · reads failing 3m$' \
+    || { printf 'a lane whose box reads are failing did not say so, and since when\n' >&2; exit 1; }
+colored_jobs_output=$(KEEP_COLORS=1 REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
+[[ "$(printf '%s\n' "$colored_jobs_output" | grep stale-job)" == *$'\033[38;2;220;220;220mrunning'* ]] \
+    || { printf 'the last known state of a lane the box could not read rendered as a live one\n' >&2; exit 1; }
+[[ "$(printf '%s\n' "$colored_jobs_output" | grep 'carried panel')" == *$'\033[38;2;220;220;220m1/3'* ]] \
+    || { printf 'a workflow carried from the last read rendered as a live one\n' >&2; exit 1; }
+[[ "$all_jobs_output" =~ unknown-job\ +unknown ]] || { printf 'a lane whose state the box has never read aged off the status line\n' >&2; exit 1; }
 [[ "$jobs_output" =~ prompt-job\ +prompt ]] || { printf 'a lane stopped at a dialog, which writes nothing, aged off the status line\n' >&2; exit 1; }
 [[ "$jobs_output" == *"stuck panel"*"1/2 agents"* ]] || { printf "a lane at a prompt hid its running workflow\n" >&2; exit 1; }
-[[ "$(KEEP_COLORS=1 render_with_boards | grep prompt-job)" == *$'\033[38;2;255;85;85mprompt'* ]] || { printf 'a lane stopped at a dialog did not render its state in red\n' >&2; exit 1; }
+[[ "$(printf '%s\n' "$colored_jobs_output" | grep prompt-job)" == *$'\033[38;2;255;85;85mprompt'* ]] || { printf 'a lane stopped at a dialog did not render its state in red\n' >&2; exit 1; }
 # 20 characters, the widest name on either board: a held job sizes the column like a running one.
 [[ "$jobs_output" =~ demo-job\ {13}running ]] || { printf "a held job's name did not widen the job column\n" >&2; exit 1; }
 prompt_root="$SANDBOX/remote-prompt"

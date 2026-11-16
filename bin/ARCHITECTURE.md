@@ -201,7 +201,8 @@ session cooperating; the one read from off it is each lane PR's state on GitHub:
 
 | field | derived from |
 |---|---|
-| `state` | `report.md` first (`status: blocked` → blocked, `status: stopped`, which `handoff.sh stop` writes, → stopped, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session → gone; the session without either → gone, or waiting for a stacked lane or for a lane whose launcher is between runs, paused at the quota wall or short of one); `held` and `queued` come from the router state and the lane queue; a running job whose pane the pane reader agent-workflows installs (`~/handoffs/lane-pane.sh state <session>`) sees at a permission dialog → prompt, and with no reader installed the state is unchanged |
+| `state` | while a read it depends on fails, the last publish's (see below); otherwise `report.md` first (`status: blocked` → blocked, `status: stopped`, which `handoff.sh stop` writes, → stopped, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session in a `tmux list-panes` that answered, or that said no server runs → gone; the session without either → gone, or waiting for a stacked lane or for a lane whose launcher is between runs, paused at the quota wall or short of one); `held` and `queued` come from the router state and the lane queue; a running job whose pane the pane reader agent-workflows installs (`~/handoffs/lane-pane.sh state <session>`) sees at a permission dialog → prompt, and with no reader installed the state is unchanged |
+| `stale_since`, `reads_failed` | 0 and `[]` when every read the row needs answered; see below |
 | `quota` | the launcher's `quota-wait.json` (`since`, `next_poll`, and `walled`, the `claude` and `codex` it names, none until the launcher finds a wall), counted only while it is no more than 120s past its next poll and its pid is a process started before the file's last write, under one of the job's panes; `resumes_at` is when the first account in a walled pool frees, by this machine's own `~/.accounts/statusline-snapshot.json` and `~/.codex-accounts/usage.json` and each router's own pick rules: Claude walls at `accounts.HARD_WALL_PCT` on either window, with a polled null 5-hour window read as 0 and expired, canceled and stale rows skipped; Codex walls at 100% on either window, with errored, stale and flagged rows skipped (0 when they name no reset ahead); `{}` on every other job |
 | `head` | `git rev-parse --short HEAD` in the job's worktree |
 | `unpushed` | `git rev-list --count HEAD --not --remotes` in the job's worktree: commits no remote-tracking ref holds |
@@ -226,6 +227,29 @@ cannot tell working apart from killed; the owning session's liveness can.
 
 The file is replaced with `os.replace`, so a reader sees one version or the
 next. An empty `jobs` map is a valid result.
+
+**A read that fails says nothing about what is there.** A command that times out (5s) or cannot
+start; a `tmux list-panes` that exits non-zero for any reason but no server running; a `/proc`,
+router-state, queue, `quota-wait.json`, `after`, `report.md` or `job.json` read or stat that errors;
+a live router's state file or a `quota-wait.json` that does not parse; git exiting non-zero in a
+worktree that is still there: each is a failed read, never an empty one. A file that is not there,
+and a worktree since removed, are empty reads.
+
+While a read the lane's state depends on fails, the row keeps the last publish's `state`,
+`held_until`, `queue_position`, `after`, `quota`, `account`, `handoffs`, `handoffs_last_hour` and
+`workflows`; `stale_since` is when the first publish whose read failed ran, and `reads_failed` names
+the reads. The kept `state` is `unknown` when no publish had the lane, or when a read that answered
+rules it out: a session tmux listed is not `gone`, and a lane with no report is not `done`,
+`blocked` or `stopped`. A report, or a tmux read that listed no session, still settles the state
+whatever else failed, so a failed read never makes a lane `gone`. A git read that failed keeps the
+last `head` and `unpushed`, named in `reads_failed`, without making the state stale. A lane whose
+`job.json` cannot be read keeps its whole last row.
+
+The board's own `reads_failed` names the machine-wide reads that failed: `github`, `tmux`,
+`processes`, `routers`, `queue`, and `handoffs` when the lanes' directory cannot be listed, in which
+case every lane keeps its last row. A publish reads GitHub first, then the machine, and starts no
+command past 20 seconds in, so on a saturated box it still ends inside its 30s period; every read
+it did not get to is a failed one.
 
 The query costs one point of the GitHub login's 5,000-an-hour GraphQL budget whatever the
 number of lane PRs, so the 30s timer spends 120 an hour while any lane has a PR,
