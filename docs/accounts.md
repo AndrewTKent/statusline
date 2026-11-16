@@ -250,6 +250,11 @@ files.
   process that started before the file was last written, so a pid the system
   hands to a new process later does not revive it. A tmux session sitting at a
   bare shell after its router exited used to publish as `running` forever.
+- **A failed read of the board machine never reads as a lane that ended.** When
+  tmux, the process table or a lane's own files cannot be read in time, as on a
+  box out of memory, the row keeps its last state, dimmed, with `reads failing 3m`
+  saying for how long, or `unknown` when the board has no last state the reads
+  that did answer allow. A lane reads `gone` only from a tmux read that answered.
 - **A job's router is found by its tmux pane, not its directory.** A router, or
   a Codex process, belongs to a job when its pid descends from a pane of the
   tmux session named for the job's slug. A session that `cd`s into another repo

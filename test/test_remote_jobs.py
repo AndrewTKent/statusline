@@ -1,8 +1,11 @@
 """Unit tests for bin/remote_jobs.py — no tmux, no git, no network."""
 
 import json
+import math
 import os
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,12 +39,30 @@ def box(tmp_path, monkeypatch):
     return home
 
 
+def answer(stdout="", code=0, stderr=""):
+    return subprocess.CompletedProcess([], code, stdout, stderr)
+
+
 def live(monkeypatch, *sessions):
     """tmux lists these sessions, each with one pane whose shell is its pid in PANES."""
     def run(argv):
         if argv[0] == "tmux":
-            return "".join(f"{PANES[session]} {session}\n" for session in sessions)
-        return "abc1234\n" if argv[0] == "git" else ""
+            return answer("".join(f"{PANES[session]} {session}\n" for session in sessions))
+        return answer("abc1234\n" if argv[0] == "git" else "")
+
+    monkeypatch.setattr(remote_jobs, "run", run)
+
+
+def also_run(monkeypatch, command, reply):
+    """`command` gets `reply`, an answer or a ReadFailed to raise; every other command what it got before."""
+    before = remote_jobs.run
+
+    def run(argv):
+        if argv[0] != command:
+            return before(argv)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
     monkeypatch.setattr(remote_jobs, "run", run)
 
@@ -49,8 +70,7 @@ def live(monkeypatch, *sessions):
 def pane_reader_says(monkeypatch, state):
     """tmux lists the demo lane, and the pane reader prints `state` for it."""
     live(monkeypatch, "demo")
-    tmux_and_git = remote_jobs.run
-    monkeypatch.setattr(remote_jobs, "run", lambda argv: state + "\n" if argv[0] == "bash" else tmux_and_git(argv))
+    also_run(monkeypatch, "bash", answer(state + "\n"))
 
 
 def write_process(box, pid, parent, command="bash", started=0.0):
@@ -361,7 +381,7 @@ class TestState:
 
         def run(argv):
             if argv == ["bash", str(box / "handoffs" / "lane-pane.sh"), "state", "demo"]:
-                return pane + "\n"
+                return answer(pane + "\n")
             return tmux_and_git(argv)
 
         monkeypatch.setattr(remote_jobs, "run", run)
@@ -391,6 +411,273 @@ class TestState:
         monkeypatch.setattr(remote_jobs, "report_status", lambda _path: "done")
 
         assert only_job(remote_jobs.build(2000.0))["state"] == "done"
+
+
+LAST_PUBLISH = {
+    "state": "held", "held_until": 5000, "queue_position": 0, "after": "", "quota": {},
+    "account": "team-2", "handoffs": 4, "handoffs_last_hour": 3, "stale_since": 0,
+    "workflows": [{"name": "review loop", "running": True}], "head": "f00d123", "unpushed": 2,
+}
+
+
+def published(box, **row):
+    """The demo lane as the last publish wrote it."""
+    (box / "handoffs" / "jobs.json").write_text(json.dumps({"jobs": {"demo": {**LAST_PUBLISH, **row}}}))
+
+
+def carried_part(row):
+    """What a lane keeps of the last publish while its state cannot be read, and the marks saying so."""
+    kept = ("state", "held_until", "queue_position", "after", "quota", "account", "handoffs",
+            "handoffs_last_hour", "workflows", "stale_since", "reads_failed")
+    return {field: row[field] for field in kept}
+
+
+def fail_read(box, monkeypatch, read):
+    """Make one read of the machine fail the way it does on a saturated or broken box."""
+    directory = box / "handoffs" / "demo"
+    if read == "tmux":
+        also_run(monkeypatch, "tmux", remote_jobs.ReadFailed("tmux"))
+    elif read == "tmux exit":
+        also_run(monkeypatch, "tmux", answer(code=1, stderr="error connecting to /tmp/tmux-1000/default (Permission denied)\n"))
+    elif read == "processes":
+        (box.parent / "proc" / "stat").unlink()
+    elif read == "process stat":
+        (box.parent / "proc" / "999" / "stat").mkdir(parents=True)
+    elif read == "routers":
+        (box.parent / "state").rmdir()
+        (box.parent / "state").write_text("")
+    elif read == "router":
+        write_router_state(box, "s-1").write_text("{")
+    elif read == "queue":
+        (box / "handoffs" / "lane-queue.txt").mkdir()
+    elif read == "quota":
+        (directory / "quota-wait.json").write_text("{")
+    elif read == "after":
+        (directory / "after").mkdir()
+    elif read == "report":
+        (directory / "report.md").mkdir()
+        # With no session listed, only the report could say this lane did not just end.
+        live(monkeypatch)
+    elif read in ("router stat", "quota stat"):
+        if read == "router stat":
+            write_router_state(box, "s-1")
+        else:
+            write_quota_wait(box)
+            write_process(box, LAUNCHER, PANE)
+        unreadable = "account-router-" if read == "router stat" else "quota-wait.json"
+        file_mtime = remote_jobs.file_mtime
+
+        def stat_fails(path):
+            if path.name.startswith(unreadable):
+                raise remote_jobs.ReadFailed(path.name)
+            return file_mtime(path)
+
+        monkeypatch.setattr(remote_jobs, "file_mtime", stat_fails)
+    elif read == "pane":
+        write_router_state(box, "s-1")
+        also_run(monkeypatch, "bash", remote_jobs.ReadFailed("bash"))
+
+
+def after_unreadable(monkeypatch):
+    def unreadable(_directory):
+        raise remote_jobs.ReadFailed("after")
+
+    monkeypatch.setattr(remote_jobs, "parent_slug", unreadable)
+
+
+class TestFailedReads:
+    @pytest.mark.parametrize("read,failed", [
+        ("tmux", "tmux"), ("tmux exit", "tmux"), ("processes", "processes"), ("process stat", "processes"),
+        ("routers", "routers"),
+        ("router", "router"), ("router stat", "router"), ("queue", "queue"), ("quota", "quota"),
+        ("quota stat", "quota"), ("after", "after"),
+        ("report", "report"), ("pane", "pane"),
+    ])
+    def test_a_read_that_failed_leaves_the_lane_as_the_last_publish_had_it_stale_from_now(
+        self, box, monkeypatch, read, failed
+    ):
+        write_job(box)
+        published(box)
+        live(monkeypatch, "demo")
+        fail_read(box, monkeypatch, read)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert carried_part(row) == {**carried_part({**LAST_PUBLISH, "reads_failed": []}),
+                                     "stale_since": 2000, "reads_failed": [failed]}
+
+    def test_a_lane_stays_stale_from_its_first_publish_whose_read_failed(self, box, monkeypatch):
+        write_job(box)
+        published(box, stale_since=1500)
+        live(monkeypatch, "demo")
+        after_unreadable(monkeypatch)
+
+        assert only_job(remote_jobs.build(2000.0))["stale_since"] == 1500
+
+    @pytest.mark.parametrize("last", ["gone", "done"])
+    def test_a_last_state_a_read_that_answered_rules_out_is_unknown(self, box, monkeypatch, last):
+        # tmux lists the lane, so it has not ended; it has no report, so it has not reported.
+        write_job(box)
+        published(box, state=last)
+        live(monkeypatch, "demo")
+        after_unreadable(monkeypatch)
+
+        assert only_job(remote_jobs.build(2000.0))["state"] == "unknown"
+
+    def test_a_lane_whose_reads_answer_again_is_no_longer_stale(self, box, monkeypatch):
+        (write_job(box) / "after").write_text("iri-8386\n")
+        published(box, stale_since=1500, reads_failed=["tmux"])
+        live(monkeypatch, "demo")
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["stale_since"], row["reads_failed"]) == ("waiting", 0, [])
+
+    @pytest.mark.parametrize("stderr", [
+        "no server running on /tmp/tmux-1000/default\n",
+        "error connecting to /tmp/tmux-1000/default (No such file or directory)\n",
+    ])
+    def test_tmux_with_no_server_lists_no_session_so_the_lane_is_gone(self, box, monkeypatch, stderr):
+        write_job(box)
+        published(box)
+        also_run(monkeypatch, "tmux", answer(code=1, stderr=stderr))
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["stale_since"], row["reads_failed"]) == ("gone", 0, [])
+
+    def test_a_lane_tmux_lists_no_session_for_is_gone_whatever_else_failed(self, box, monkeypatch):
+        write_job(box)
+        published(box)
+
+        def unreadable():
+            raise remote_jobs.ReadFailed("processes")
+
+        monkeypatch.setattr(remote_jobs, "processes", unreadable)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["stale_since"]) == ("gone", 0)
+
+    def test_a_report_is_published_while_tmux_cannot_be_read(self, box, monkeypatch):
+        directory = write_job(box)
+        (directory / "report.md").write_text("status: done\n")
+        published(box)
+        fail_read(box, monkeypatch, "tmux")
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["stale_since"]) == ("done", 0)
+
+    @pytest.mark.parametrize("git", ["timed out", "failed in a worktree that is there"])
+    def test_a_git_read_that_failed_keeps_the_last_head_and_unpushed_count(self, box, monkeypatch, git):
+        write_job(box, worktree=str(box))
+        published(box)
+        reply = remote_jobs.ReadFailed("git") if git == "timed out" else answer(code=128, stderr="fatal: Out of memory\n")
+        also_run(monkeypatch, "git", reply)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["head"], row["unpushed"], row["stale_since"]) == ("f00d123", 2, 0)
+
+    def test_a_worktree_since_removed_has_no_head_and_nothing_unpushed(self, box, monkeypatch):
+        write_job(box, worktree=str(box / "removed"))
+        published(box)
+        also_run(monkeypatch, "git", answer(code=128, stderr="fatal: cannot change to 'removed'\n"))
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["head"], row["unpushed"]) == ("", 0)
+
+    @pytest.mark.parametrize("seen,state", [(True, "held"), (False, "unknown")])
+    def test_a_job_file_that_could_not_be_read_keeps_the_lanes_last_row(self, box, monkeypatch, seen, state):
+        write_job(box)
+        if seen:
+            published(box, branch="andrew/demo", pr={})
+        read_text = remote_jobs.read_text
+
+        def job_file_unreadable(path):
+            if path.name == "job.json":
+                raise remote_jobs.ReadFailed(path.name)
+            return read_text(path)
+
+        monkeypatch.setattr(remote_jobs, "read_text", job_file_unreadable)
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row.get("branch"), row["stale_since"], row["reads_failed"]) == (
+            state, "andrew/demo" if seen else None, 2000, ["job"]
+        )
+
+    @pytest.mark.parametrize("name,expected", [("missing", None), ("under-a-file/x", remote_jobs.ReadFailed)])
+    def test_a_file_that_is_not_there_has_no_mtime_and_one_that_cannot_be_read_fails(self, tmp_path, name, expected):
+        (tmp_path / "under-a-file").write_text("")
+        if expected is None:
+            assert remote_jobs.file_mtime(tmp_path / name) is None
+        else:
+            with pytest.raises(expected):
+                remote_jobs.file_mtime(tmp_path / name)
+
+    def test_a_box_with_no_router_state_dir_has_no_router_and_reads_fine(self, box, monkeypatch):
+        (write_job(box) / "after").write_text("iri-8386\n")
+        (box.parent / "state").rmdir()
+        live(monkeypatch, "demo")
+
+        row = only_job(remote_jobs.build(2000.0))
+
+        assert (row["state"], row["reads_failed"]) == ("waiting", [])
+
+    def test_a_box_with_no_handoffs_dir_publishes_no_lanes_and_no_failed_read(self, box):
+        (box / "handoffs").rmdir()
+
+        board = remote_jobs.build(2000.0)
+
+        assert (board["jobs"], board.get("reads_failed", [])) == ({}, [])
+
+    def test_a_report_that_is_not_utf8_still_ends_the_lane(self, box):
+        (write_job(box) / "report.md").write_bytes(b"status: blocked\n\xff\xfe\n")
+
+        assert only_job(remote_jobs.build(2000.0))["state"] == "blocked"
+
+    def test_a_handoffs_dir_that_could_not_be_listed_keeps_every_lane_and_says_so(self, box):
+        published(box, pr={})
+        handoffs = box / "handoffs"
+        handoffs.chmod(0o300)
+        try:
+            board = remote_jobs.build(2000.0)
+        finally:
+            handoffs.chmod(0o700)
+
+        assert (board["reads_failed"], board["jobs"]["demo"]["state"]) == (["handoffs"], "held")
+
+
+class TestBudget:
+    def test_a_publish_past_its_budget_starts_no_command(self, monkeypatch):
+        started = []
+        monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: started.append(args))
+        monkeypatch.setattr(remote_jobs, "deadline", time.monotonic() - 1)
+
+        with pytest.raises(remote_jobs.ReadFailed):
+            remote_jobs.run(["tmux", "list-panes"])
+        assert started == []
+
+    def test_a_command_gets_no_more_than_the_budget_has_left(self, monkeypatch):
+        timeouts = []
+        monkeypatch.setattr(subprocess, "run", lambda *args, timeout, **kwargs: timeouts.append(timeout))
+        monkeypatch.setattr(remote_jobs, "deadline", time.monotonic() + 1)
+
+        remote_jobs.run(["tmux", "list-panes"])
+
+        assert 0 < timeouts[0] <= 1
+
+    def test_each_publish_gets_the_budget_from_when_it_starts(self, box, monkeypatch):
+        budgets = []
+        monkeypatch.setattr(remote_jobs, "deadline", math.inf)
+        monkeypatch.setattr(remote_jobs, "build", lambda _now: budgets.append(remote_jobs.deadline - time.monotonic()) or {})
+
+        remote_jobs.main()
+
+        assert remote_jobs.PUBLISH_BUDGET_S - 1 < budgets[0] <= remote_jobs.PUBLISH_BUDGET_S
 
 
 class TestReport:
@@ -430,7 +717,7 @@ class TestWorktree:
         write_job(box)
         tmux_and_git = remote_jobs.run
         count = ["git", "-C", "/w", "rev-list", "--count", "HEAD", "--not", "--remotes"]
-        monkeypatch.setattr(remote_jobs, "run", lambda argv: "3\n" if argv == count else tmux_and_git(argv))
+        monkeypatch.setattr(remote_jobs, "run", lambda argv: answer("3\n") if argv == count else tmux_and_git(argv))
 
         assert only_job(remote_jobs.build(2000.0))["unpushed"] == 3
 
@@ -571,8 +858,8 @@ def pull(head="h2", mergeable="MERGEABLE", state="OPEN", reviews=(), comments=()
             "reviews": {"nodes": list(reviews)}, "comments": {"nodes": list(comments)}}
 
 
-def github_has(monkeypatch, data):
-    """`gh api graphql` answers with `data`; returns the queries it was asked."""
+def github_has(monkeypatch, data, code=0):
+    """`gh api graphql` answers with `data` and exits `code`; returns the queries it was asked."""
     queries = []
     tmux_and_git = remote_jobs.run
 
@@ -580,7 +867,7 @@ def github_has(monkeypatch, data):
         if argv[0] != "gh":
             return tmux_and_git(argv)
         queries.append(argv)
-        return json.dumps({"data": data}) if data is not None else ""
+        return answer(json.dumps({"data": data}), code) if data is not None else answer(code=1)
 
     monkeypatch.setattr(remote_jobs, "run", run)
     return queries
@@ -661,12 +948,26 @@ class TestPullRequest:
 
     def test_a_failed_read_keeps_the_pr_as_its_file_has_it_with_no_verdict(self, box, monkeypatch):
         pr_json(write_job(box))
-        github_has(monkeypatch, None)
+        # gh exits non-zero on a query GitHub answered only in part.
+        github_has(monkeypatch, {"r0": {"p40": pull(state="MERGED")}}, code=1)
 
-        assert only_job(remote_jobs.build(2000.0))["pr"] == {
+        board = remote_jobs.build(2000.0)
+
+        assert (board["jobs"]["demo"]["pr"], board["reads_failed"]) == ({
             "number": 40, "state": "OPEN", "url": PR_URL, "verdict": "",
             "verdict_stale": False, "conflicts": False, "checked_at": 5,
-        }
+        }, ["github"])
+
+    def test_github_is_read_before_the_machine_while_the_budget_is_whole(self, box, monkeypatch):
+        pr_json(write_job(box))
+        github_has(monkeypatch, {"r0": {"p40": pull()}})
+        commands = []
+        before = remote_jobs.run
+        monkeypatch.setattr(remote_jobs, "run", lambda argv: commands.append(argv[0]) or before(argv))
+
+        remote_jobs.build(2000.0)
+
+        assert commands[:2] == ["gh", "tmux"]
 
     def test_a_lane_with_no_pr_file_has_no_pr(self, box):
         write_job(box)
@@ -689,6 +990,12 @@ class TestProcesses:
         (box.parent / "proc" / "88").mkdir()
 
         assert remote_jobs.processes() == {77: remote_jobs.Process(5, "tmux: (server)", 1250.0)}
+
+    def test_a_process_name_that_is_not_utf8_is_read(self, box):
+        (box.parent / "proc" / "77").mkdir()
+        (box.parent / "proc" / "77" / "stat").write_bytes(b"77 (lane\xff\xfe) S 5 " + b"0 " * 17 + b"0 0\n")
+
+        assert remote_jobs.processes()[77].parent == 5
 
     def test_a_parent_loop_from_a_reused_pid_is_not_descent(self):
         table = {10: remote_jobs.Process(11, "a", 0.0), 11: remote_jobs.Process(10, "b", 0.0)}

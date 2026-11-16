@@ -988,7 +988,7 @@ remote_job_pane_id() {
 # and one with no sender to every session.
 REMOTE_JOB_JQ_DEFS='
 def shown($cutoff): .value.state as $state
-    | (["running", "held", "queued", "waiting", "prompt", "blocked"] | any(. == $state))
+    | (["running", "held", "queued", "waiting", "prompt", "blocked", "unknown"] | any(. == $state))
       or ((.value.updated_at // 0) >= $cutoff);
 def pr_key: [(.value.pr.url // "") | strings
     | capture("^https://github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)")
@@ -1059,7 +1059,7 @@ remote_job_lines() {
     local board_dir="$1" name_width="$2" fresh="$3" now_epoch="$4"
     local RJ_SEP=$'\037'
     [ -r "$board_dir/jobs.json" ] || return 0
-    local rows kind one two three four five six seven eight nine ten eleven twelve thirteen fourteen
+    local rows kind one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen
     local padded detail state_color job_color age plural resume_format
     # A lane message counts as read once this machine has delivered it: handoff.sh wait and the
     # photon-jobs-notify hook leave a marker named for its id.
@@ -1088,22 +1088,25 @@ remote_job_lines() {
                    (if .value.pr.conflicts == true then "conflicts" else empty end),
                    (if ((.value.unpushed // 0) | type) == "number" and .value.unpushed > 0
                     then "\(.value.unpushed | floor) unpushed" else empty end)] | join(" · ")
-             else "" end)]
+             else "" end),
+            ((.value.stale_since // 0) | tostring)]
            | join("")),
           (select(.value.state == "running" or .value.state == "prompt")
+           | ((.value.stale_since // 0) | tostring) as $stale
            | (.value.workflows // [])[] | select(.running == true)
            | ["wf", (.name // ""), ((.agents_done // 0) | tostring),
               ((.agents_started // 0) | tostring), ((.agents_failed // 0) | tostring),
-              ((.started_at // 0) | tostring)]
+              ((.started_at // 0) | tostring), $stale]
            | join(""))
     ' "$board_dir/jobs.json" 2>/dev/null)
-    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine ten eleven twelve thirteen fourteen; do
+    while IFS=$RJ_SEP read -r kind one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen; do
         case "$four" in ''|*[!0-9]*) four=0 ;; esac
         case "$five" in ''|*[!0-9]*) five=0 ;; esac
         case "$seven" in ''|*[!0-9]*) seven=0 ;; esac
         case "$eight" in ''|*[!0-9]*) eight=0 ;; esac
         case "$ten" in ''|*[!0-9]*) ten=0 ;; esac
         case "$thirteen" in ''|*[!0-9]*) thirteen=0 ;; esac
+        case "$fifteen" in ''|*[!0-9]*) fifteen=0 ;; esac
         case "$kind" in
             job)
                 case "$two" in
@@ -1111,7 +1114,8 @@ remote_job_lines() {
                     blocked|prompt) job_color="$red" ;;
                     *)       job_color="$dim" ;;
                 esac
-                $fresh || job_color="$dim"
+                # A state the box could not read lately is its last known one, not a live reading.
+                { $fresh && [ "$fifteen" -eq 0 ]; } || job_color="$dim"
                 if [ "$two" = "running" ]; then
                     detail=""
                     [ -n "$three" ] && detail+=" ${dim}· ${three}${reset}"
@@ -1135,6 +1139,7 @@ remote_job_lines() {
                 else
                     detail=" ${dim}· $(remote_age_text "$(( now_epoch - five ))") ago${reset}"
                 fi
+                [ "$fifteen" -gt 0 ] && detail+=" ${dim}·${reset} ${yellow}reads failing $(remote_age_text "$(( now_epoch - fifteen ))")${reset}"
                 [ -n "$eleven" ] && detail+=" ${dim}· ${eleven}${reset}"
                 [ -n "$fourteen" ] && detail+=" ${dim}·${reset} ${yellow}${fourteen}${reset}"
                 [ "$ten" -gt 0 ] && detail+=" ${dim}·${reset} ${yellow}${ten} unread${reset}"
@@ -1145,7 +1150,9 @@ remote_job_lines() {
                 ;;
             wf)
                 age=$(remote_age_text "$(( now_epoch - five ))")
-                state_color="$dim"; $fresh && state_color="$cyan"
+                state_color="$dim"
+                # $six is the lane's stale_since: a workflow carried from the last read is not live either.
+                $fresh && [ "${six:-0}" = "0" ] && state_color="$cyan"
                 detail=""
                 [ "$four" -gt 0 ] && detail=" ${dim}· ${reset}${red}${four} failed${reset}"
                 printf '%b\n' "${dim}·     ${one}${reset} ${state_color}${two}/${three}${reset} ${dim}agents · ${age}${reset}${detail}"

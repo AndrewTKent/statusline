@@ -4705,6 +4705,23 @@ class RemoteCodexBoardTest(unittest.TestCase):
         lines = codex_statusline.remote_job_lines(board, "", "", True, 120, codex_statusline.Palette(False), now=5000)
         self.assertEqual([line.strip() for line in lines], ["· ▸ stacked waiting · after iri-8386"])
 
+    def test_a_lane_whose_box_reads_fail_shows_its_last_state_dim_and_since_when(self) -> None:
+        workflow = {"name": "panel", "running": True, "agents_done": 1, "agents_started": 2, "started_at": 4900}
+        job = {"state": "running", "account": "team-1", "stale_since": 4820, "workflows": [workflow]}
+        board = {"fresh": True, "jobs": {"lane": job}}
+        lines = codex_statusline.remote_job_lines(board, "", "", True, 120, codex_statusline.Palette(False), now=5000)
+        colored = codex_statusline.Palette(True)
+        colored_text = "\n".join(codex_statusline.remote_job_lines(board, "", "", True, 120, colored, now=5000))
+        self.assertEqual(
+            ([line.strip() for line in lines][0], colored.dim + "running" in colored_text, colored.dim + "1/2" in colored_text),
+            ("· ▸ lane running · team-1 · reads failing 3m", True, True),
+        )
+
+    def test_a_lane_the_box_has_never_read_shows_however_old(self) -> None:
+        board = {"fresh": True, "jobs": {"lane": {"state": "unknown", "updated_at": 1, "stale_since": 4940}}}
+        lines = codex_statusline.remote_job_lines(board, "", "", True, 120, codex_statusline.Palette(False), now=5000)
+        self.assertEqual([line.strip().startswith("· ▸ lane unknown") for line in lines], [True])
+
     def test_a_job_row_shows_its_pr_and_verdict(self) -> None:
         board = {"fresh": True, "jobs": {"lane": {"state": "running", "pr": {"number": 7, "verdict": "🌧️"}}}}
         text = "\n".join(codex_statusline.remote_job_lines(
