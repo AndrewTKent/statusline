@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import lane_ownership
 import remote_boards
 
 HOME = Path.home()
@@ -766,6 +767,8 @@ def poll_and_write_snapshot(*, collector_locked: bool = False) -> int:
         # Other machines' boards ride the same poll: the render path never reaches the network.
         # They come from ssh, not the usage API, so a failed usage read must not leave them stale.
         remote_boards.refresh_all(_conf_var)
+        # Each lane's PR states ride it for the same reason.
+        lane_ownership.refresh_if_due(time.time())
     return n
 
 

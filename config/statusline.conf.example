@@ -142,8 +142,9 @@
 # one long branch cannot widen the whole table.
 # REMOTE_JOB_NAME_MAX=20
 
-# Jobs render only in the session or terminal pane that sent them. Set to 1 to
-# list every job on the board in every status line.
+# Jobs render only in the lane, session or terminal pane that owns or sent them
+# (docs/accounts.md, Lanes). Set to 1 to list every job on the board in every
+# status line.
 # REMOTE_JOBS_SHOW_ALL=0
 
 # ─── Unattended job publisher (on the machine running the jobs) ────────────

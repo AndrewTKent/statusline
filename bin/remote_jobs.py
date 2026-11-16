@@ -671,6 +671,7 @@ def job_row(
         "account": str(router.get("label") or ""),
         "origin_session": str(job.get("origin_session") or ""),
         "origin_pane": str(job.get("origin_pane") or ""),
+        "origin_lane": str(job.get("origin_lane") or ""),
         "sent_at": as_int(job.get("sent_at")),
         "updated_at": last_change(directory, session),
         "handoffs": as_int(router.get("handoffs")),

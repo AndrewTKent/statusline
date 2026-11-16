@@ -18,7 +18,7 @@ if ! ls "$versions_dir"/* >/dev/null 2>&1; then
 fi
 
 mkdir -p "$local_bin" "$install_root" "$router_bin" "$codex_router_bin" "$(dirname -- "$zshrc")"
-for script in accounts.py claude-router.py codex_accounts.py codex-router.py codex-account-session.py remote_boards.py remote_jobs.py; do
+for script in accounts.py claude-router.py codex_accounts.py codex-router.py codex-account-session.py remote_boards.py remote_jobs.py lane_ownership.py; do
     temp="$install_root/.$script.$$"
     cp "$repo_root/bin/$script" "$temp"
     chmod 755 "$temp"
@@ -30,6 +30,7 @@ ln -sfn "$install_root/codex_accounts.py" "$local_bin/codex-accounts"
 ln -sfn "$install_root/codex-router.py" "$local_bin/codex-router"
 ln -sfn "$install_root/codex-account-session.py" "$local_bin/codex-account-session"
 ln -sfn "$install_root/remote_jobs.py" "$local_bin/jobs-publish"
+ln -sfn "$install_root/lane_ownership.py" "$local_bin/lane-own"
 cp "$repo_root/shell/claude-supervised" "$local_bin/claude-supervised"
 chmod 755 "$local_bin/claude-supervised"
 ln -sfn "$local_bin/claude-supervised" "$router_bin/claude"

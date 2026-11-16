@@ -195,11 +195,152 @@ session_topic() {
 
 # Name set with `/rename` or `claude --name`. session_name in the status blob
 # also carries the AI-generated title, so read only the transcript's own
-# custom-title entries; the last one wins.
+# custom-title entries; the last one wins. They only append, so a render reads
+# only what the transcript gained since the last one.
 session_custom_name() {
-    local transcript="$1"
+    local transcript="$1" sid="$2" cache size offset=0 name="" line found
     [ -f "$transcript" ] || return
-    grep -F '"type":"custom-title"' "$transcript" 2>/dev/null | tail -1 | jq -r '.customTitle // empty' 2>/dev/null
+    [ -n "$sid" ] || { sid=$(printf '%s' "$transcript" | cksum); sid="${sid%% *}"; }
+    cache="/tmp/claude/statusline-name-${sid//[!A-Za-z0-9_-]/_}.txt"
+    size=$(wc -c < "$transcript" 2>/dev/null)
+    size=$(( ${size:-0} ))
+    [ -r "$cache" ] && IFS=$'\t' read -r offset name < "$cache"
+    case "$offset" in ''|*[!0-9]*) offset=0; name="" ;; esac
+    [ "$size" -lt "$offset" ] && { offset=0; name=""; }
+    if [ "$size" -gt "$offset" ]; then
+        line=$(tail -c +"$(( offset + 1 ))" "$transcript" 2>/dev/null | grep -F '"type":"custom-title"' | tail -1)
+        [ -n "$line" ] && found=$(jq -er '.customTitle // ""' <<< "$line" 2>/dev/null) && name="$found"
+        # A transcript that does not end in a newline is mid-write: its last line is read again, whole, next time.
+        if [ -z "$(tail -c 1 "$transcript" 2>/dev/null)" ]; then
+            mkdir -p /tmp/claude 2>/dev/null
+            printf '%s\t%s\n' "$size" "$name" > "$cache.$$" 2>/dev/null && mv -f "$cache.$$" "$cache" 2>/dev/null
+        fi
+    fi
+    [ -n "$name" ] && printf '%s\n' "$name"
+}
+
+# The lane this session is: its name, as `lanes` passes it to `claude --name` or `/rename` sets it.
+session_lane() {
+    session_custom_name "$1" "$2" | tr '[:upper:]' '[:lower:]'
+}
+
+LANES_FILE="$HOME/.accounts/lanes.json"
+LANE_PR_STATES_FILE="$HOME/.accounts/lane-prs.json"
+# Set per render once the session is known; until then no lane and no claims.
+SESSION_LANE=""
+LANE_CLAIMS='{}'
+# The ownership list as the status line reads it: lane names and PR keys in lower case, and any
+# entry, list or item of the wrong type skipped rather than taking the rest down with it.
+LANE_JQ_DEFS='
+def lane_list: (try fromjson catch null) | (.lanes? // null)
+    | if type == "object" then with_entries(.key |= ascii_downcase | select(.value | type == "object")) else null end;
+def items($kind): (.[$kind] // []) | if type == "array" then .[] | strings else empty end;
+def clean: gsub("[\\\\\u0000-\u001f\u007f]"; "");
+'
+
+# Which lane the ownership list gives each photon lane and each PR, as {photon: {slug: lane}, prs: {key: lane}}.
+lane_claims() {
+    local claims=""
+    [ -r "$LANES_FILE" ] && claims=$(jq -cn --rawfile l "$LANES_FILE" "$LANE_JQ_DEFS"'
+        ($l | lane_list // {}) | to_entries
+        | {photon: ([.[] | .key as $lane | .value | items("photon") | {key: ., value: $lane}] | from_entries),
+           prs: ([.[] | .key as $lane | .value | items("prs") | {key: ascii_downcase, value: $lane}] | from_entries)}
+    ' 2>/dev/null)
+    [ -n "$claims" ] || claims='{"photon":{},"prs":{}}'
+    printf '%s' "$claims"
+}
+
+# The lane's rows: its name, PR count and tickets, then its open PRs grouped by state, most pressing
+# first, wrapped to WIDTH. A PR in REPO (owner/repo) reads #<number>; one elsewhere, <repo>#<number>.
+lane_block_lines() {
+    local lane="$1" repo="$2" width="$3" now="$RENDER_NOW"
+    local LB_SEP=$'\037' states_file="$LANE_PR_STATES_FILE" rows
+    [ -n "$lane" ] && [ -r "$LANES_FILE" ] || return 0
+    [ -r "$states_file" ] || states_file=/dev/null
+    rows=$(jq -nr --arg lane "$lane" --arg here "$repo" --rawfile l "$LANES_FILE" --rawfile s "$states_file" "$LANE_JQ_DEFS"'
+        ["failing", "conflicts", "changes", "running", "approved", "open", "armed", "queued", "draft", "missing", "unchecked"] as $order
+        | ($l | lane_list) as $lanes
+        | if $lanes == null then ["unreadable", ($lane | clean)] | join("\u001f")
+          else ($lanes[$lane] // empty) as $entry
+          | ($s | try fromjson catch {} | objects // {}) as $states
+          | ($states.prs | objects // {}) as $prs
+          | [$entry | items("prs") | ascii_downcase] as $keys
+          | ["head", ($lane | clean), ($keys | length | tostring), ([$entry | items("tickets") | clean] | join(" ")),
+             ($states.checked_at | numbers // 0 | floor | tostring), ($states.error | strings // "" | clean)] | join("\u001f"),
+            ($order[] as $status
+             | [$keys[] | select((($prs[.] | objects | .status | strings | select(. as $known | $order | index($known))) // "unchecked") == $status)
+                | clean | (capture("^(?<repo>[^#]+/(?<name>[^#/]+))#(?<n>[0-9]+)$") // {repo: "", name: ., n: ""})
+                | if .n == "" then .name elif .repo == $here then "#\(.n)" else "\(.name)#\(.n)" end]
+             | select(length > 0) | ["group", $status, join(" ")] | join("\u001f"))
+          end
+    ' 2>/dev/null) || return 0
+    [ -n "$rows" ] || return 0
+    local kind one two three four five name="$lane" count=0 tickets="" checked=0 error="" label_width=0
+    local -a labels=() colors=() lists=()
+    while IFS=$LB_SEP read -r kind one two three four five; do
+        case "$kind" in
+            unreadable)
+                printf '%blane   %b %b%s%b %b· %s is not valid: lane-own show says why%b\n' \
+                    "$white" "$reset" "$magenta" "$one" "$reset" "$yellow" "${LANES_FILE##*/}" "$reset"
+                return 0
+                ;;
+            head) name="$one"; count="$two"; tickets="$three"; checked="$four"; error="$five" ;;
+            group)
+                lane_status_style "$one"
+                labels+=( "$LANE_LABEL" ); colors+=( "$LANE_COLOR" ); lists+=( "$two" )
+                [ "${#LANE_LABEL}" -gt "$label_width" ] && label_width=${#LANE_LABEL}
+                ;;
+        esac
+    done <<< "$rows"
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    case "$checked" in ''|*[!0-9]*) checked=0 ;; esac
+    local plural="s"
+    [ "$count" = "1" ] && plural=""
+    printf '%blane   %b %b%s%b %b· %s PR%s%b' "$white" "$reset" "$magenta" "$name" "$reset" "$dim" "$count" "$plural" "$reset"
+    [ -n "$tickets" ] && printf ' %b·%b %b%s%b' "$dim" "$reset" "$cyan" "$tickets" "$reset"
+    # The poll reads every 90s; a read this old, or none at all, means the poll or GitHub has stopped answering.
+    if [ "$count" -gt 0 ] && [ "$checked" -gt 0 ] && [ $(( now - checked )) -gt 600 ]; then
+        printf ' %b·%b %bstates %s old%b' "$dim" "$reset" "$yellow" "$(remote_age_text "$(( now - checked ))")" "$reset"
+    elif [ "$count" -gt 0 ] && [ "$checked" -eq 0 ] && [ -n "$error" ]; then
+        printf ' %b·%b %bstates never read: %s%b' "$dim" "$reset" "$yellow" "$error" "$reset"
+    fi
+    printf '\n'
+    local index text indent token start=$(( 9 + label_width ))
+    printf -v indent '%*s' "$start" ''
+    for index in "${!labels[@]}"; do
+        printf -v text '        %-*s' "$label_width" "${labels[$index]}"
+        for token in ${lists[$index]}; do
+            if [ "${#text}" -gt "$start" ] && [ $(( ${#text} + 1 + ${#token} )) -gt "$width" ]; then
+                printf '%b%s%b\n' "${colors[$index]}" "$text" "$reset"
+                text="${indent}${token}"
+            else
+                text+=" $token"
+            fi
+        done
+        printf '%b%s%b\n' "${colors[$index]}" "$text" "$reset"
+    done
+}
+
+# Sets LANE_LABEL and LANE_COLOR for a PR state, without a subshell per row.
+lane_status_style() {
+    LANE_LABEL="$1"
+    case "$1" in
+        failing) LANE_LABEL='checks failing' ;;
+        changes) LANE_LABEL='changes requested' ;;
+        running) LANE_LABEL='checks running' ;;
+        armed) LANE_LABEL='auto-merge on' ;;
+        missing) LANE_LABEL='not found' ;;
+        unchecked) LANE_LABEL='not read yet' ;;
+    esac
+    case "$1" in
+        failing|conflicts|missing) LANE_COLOR="$red" ;;
+        changes) LANE_COLOR="$orange" ;;
+        running) LANE_COLOR="$yellow" ;;
+        approved|armed) LANE_COLOR="$green" ;;
+        queued) LANE_COLOR="$magenta" ;;
+        open) LANE_COLOR="$cyan" ;;
+        *) LANE_COLOR="$dim" ;;
+    esac
 }
 
 recent_session_checkout() {
@@ -841,15 +982,37 @@ remote_job_pane_id() {
     { printf '%s' "$raw" | shasum -a 256 2>/dev/null || printf '%s' "$raw" | sha256sum 2>/dev/null; } | cut -c1-12
 }
 
+# Which jobs a render shows, and which of them are this session's. A job on screen is still going,
+# waiting on someone, or finished in the last half hour. A job whose slug or PR the ownership list gives
+# a lane belongs to that lane alone; any other job belongs to the lane, session or pane that sent it,
+# and one with no sender to every session.
+REMOTE_JOB_JQ_DEFS='
+def shown($cutoff): .value.state as $state
+    | (["running", "held", "queued", "waiting", "prompt", "blocked"] | any(. == $state))
+      or ((.value.updated_at // 0) >= $cutoff);
+def pr_key: [(.value.pr.url // "") | strings
+    | capture("^https://github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)")
+    | "\(.o)/\(.r)#\(.n)" | ascii_downcase][0];
+def owner($claims): $claims.photon[.key] // (pr_key as $k | if $k then $claims.prs[$k] else null end);
+def sender($sid; $pane; $lane):
+    ($lane != "" and (.value.origin_lane // "") == $lane)
+    or ($sid != "" and (.value.origin_session // "") == $sid)
+    or ($pane != "" and (.value.origin_pane // "") == $pane);
+def unsent: (.value.origin_session // "") == "" and (.value.origin_pane // "") == "" and (.value.origin_lane // "") == "";
+def mine($sid; $pane; $lane; $claims): owner($claims) as $owner
+    | if $owner then $owner == $lane else sender($sid; $pane; $lane) end;
+def on_screen($all; $sid; $pane; $lane; $claims): owner($claims) as $owner
+    | $all == "1" or (if $owner then $owner == $lane else unsent or sender($sid; $pane; $lane) end);
+'
+
 remote_job_slugs() {
     local board_dir="$1" now_epoch="$2"
     jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
         --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
-        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" '
+        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" \
+        --arg lane "${SESSION_LANE:-}" --argjson claims "$LANE_CLAIMS" "$REMOTE_JOB_JQ_DEFS"'
         (.jobs // {}) | to_entries[]
-        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or .value.state == "waiting" or .value.state == "prompt" or ((.value.updated_at // 0) >= $cutoff))
-        | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
-                 or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
+        | select(shown($cutoff) and on_screen($all; $sid; $pane; $lane; $claims))
         | .key[0:$cap]
     ' "$board_dir/jobs.json" 2>/dev/null
 }
@@ -904,17 +1067,14 @@ remote_job_lines() {
     read_ids=$(ls "${PHOTON_STATE_DIR:-$HOME/.local/state/photon-jobs}/read" 2>/dev/null)
     rows=$(jq -r --argjson cutoff "$(( now_epoch - REMOTE_JOB_WINDOW_S ))" \
         --argjson cap "${REMOTE_JOB_NAME_MAX:-20}" --arg sid "${SESSION_ID:-}" \
-        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" --arg read "$read_ids" '
+        --arg all "${REMOTE_JOBS_SHOW_ALL:-0}" --arg pane "$(remote_job_pane_id)" --arg read "$read_ids" \
+        --arg lane "${SESSION_LANE:-}" --argjson claims "$LANE_CLAIMS" "$REMOTE_JOB_JQ_DEFS"'
         ($read | split("\n") | map({key: ., value: true}) | from_entries) as $seen
         | (.jobs // {}) | to_entries[]
-        | select(.value.state == "running" or .value.state == "held" or .value.state == "queued" or .value.state == "waiting" or .value.state == "prompt" or ((.value.updated_at // 0) >= $cutoff))
-        # A job belongs to the session that sent it; one with no sender shows everywhere.
-        | select($all == "1" or ((.value.origin_session // "") == "" and (.value.origin_pane // "") == "")
-                 or .value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
+        | select(shown($cutoff) and on_screen($all; $sid; $pane; $lane; $claims))
         | (["job", .key[0:$cap], (.value.state // ""), (.value.account // ""),
             ((.value.handoffs_last_hour // 0) | tostring), ((.value.updated_at // 0) | tostring),
-            (if $all == "1" and (.value.origin_session == $sid or ($pane != "" and (.value.origin_pane // "") == $pane))
-             then "mine" else "" end), ((.value.held_until // 0) | tostring),
+            (if $all == "1" and mine($sid; $pane; $lane; $claims) then "mine" else "" end), ((.value.held_until // 0) | tostring),
             ((.value.queue_position // 0) | tostring), (.value.after // ""),
             ((.value.messages // []) | map(select($seen[.id | tostring] | not)) | length | tostring),
             (if ((.value.pr.number // 0) | type) == "number" and .value.pr.number > 0
@@ -1472,6 +1632,20 @@ render_shared_account_snapshot() {
     session_display_fmt=$(_shared_usage_fmt "$session_tokens")
     lifetime_display=$(_shared_usage_fmt "${lifetime_tokens:-0}")
     _shared_emit "${white}%-7s${reset} %b" "usage" "${dim}today${reset} ${cyan}${today_display}${reset} ${dim}· session${reset} ${magenta}${session_display_fmt}${reset} ${dim}· lifetime${reset} ${green}${lifetime_display}${reset}"
+
+    # A lane's PRs and tickets, whatever branch its checkout is on: the laptop lanes all sit on main.
+    SESSION_LANE=$(session_lane "$TRANSCRIPT_PATH" "$SESSION_ID")
+    LANE_CLAIMS=$(lane_claims)
+    if [ -n "$SESSION_LANE" ]; then
+        local lane_repo="" lane_width="${MAX_COLS:-0}" lane_line
+        [ -n "$git_root" ] && lane_repo=$(git -C "$git_root" remote get-url origin 2>/dev/null |
+            sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##' | tr '[:upper:]' '[:lower:]')
+        case "$lane_width" in ''|*[!0-9]*|0) lane_width="${COLUMNS:-0}" ;; esac
+        case "$lane_width" in ''|*[!0-9]*|0) lane_width=83 ;; esac
+        while IFS= read -r lane_line; do
+            [ -n "$lane_line" ] && _shared_emit '%b' "$lane_line"
+        done <<< "$(lane_block_lines "$SESSION_LANE" "$lane_repo" "$(( lane_width - 3 ))")"
+    fi
 
     if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ] && [ "$snapshot_state" = "ready" ]; then
         local rows sorted_rows="" sort_key row_label row_display row_five row_five_reset row_five_stale row_five_pending
@@ -3927,7 +4101,7 @@ FORMAT="${STATUSLINE_FORMAT:-${FORMAT:-default}}"
 TAB_TITLE="${DIR_NAME}"
 [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ] && TAB_TITLE="${DIR_NAME} (${SHORT_BRANCH})"
 SESSION_TOPIC=$(session_topic "$SESSION_ID" "$CWD")
-SESSION_NAME=$(session_custom_name "$TRANSCRIPT_PATH")
+SESSION_NAME=$(session_custom_name "$TRANSCRIPT_PATH" "$SESSION_ID")
 [ -n "$SESSION_TOPIC" ] && TAB_TITLE="${SESSION_TOPIC} — ${TAB_TITLE}"
 printf '\033]0;%s\007' "$TAB_TITLE"
 

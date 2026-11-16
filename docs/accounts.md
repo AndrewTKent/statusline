@@ -270,19 +270,73 @@ files.
   running. `14/15 agents` is agents finished over agents started.
 - **A board with a running job is pulled every 30 seconds** instead of
   `REMOTE_BOARD_PULL_INTERVAL`, and drops back when the last job stops.
-- **A job shows where it was sent from.** `job.json` may carry `origin_session`
-  (the sender's Claude Code session id) and `origin_pane` (the first 12 hex of
+- **A job shows where it belongs.** `job.json` may carry `origin_session`
+  (the sender's Claude Code session id), `origin_pane` (the first 12 hex of
   the SHA-256 of `tmux:<server>:<pane>`, `iterm:<session uuid>` or
-  `term:<TERM_SESSION_ID>`). A job renders only in a status line whose session
-  or terminal pane matches, so it follows the pane across `/clear` and new
-  sessions and stays off every other pane. A job with neither shows everywhere.
+  `term:<TERM_SESSION_ID>`) and `origin_lane` (the sending session's name, which
+  agent-workflows' `handoff.sh send` records). A job the lane list gives to a lane,
+  by its slug or its PR, renders only in that lane (Lanes, below). Any other job
+  renders in the lane that sent it, and in the session or terminal pane that
+  sent it, so it follows the pane across `/clear` and new sessions and stays off
+  every other pane. A job with no sender shows everywhere.
   `REMOTE_JOBS_SHOW_ALL=1` lists every job and marks this pane's own with
   `← this session`.
 - **Recently finished jobs stay visible for half an hour**, showing their state
   and age, then drop off. A `held` job stays on screen however long the hold
   lasts — it has not finished — and reads `held · resumes 10:20pm PDT` in the
-  reader's own time zone. `REMOTE_JOB_NAME_MAX` (default 20) caps the name so a
+  reader's own time zone. A `blocked` job stays too: it is waiting on someone. `REMOTE_JOB_NAME_MAX` (default 20) caps the name so a
   long branch cannot widen the table.
+
+## Lanes
+
+A lane is a long-running session named for its work (`claude --name infra`, or
+`/rename infra` in a session started by hand). Its status line shows what the
+lane owns, whatever branch its checkout is on:
+
+```
+lane    infra · 10 PRs · IRI-12283
+        checks failing #8371
+        approved       #8824 #8370 #8358 #8359 #8360 #6085 #8865
+        draft          #8184 #8185
+```
+
+- **The list is keyed by lane name**, in `~/.accounts/lanes.json`, so it outlives
+  every relaunch, handoff and pane. A session with no name, or a name no lane in
+  the list has, shows no `lane` rows.
+- **An item has one owner.** `lane-own give <lane> <item>...` takes each item from
+  whichever lane held it; `lane-own drop <item>...` takes it from every lane;
+  `lane-own show [lane]` lists them. An item is a PR (`owner/repo#123`, its URL,
+  or a bare `123` in the current repository or the one `--repo owner/repo`
+  names), a ticket (`ABC-123`, upper case), or an unattended job
+  (`photon:<slug>`).
+- **The file can be edited by hand**, in the form `lane-own` writes: lower case
+  lane names and `owner/repo#<number>` keys, upper case ticket ids, each a list
+  of strings. `lane-own` takes a lock, and refuses a file in any other form,
+  naming the field, rather than rewrite it. The status line reads such a file as
+  best it can: a field of the wrong type is skipped and the rest still shows, and
+  a file that does not parse says so on the `lane` row.
+- **PR states are read on the account poll**, never on a render: one GraphQL
+  query for every listed PR, at most every 90 seconds; `lane-own give` reads at
+  once a PR no read has covered yet. States land in `~/.accounts/lane-prs.json`.
+  A PR GitHub reads as merged or closed leaves the list. With no PR listed, no
+  call is made.
+- **Each open PR shows under one state**, the first that holds, in this order:
+  `queued` (in the merge queue), `auto-merge on`, `draft`, `conflicts`,
+  `checks failing`, `changes requested`, `checks running`, `approved`, `open`.
+  The rows run in the order a lane acts on them: `checks failing`, `conflicts`,
+  `changes requested`, `checks running`, `approved`, `open`, `auto-merge on`,
+  `queued`, `draft`, then `not found` (GitHub has no such PR) and `not read yet`
+  (no read yet, or a state this version does not know).
+  A PR in the session's own repository reads `#123`; one elsewhere,
+  `<repo>#123`. Rows wrap at the status line's width.
+- **Tickets show by id.** Their Linear state is not read: the render path holds
+  no Linear login, and a read per render is what the poll exists to avoid.
+- **States the poll stopped refreshing say so**: `states 25m old` once the last
+  successful read is more than ten minutes old, and `states never read: <why>`
+  when no read has succeeded. `lane-own show` prints the last read's error.
+- **A lane sees its unattended jobs**: a job whose slug or PR the list gives
+  the lane, and any job the list gives no lane that the lane sent. A job the
+  list gives a lane shows in that lane alone, even one with no sender.
 
 ## Being told the session was moved
 
