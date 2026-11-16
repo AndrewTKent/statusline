@@ -7,44 +7,67 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# Every job runs on my own runners on hound. A job runs only for a push, a dispatch, or a PR whose
+# branch lives in this repo; a fork's PR is refused here as well as held for approval in the repo's
+# Actions settings, so code from outside never gets a runner.
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, sl-hound]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@master
-        with:
-          scandir: bin/
-          additional_files: install.sh install-account-router.sh uninstall.sh install-codex.sh shell/claude-supervised shell/codex-supervised test/test_install_account_router.sh linux/systemd/install-agents.sh
-          severity: error
+        run: |
+          files=()
+          for f in bin/*; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.sh | *.bash) files+=("$f") ;;
+              *) head -n1 "$f" | grep -Eqs '^#! */[^ ]*/(env *)?[abk]*sh' && files+=("$f") ;;
+            esac
+          done
+          shellcheck --version | sed -n 2p
+          shellcheck -S error "${files[@]}" install.sh install-account-router.sh uninstall.sh install-codex.sh shell/claude-supervised shell/codex-supervised test/test_install_account_router.sh linux/systemd/install-agents.sh
 
   test-claude:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, sl-hound]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - name: Fresh HOME for this job
+        run: |
+          rm -rf "$RUNNER_TEMP/home"
+          mkdir -m 700 "$RUNNER_TEMP/home"
+          echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          python-version: '3.12'
-      - name: Install pytest
-        run: python3 -m pip install pytest
+          node-version: 24
       - name: Claude-side tests
         run: python3 -m pytest test/test_accounts.py test/test_claude_router.py test/test_codex_accounts.py test/test_codex_router.py test/test_scan_tokens.py test/test_agent_metrics.py test/test_remote_boards.py test/test_remote_jobs.py test/test_lane_ownership.py test/test_usage_ledger.py -q
 
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        # setup-python has no Python 3.9 build for Ubuntu 26.04, which ubuntu-latest now is.
-        os: [ubuntu-24.04, macos-latest]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, sl-hound]
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - name: Install jq and SQLite
+      - name: Fresh HOME for this job
         run: |
-          if [ "$(uname)" = "Darwin" ]; then brew install jq sqlite; else sudo apt-get install -y jq sqlite3; fi
+          rm -rf "$RUNNER_TEMP/home"
+          mkdir -m 700 "$RUNNER_TEMP/home"
+          echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
+      - name: Runner sandbox
+        run: |
+          echo "user $(id -un), HOME $HOME"
+          # The runner's unit hides /home; a job that can see it would reach andrew's files.
+          if [ "$(id -un)" = andrew ] || ls /home/andrew >/dev/null 2>&1; then
+            echo "::error::this job can reach /home/andrew; the runner is not sandboxed"; exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test empty input
         run: |
           OUTPUT=$(echo '' | bash bin/statusline.sh)
@@ -83,14 +106,10 @@ jobs:
       - name: Test Codex monitor
         run: python3 test/test_codex_statusline.py
       - name: Test Codex statusline hangup
-        run: |
-          command -v tmux >/dev/null || { if [ "$RUNNER_OS" = Linux ]; then sudo apt-get install -y tmux; else brew install tmux; fi; }
-          bash test/test_codex_statusline_hangup.sh
+        run: bash test/test_codex_statusline_hangup.sh
       - name: Set up Python 3.9
-        if: runner.os == 'Linux'
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.9'
       - name: Test Codex monitor on Python 3.9
-        if: runner.os == 'Linux'
         run: python3.9 test/test_codex_statusline.py
