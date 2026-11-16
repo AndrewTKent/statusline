@@ -250,9 +250,10 @@ lane_claims() {
     printf '%s' "$claims"
 }
 
-# The lane's rows: its name, PR count and tickets, then its open PRs grouped by state, most pressing
-# first, wrapped to WIDTH. A PR in REPO (owner/repo) reads #<number>; one elsewhere, <repo>#<number>.
-lane_block_lines() {
+# The lane's row: its name, PR count and open PRs, most pressing first, each colored by its state,
+# and as many as fit WIDTH before `+N more`. A PR in REPO (owner/repo) reads #<number>; one
+# elsewhere, <repo>#<number>.
+lane_row() {
     local lane="$1" repo="$2" width="$3" now="$RENDER_NOW"
     local LB_SEP=$'\037' states_file="$LANE_PR_STATES_FILE" rows
     [ -n "$lane" ] && [ -r "$LANES_FILE" ] || return 0
@@ -265,73 +266,71 @@ lane_block_lines() {
           | ($s | try fromjson catch {} | objects // {}) as $states
           | ($states.prs | objects // {}) as $prs
           | [$entry | items("prs") | ascii_downcase] as $keys
-          | ["head", ($lane | clean), ($keys | length | tostring), ([$entry | items("tickets") | clean] | join(" ")),
+          | ["head", ($lane | clean), ($keys | length | tostring),
              ($states.checked_at | numbers // 0 | floor | tostring), ($states.error | strings // "" | clean)] | join("\u001f"),
             ($order[] as $status
-             | [$keys[] | select((($prs[.] | objects | .status | strings | select(. as $known | $order | index($known))) // "unchecked") == $status)
-                | clean | (capture("^(?<repo>[^#]+/(?<name>[^#/]+))#(?<n>[0-9]+)$") // {repo: "", name: ., n: ""})
-                | if .n == "" then .name elif .repo == $here then "#\(.n)" else "\(.name)#\(.n)" end]
-             | select(length > 0) | ["group", $status, join(" ")] | join("\u001f"))
+             | $keys[] | select((($prs[.] | objects | .status | strings | select(. as $known | $order | index($known))) // "unchecked") == $status)
+             | clean | (capture("^(?<repo>[^#]+/(?<name>[^#/]+))#(?<n>[0-9]+)$") // {repo: "", name: ., n: ""})
+             | ["pr", $status, (if .n == "" then .name elif .repo == $here then "#\(.n)" else "\(.name)#\(.n)" end)] | join("\u001f"))
           end
     ' 2>/dev/null) || return 0
     [ -n "$rows" ] || return 0
-    local kind one two three four five name="$lane" count=0 tickets="" checked=0 error="" label_width=0
-    local -a labels=() colors=() lists=()
-    while IFS=$LB_SEP read -r kind one two three four five; do
+    local kind one two three four name="$lane" count=0 checked=0 error=""
+    local -a statuses=() tokens=()
+    while IFS=$LB_SEP read -r kind one two three four; do
         case "$kind" in
             unreadable)
                 printf '%blane   %b %b%s%b %b· %s is not valid: lane-own show says why%b\n' \
                     "$white" "$reset" "$magenta" "$one" "$reset" "$yellow" "${LANES_FILE##*/}" "$reset"
                 return 0
                 ;;
-            head) name="$one"; count="$two"; tickets="$three"; checked="$four"; error="$five" ;;
-            group)
-                lane_status_style "$one"
-                labels+=( "$LANE_LABEL" ); colors+=( "$LANE_COLOR" ); lists+=( "$two" )
-                [ "${#LANE_LABEL}" -gt "$label_width" ] && label_width=${#LANE_LABEL}
-                ;;
+            head) name="$one"; count="$two"; checked="$three"; error="$four" ;;
+            pr) statuses+=( "$one" ); tokens+=( "$two" ) ;;
         esac
     done <<< "$rows"
     case "$count" in ''|*[!0-9]*) count=0 ;; esac
     case "$checked" in ''|*[!0-9]*) checked=0 ;; esac
-    local plural="s"
+    local plural="s" warning=""
     [ "$count" = "1" ] && plural=""
-    printf '%blane   %b %b%s%b %b· %s PR%s%b' "$white" "$reset" "$magenta" "$name" "$reset" "$dim" "$count" "$plural" "$reset"
-    [ -n "$tickets" ] && printf ' %b·%b %b%s%b' "$dim" "$reset" "$cyan" "$tickets" "$reset"
     # The poll reads every 90s; a read this old, or none at all, means the poll or GitHub has stopped answering.
     if [ "$count" -gt 0 ] && [ "$checked" -gt 0 ] && [ $(( now - checked )) -gt 600 ]; then
-        printf ' %b·%b %bstates %s old%b' "$dim" "$reset" "$yellow" "$(remote_age_text "$(( now - checked ))")" "$reset"
+        warning="states $(remote_age_text "$(( now - checked ))") old"
     elif [ "$count" -gt 0 ] && [ "$checked" -eq 0 ] && [ -n "$error" ]; then
-        printf ' %b·%b %bstates never read: %s%b' "$dim" "$reset" "$yellow" "$error" "$reset"
+        warning="states never read: $error"
     fi
-    printf '\n'
-    local index text indent token start=$(( 9 + label_width ))
-    printf -v indent '%*s' "$start" ''
-    for index in "${!labels[@]}"; do
-        printf -v text '        %-*s' "$label_width" "${labels[$index]}"
-        for token in ${lists[$index]}; do
-            if [ "${#text}" -gt "$start" ] && [ $(( ${#text} + 1 + ${#token} )) -gt "$width" ]; then
-                printf '%b%s%b\n' "${colors[$index]}" "$text" "$reset"
-                text="${indent}${token}"
-            else
-                text+=" $token"
-            fi
-        done
-        printf '%b%s%b\n' "${colors[$index]}" "$text" "$reset"
+    local line piece plain
+    printf -v line '%blane   %b %b%s%b %b· %s PR%s%b' "$white" "$reset" "$magenta" "$name" "$reset" "$dim" "$count" "$plural" "$reset"
+    plain="lane    $name - $count PR$plural"
+    if [ -n "$warning" ]; then
+        printf -v piece ' %b·%b %b%s%b' "$dim" "$reset" "$yellow" "$warning" "$reset"
+        line+="$piece"
+        plain+=" - $warning"
+    fi
+    local index total=${#tokens[@]} rest more
+    if [ "$total" -gt 0 ]; then
+        printf -v piece ' %b·%b' "$dim" "$reset"
+        line+="$piece"
+        plain+=" -"
+    fi
+    for index in "${!tokens[@]}"; do
+        rest=$(( total - index - 1 ))
+        more=""
+        [ "$rest" -gt 0 ] && more=" +$rest more"
+        if [ $(( ${#plain} + 1 + ${#tokens[$index]} + ${#more} )) -gt "$width" ]; then
+            printf -v piece ' %b+%s more%b' "$dim" "$(( total - index ))" "$reset"
+            line+="$piece"
+            break
+        fi
+        lane_status_color "${statuses[$index]}"
+        printf -v piece ' %b%s%b' "$LANE_COLOR" "${tokens[$index]}" "$reset"
+        line+="$piece"
+        plain+=" ${tokens[$index]}"
     done
+    printf '%s\n' "$line"
 }
 
-# Sets LANE_LABEL and LANE_COLOR for a PR state, without a subshell per row.
-lane_status_style() {
-    LANE_LABEL="$1"
-    case "$1" in
-        failing) LANE_LABEL='checks failing' ;;
-        changes) LANE_LABEL='changes requested' ;;
-        running) LANE_LABEL='checks running' ;;
-        armed) LANE_LABEL='auto-merge on' ;;
-        missing) LANE_LABEL='not found' ;;
-        unchecked) LANE_LABEL='not read yet' ;;
-    esac
+# Sets LANE_COLOR for a PR state, without a subshell per PR.
+lane_status_color() {
     case "$1" in
         failing|conflicts|missing) LANE_COLOR="$red" ;;
         changes) LANE_COLOR="$orange" ;;
@@ -1633,7 +1632,7 @@ render_shared_account_snapshot() {
     lifetime_display=$(_shared_usage_fmt "${lifetime_tokens:-0}")
     _shared_emit "${white}%-7s${reset} %b" "usage" "${dim}today${reset} ${cyan}${today_display}${reset} ${dim}· session${reset} ${magenta}${session_display_fmt}${reset} ${dim}· lifetime${reset} ${green}${lifetime_display}${reset}"
 
-    # A lane's PRs and tickets, whatever branch its checkout is on: the laptop lanes all sit on main.
+    # A lane's PRs, whatever branch its checkout is on: the laptop lanes all sit on main.
     SESSION_LANE=$(session_lane "$TRANSCRIPT_PATH" "$SESSION_ID")
     LANE_CLAIMS=$(lane_claims)
     if [ -n "$SESSION_LANE" ]; then
@@ -1642,9 +1641,8 @@ render_shared_account_snapshot() {
             sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##' | tr '[:upper:]' '[:lower:]')
         case "$lane_width" in ''|*[!0-9]*|0) lane_width="${COLUMNS:-0}" ;; esac
         case "$lane_width" in ''|*[!0-9]*|0) lane_width=83 ;; esac
-        while IFS= read -r lane_line; do
-            [ -n "$lane_line" ] && _shared_emit '%b' "$lane_line"
-        done <<< "$(lane_block_lines "$SESSION_LANE" "$lane_repo" "$(( lane_width - 3 ))")"
+        lane_line=$(lane_row "$SESSION_LANE" "$lane_repo" "$(( lane_width - 3 ))")
+        [ -n "$lane_line" ] && _shared_emit '%b' "$lane_line"
     fi
 
     if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ] && [ "$snapshot_state" = "ready" ]; then

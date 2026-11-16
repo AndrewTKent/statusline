@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A lane's status line: the PRs and tickets the ownership list gives it, and the photon lanes it owns.
+# A lane's status line: one row with the PRs the ownership list gives it, and the photon lanes it owns.
 set -euo pipefail
 unset ACCOUNTS_ROUTED_LABEL ACCOUNTS_ROUTED_EMAIL ACCOUNTS_ROUTED_ORG_UUID ACCOUNTS_POLICY_SCOPE ACCOUNTS_ROUTER_STATE
 unset TMUX TMUX_PANE ITERM_SESSION_ID TERM_SESSION_ID REMOTE_JOBS_SHOW_ALL
@@ -44,7 +44,7 @@ printf '{"name":"photon","fetched_at":%s,"error":null,"up":true}\n' "$NOW" > "$T
 cat > "$TEST_HOME/.claude/statusline.conf" <<EOF
 SHARED_ACCOUNT_SNAPSHOT=1
 SHOW_ACCOUNT_RESETS=1
-MAX_COLS=60
+MAX_COLS=\${LANE_TEST_COLS:-60}
 EOF
 
 # The render path reads local files only: any of these called records itself.
@@ -55,10 +55,13 @@ for command_name in gh curl ssh python3; do
     chmod +x "$STUBS/$command_name"
 done
 
-render() {
+render_raw() {
     HOME="$TEST_HOME" PATH="$STUBS:$PATH" ACCOUNTS_ROUTED_LABEL=work STATUSLINE_STABLE_HEIGHT=0 \
-        bash "$SANDBOX/statusline.sh" < "$SANDBOX/input.json" | sed $'s/\033\\[[0-9;]*m//g; s/\033\\][^\a]*\a//g'
+        bash "$SANDBOX/statusline.sh" < "$SANDBOX/input.json"
 }
+render() { render_raw | sed $'s/\033\\[[0-9;]*m//g; s/\033\\][^\a]*\a//g'; }
+# The lane row, from its own margin; the renderer centers the block.
+lane_row() { sed -nE '/^ *lane /{s/^ *//;p;q;}'; }
 home_files() { find "$TEST_HOME" -type f -exec cksum {} + | sort; }
 
 # Synthetic ids: each PR is acme/app#<number> unless it names another repository.
@@ -69,7 +72,8 @@ cat > "$TEST_HOME/.accounts/lanes.json" <<JSON
 {"version": 1, "lanes": {
   "infra": {"prs": ["acme/app#101", "acme/app#102", "acme/app#103", "acme/app#104", "acme/app#105",
                     "acme/app#106", "acme/app#107", "acme/app#108", "acme/tools#7", "acme/app#109",
-                    "acme/app#111", "acme/app#112", "acme/app#113"],
+                    "acme/app#111", "acme/app#112", "acme/app#113", "acme/app#114", "acme/app#115",
+                    "acme/app#116", "acme/app#117", "acme/app#118", "acme/app#119"],
             "tickets": ["$TICKET_INFRA"], "photon": ["gate-watch"]},
   "agent": {"prs": ["acme/app#110"], "tickets": ["$TICKET_AGENT"], "photon": ["slug-to-agent"]}}}
 JSON
@@ -87,28 +91,54 @@ cat > "$TEST_HOME/.accounts/lane-prs.json" <<JSON
   "acme/app#111": {"state": "OPEN", "status": "conflicts"},
   "acme/app#112": {"state": "MISSING", "status": "missing"},
   "acme/app#113": {"state": "OPEN", "status": "a-state-this-version-does-not-know"},
+  "acme/app#114": {"state": "OPEN", "status": "changes"},
+  "acme/app#115": {"state": "OPEN", "status": "running"},
+  "acme/app#116": {"state": "OPEN", "status": "approved"},
+  "acme/app#117": {"state": "OPEN", "status": "armed"},
+  "acme/app#118": {"state": "OPEN", "status": "queued"},
+  "acme/app#119": {"state": "OPEN", "status": "draft"},
   "acme/app#110": {"state": "OPEN", "status": "approved"}}}
 JSON
 
-# A session named for a lane, on main, shows the lane, its PRs grouped by state and its tickets.
+# A session named for a lane, on main, shows one row: the lane, its PR count and its PRs, and no tickets.
 name_session infra
 before=$(home_files)
-infra=$(render)
+infra=$(LANE_TEST_COLS=61 render)
 [ "$(home_files)" = "$before" ] && [ ! -e "$SANDBOX/calls" ] || fail 'a lane render wrote under HOME or reached the network' "$(cat "$SANDBOX/calls" 2>/dev/null)"
-[[ "$infra" == *"lane    infra · 13 PRs · $TICKET_INFRA"* ]] || fail 'a lane on main did not name itself, its PR count and its ticket' "$infra"
-# The renderer centers the block; its rows are read from the lane row's own margin.
-block=$(awk '/^ *lane /{match($0, /^ */); pad = RLENGTH; on = 1; next} on && /^ {8}/{print substr($0, pad + 1); next} on{exit}' <<< "$infra")
-expected="        checks failing $(nums 102)
-        conflicts      $(nums 111)
-        open           $(nums 101 103 104 105 106 107 108)
-                       tools#7
-        not found      $(nums 112)
-        not read yet   $(nums 109 113)"
-[ "$block" = "$expected" ] || fail "a lane's PRs are not grouped most pressing first, named for their repo outside this one, and wrapped to the width" "$block"
+row=$(lane_row <<< "$infra")
+{ [[ "$row" == "lane    infra · 19 PRs · "* ]] && [[ "$infra" != *"$TICKET_INFRA"* ]] && [ "$(grep -oE '#[0-9]+' <<< "$infra" | wc -l)" = "$(grep -oE '#[0-9]+' <<< "$row" | wc -l)" ]; } ||
+    fail 'a lane on main did not name itself and its PR count on one row, or drew a ticket' "$infra"
+
+# PRs that do not fit the row's width collapse into a count; the row fills the width and goes no further.
+row=$(sed 's/·/./g' <<< "$row")
+width=$(( 61 - 3 ))
+last=$(grep -oE '[^ ]*#[0-9]+' <<< "$row" | tail -1)
+shown=$(grep -oE '[^ ]*#[0-9]+' <<< "$row" | wc -l | tr -d ' ')
+hidden=$(sed -nE 's/.* \+([0-9]+) more$/\1/p' <<< "$row")
+next_more=" +$(( ${hidden:-0} - 1 )) more"
+[ "${hidden:-0}" -gt 1 ] || next_more=""
+{ [ -n "$hidden" ] && [ $(( shown + hidden )) = 19 ] && [ "${#row}" -le "$width" ] &&
+  [ $(( ${#row} - ${#hidden} - 7 + 1 + ${#last} + ${#next_more} )) -gt "$width" ]; } ||
+    fail 'PRs past the width did not collapse into a count, or the row did not fill the width' "$row"
 
 # States the poll has not refreshed in ten minutes say how old they are.
 jq '.checked_at = '"$(( NOW - 1500 ))" "$TEST_HOME/.accounts/lane-prs.json" > "$SANDBOX/states" && cp "$SANDBOX/states" "$TEST_HOME/.accounts/lane-prs.json"
-[[ "$(render)" == *"· states 25m old"* ]] || fail 'states the poll stopped refreshing did not say how old they are' "$(render)"
+raw=$(LANE_TEST_COLS=200 render_raw | grep 'lane')
+row=$(sed $'s/\033\\[[0-9;]*m//g' <<< "$raw")
+[[ "$row" == *"· states 25m old"* ]] || fail 'states the poll stopped refreshing did not say how old they are' "$row"
+
+# Its PRs run most pressing first, and one outside this repository is named for its repository.
+expected="$(nums 102 111 114 115 116 101 103 104 105 106 107 108) tools#7 $(nums 117 118 119 112 109 113)"
+[ "${row##* · }" = "$expected" ] || fail "a lane's PRs are not most pressing first, or one elsewhere is not named for its repository" "$row"
+
+# Each PR is drawn in its state's color: red for what is broken, then orange, yellow, green, cyan, magenta, dim.
+red='255;85;85'; orange='255;176;85'; yellow='230;200;0'; green='0;175;80'; cyan='86;182;194'; magenta='180;140;255'; dim='220;220;220'
+for pair in "102 $red" "111 $red" "112 $red" "114 $orange" "115 $yellow" "116 $green" "117 $green" "101 $cyan" \
+            "118 $magenta" "119 $dim"; do
+    pattern=$'\033\\[38;2;([0-9;]+)m[^ \033]*#'"${pair%% *}"$'\033\\[0m'
+    [[ "$raw" =~ $pattern ]] && [ "${BASH_REMATCH[1]}" = "${pair#* }" ] ||
+        fail "PR #${pair%% *} is not drawn in its state's color" "$(cat -v <<< "$raw")"
+done
 
 # A PR read that has never succeeded says so.
 printf '{"version": 1, "checked_at": 0, "attempted_at": %s, "error": "GitHub read failed", "prs": {}}\n' "$NOW" > "$SANDBOX/never-read.json"
@@ -152,11 +182,11 @@ agent=$(render)
 [[ "$agent" != *"gate-watch"* ]] || fail "a photon lane with no sender that the list gives another lane showed here" "$agent"
 
 # One lane written wrong takes nothing from the others, and list text is printed as text.
-jq '.lanes.infra.prs = "acme/app#101" | .lanes.agent.tickets += ["AB\\cX-3"]' "$TEST_HOME/.accounts/lanes.json" > "$SANDBOX/lanes" &&
+jq '.lanes.infra.prs = "acme/app#101" | .lanes.agent.prs += ["AB\\cX-3"]' "$TEST_HOME/.accounts/lanes.json" > "$SANDBOX/lanes" &&
     cp "$TEST_HOME/.accounts/lanes.json" "$SANDBOX/lanes.good" && cp "$SANDBOX/lanes" "$TEST_HOME/.accounts/lanes.json"
 printf '{"prs": ' > "$TEST_HOME/.accounts/lane-prs.json"
 damaged=$(render)
-{ [[ "$damaged" == *"lane    agent · 1 PR · $TICKET_AGENT ABcX-3"* ]] && [[ "$damaged" == *"not read yet $(nums 110)"* ]]; } || fail "a wrong field in another lane, or a broken states file, took this lane's rows or claims" "$damaged"
+{ [[ "$damaged" == *"lane    agent · "* ]] && [[ "$damaged" == *"110 abcx-3"* ]]; } || fail "a wrong field in another lane, or a broken states file, took this lane's row or claims, or list text was not printed as text" "$damaged"
 printf '{"lanes": ' > "$TEST_HOME/.accounts/lanes.json"
 [[ "$(render)" == *"lane    agent · lanes.json is not valid"* ]] || fail 'a list that does not parse did not say so' "$(render)"
 cp "$SANDBOX/lanes.good" "$TEST_HOME/.accounts/lanes.json"
