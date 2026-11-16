@@ -295,19 +295,16 @@ files.
 ## Lanes
 
 A lane is a long-running session named for its work (`claude --name infra`, or
-`/rename infra` in a session started by hand). Its status line shows what the
-lane owns, whatever branch its checkout is on:
+`/rename infra` in a session started by hand). Its status line shows the lane
+and the PRs it owns on one row, whatever branch its checkout is on:
 
 ```
-lane    infra · 10 PRs · IRI-12283
-        checks failing #8371
-        approved       #8824 #8370 #8358 #8359 #8360 #6085 #8865
-        draft          #8184 #8185
+lane    agent · 29 PRs · #8882 #8879 #8878 #8877 #8680 #8594 #8593 #8283 #8218 #7188 +19 more
 ```
 
 - **The list is keyed by lane name**, in `~/.accounts/lanes.json`, so it outlives
   every relaunch, handoff and pane. A session with no name, or a name no lane in
-  the list has, shows no `lane` rows.
+  the list has, shows no `lane` row.
 - **An item has one owner.** `lane-own give <lane> <item>...` takes each item from
   whichever lane held it; `lane-own drop <item>...` takes it from every lane;
   `lane-own show [lane]` lists them. An item is a PR (`owner/repo#123`, its URL,
@@ -325,17 +322,19 @@ lane    infra · 10 PRs · IRI-12283
   once a PR no read has covered yet. States land in `~/.accounts/lane-prs.json`.
   A PR GitHub reads as merged or closed leaves the list. With no PR listed, no
   call is made.
-- **Each open PR shows under one state**, the first that holds, in this order:
-  `queued` (in the merge queue), `auto-merge on`, `draft`, `conflicts`,
-  `checks failing`, `changes requested`, `checks running`, `approved`, `open`.
-  The rows run in the order a lane acts on them: `checks failing`, `conflicts`,
-  `changes requested`, `checks running`, `approved`, `open`, `auto-merge on`,
-  `queued`, `draft`, then `not found` (GitHub has no such PR) and `not read yet`
-  (no read yet, or a state this version does not know).
-  A PR in the session's own repository reads `#123`; one elsewhere,
-  `<repo>#123`. Rows wrap at the status line's width.
-- **Tickets show by id.** Their Linear state is not read: the render path holds
-  no Linear login, and a read per render is what the poll exists to avoid.
+- **Each open PR has one state**, the first that holds, in this order: queued
+  (in the merge queue), auto-merge on, draft, conflicts, checks failing, changes
+  requested, checks running, approved, open.
+- **The row lists PRs in the order a lane acts on them**, each number in its
+  state's color: checks failing and conflicts (red), changes requested (orange),
+  checks running (yellow), approved (green), open (cyan), auto-merge on (green),
+  queued (magenta), draft (dim), then not found (red: GitHub has no such PR) and
+  not read yet (dim: no read yet, or a state this version does not know). Within
+  a state, PRs keep the list's order. A PR in the session's own repository reads
+  `#123`; one elsewhere, `<repo>#123`.
+- **The row never wraps.** PRs that don't fit the status line's width end it as
+  `+N more`; the ones cut are the least pressing. `lane-own show <lane>` lists
+  every PR with its state, and the lane's tickets, which the row doesn't draw.
 - **States the poll stopped refreshing say so**: `states 25m old` once the last
   successful read is more than ten minutes old, and `states never read: <why>`
   when no read has succeeded. `lane-own show` prints the last read's error.

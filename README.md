@@ -131,7 +131,7 @@ A machine that should never pin, such as a box of unattended sessions, sets `ACC
 
 A login lives on one machine. Claude's OAuth refresh rotates the refresh token, so two machines holding one login race: the first to refresh wins and the other is signed out. `accounts export` and `accounts import` therefore run only inside `accounts move`, which forgets the source; a second machine that needs the same account gets its own login with `accounts login --box`, a separate lineage on the same quota.
 
-A session named for a lane (`claude --name infra`, or `/rename infra`) shows what that lane owns: its open PRs grouped by state, its tickets, and the unattended jobs working them. `lane-own give infra meetsol/iris#8987 IRI-12283` hands items to a lane.
+A session named for a lane (`claude --name infra`, or `/rename infra`) shows that lane and its open PRs on one row, most pressing first and colored by state, and the unattended jobs working them. `lane-own give infra meetsol/iris#8987 IRI-12283` hands items to a lane.
 
 Reference: [docs/accounts.md](docs/accounts.md) (all commands, Codex setup, the overage guard, Fable fallback, remote boards, unattended jobs, lanes, the handoff notice).
 
