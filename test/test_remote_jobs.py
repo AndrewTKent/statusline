@@ -413,6 +413,52 @@ class TestState:
         assert only_job(remote_jobs.build(2000.0))["state"] == "done"
 
 
+SENT_AT = 1000  # write_job's
+JUST_SENT = SENT_AT + 30
+PAST_LAUNCH = SENT_AT + remote_jobs.LAUNCH_WINDOW_S
+
+
+class TestStarting:
+    def test_a_lane_just_sent_with_no_session_yet_is_starting(self, box):
+        write_job(box)
+
+        assert only_job(remote_jobs.build(JUST_SENT))["state"] == "starting"
+
+    def test_a_lane_just_sent_whose_session_runs_nothing_yet_is_starting(self, box, monkeypatch):
+        write_job(box)
+        live(monkeypatch, "demo")
+
+        assert only_job(remote_jobs.build(JUST_SENT))["state"] == "starting"
+
+    def test_a_lane_with_no_session_past_the_launch_window_is_gone(self, box):
+        write_job(box)
+
+        assert only_job(remote_jobs.build(PAST_LAUNCH))["state"] == "gone"
+
+    def test_a_lane_seen_with_its_session_that_then_has_none_is_gone_at_once(self, box, monkeypatch):
+        write_job(box)
+        live(monkeypatch, "demo")
+        write_router_state(box, "s-1")
+        remote_jobs.write_atomic(box / "handoffs" / "jobs.json", remote_jobs.build(SENT_AT + 5))
+        live(monkeypatch)
+
+        assert only_job(remote_jobs.build(JUST_SENT))["state"] == "gone"
+
+    def test_a_lane_sent_again_has_not_started_until_a_session_is_listed_for_the_new_send(self, box):
+        write_job(box)
+        published(box, state="stopped", started=SENT_AT - 500)
+
+        assert only_job(remote_jobs.build(JUST_SENT))["started"] == 0
+
+    def test_a_failed_tmux_read_of_a_lane_just_sent_is_unknown(self, box, monkeypatch):
+        write_job(box)
+        fail_read(box, monkeypatch, "tmux")
+
+        row = only_job(remote_jobs.build(JUST_SENT))
+
+        assert (row["state"], row["reads_failed"]) == ("unknown", ["tmux"])
+
+
 LAST_PUBLISH = {
     "state": "held", "held_until": 5000, "queue_position": 0, "after": "", "quota": {},
     "account": "team-2", "handoffs": 4, "handoffs_last_hour": 3, "stale_since": 0,

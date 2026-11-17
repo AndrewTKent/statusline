@@ -300,6 +300,11 @@ files.
   box out of memory, the row keeps its last state, dimmed, with `reads failing 3m`
   saying for how long, or `unknown` when the board has no last state the reads
   that did answer allow. A lane reads `gone` only from a tmux read that answered.
+- **A lane just sent reads `starting`, not `gone`.** The sender writes the
+  lane's `job.json` before it starts the lane's tmux session, so for its first
+  five minutes a lane no publish has yet seen a session for reads `starting`.
+  Once a publish has listed its session, a lane whose session ends reads `gone`
+  at once, and one sent again under the same name starts over.
 - **A job's router is found by its tmux pane, not its directory.** A router, or
   a Codex process, belongs to a job when its pid descends from a pane of the
   tmux session named for the job's slug. A session that `cd`s into another repo

@@ -3610,7 +3610,7 @@ def remote_job_lines(
     lines = []
     for name, job in (board.get("jobs") or {}).items():
         state = job.get("state", "")
-        if state not in {"running", "held", "queued", "waiting", "prompt", "unknown"} and job.get("updated_at", 0) < now - 1800:
+        if state not in {"starting", "running", "held", "queued", "waiting", "prompt", "unknown"} and job.get("updated_at", 0) < now - 1800:
             continue
         origin_session, origin_pane = job.get("origin_session"), job.get("origin_pane")
         mine = bool(thread_id and origin_session == thread_id) or bool(pane_id and origin_pane == pane_id)

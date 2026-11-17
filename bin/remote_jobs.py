@@ -46,6 +46,10 @@ PR_FIELDS = (
     f" comments(last: 20) {{ nodes {{ {POST_FIELDS} createdAt }} }}"
 )
 REPORT_STATES = {"status: blocked": "blocked", "status: stopped": "stopped"}
+# The sender writes job.json, then starts the lane's tmux session in a second ssh call that may take 20s
+# to connect, and the launcher in it runs nothing a publish can see for a moment more. Until this long
+# after sent_at, a lane no publish has listed a session for is starting, not gone.
+LAUNCH_WINDOW_S = 300
 HANDOFF_WINDOW_S = 3600
 # A move or two an hour is the router riding account walls; a third means it is bouncing between walled accounts.
 HANDOFF_CHURN_MAX = 2
@@ -779,6 +783,9 @@ def job_row(directory: Path, machine: Machine, previous: dict, now: float) -> di
         failed.add("router")
     router = machine.routers.get(slug, {})
     queued = slug in machine.queue
+    sent_at = as_int(job.get("sent_at"))
+    # A lane sent again under the same slug starts over: only this send's session counts.
+    started = bool(sent_at) and as_int(previous.get("started")) == sent_at
     # None until a read settles it: a report that could not be read leaves it there.
     state = report
     if report is None and "report" not in failed:
@@ -791,6 +798,8 @@ def job_row(directory: Path, machine: Machine, previous: dict, now: float) -> di
             if state == "running":
                 pane = attempt(failed, "pane", lambda: pane_state(slug), "")
                 state = None if failed else "prompt" if pane == "prompt" else state
+    if state == "gone" and not started and now - sent_at < LAUNCH_WINDOW_S:
+        state = "starting"
     if state == "waiting" and quota:
         quota["resumes_at"] = earliest_reset(quota["walled"], now)
     else:
@@ -811,7 +820,8 @@ def job_row(directory: Path, machine: Machine, previous: dict, now: float) -> di
         "origin_session": str(job.get("origin_session") or ""),
         "origin_pane": str(job.get("origin_pane") or ""),
         "origin_lane": str(job.get("origin_lane") or ""),
-        "sent_at": as_int(job.get("sent_at")),
+        "sent_at": sent_at,
+        "started": sent_at if started or slug in machine.panes else 0,
         "updated_at": last_change(directory, session),
         "handoffs": as_int(router.get("handoffs")),
         "handoffs_last_hour": recent_handoffs(router, now),

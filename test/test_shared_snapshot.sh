@@ -395,6 +395,11 @@ cat > "$REMOTE_ROOT_DIR/devbox/jobs.json" <<JSON
       "account": "", "origin_session": "another-session", "sent_at": $(( NOW - 90000 )),
       "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
     },
+    "starting-job": {
+      "state": "starting", "branch": "andrew/starting", "head": "",
+      "account": "", "origin_session": "", "sent_at": $(( NOW - 30 )),
+      "updated_at": $(( NOW - 7200 )), "handoffs": 0, "report": false, "workflows": []
+    },
     "old-job": {
       "state": "done", "branch": "andrew/old", "head": "9abcdef",
       "account": "team-2", "origin_session": "", "sent_at": $(( NOW - 90000 )),
@@ -444,7 +449,8 @@ colored_jobs_output=$(KEEP_COLORS=1 REMOTE_JOBS_SHOW_ALL=1 render_with_boards)
 [[ "$(printf '%s\n' "$colored_jobs_output" | grep 'carried panel')" == *$'\033[38;2;220;220;220m1/3'* ]] \
     || { printf 'a workflow carried from the last read rendered as a live one\n' >&2; exit 1; }
 [[ "$all_jobs_output" =~ unknown-job\ +unknown ]] || { printf 'a lane whose state the box has never read aged off the status line\n' >&2; exit 1; }
-[[ "$jobs_output" =~ prompt-job\ +prompt ]] || { printf 'a lane stopped at a dialog, which writes nothing, aged off the status line\n' >&2; exit 1; }
+[[ "$jobs_output" =~ starting-job\ +starting ]] || { printf 'a lane that is starting aged off the status line like a finished one\n' >&2; exit 1; }
+[[ "$jobs_output" =~ prompt-job\ +prompt ]] ||{ printf 'a lane stopped at a dialog, which writes nothing, aged off the status line\n' >&2; exit 1; }
 [[ "$jobs_output" == *"stuck panel"*"1/2 agents"* ]] || { printf "a lane at a prompt hid its running workflow\n" >&2; exit 1; }
 [[ "$(printf '%s\n' "$colored_jobs_output" | grep prompt-job)" == *$'\033[38;2;255;85;85mprompt'* ]] || { printf 'a lane stopped at a dialog did not render its state in red\n' >&2; exit 1; }
 # 20 characters, the widest name on either board: a held job sizes the column like a running one.
