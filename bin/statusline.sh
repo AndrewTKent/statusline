@@ -3112,8 +3112,11 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
             _best_five=""
             _best_fable=""
             _best_label=""
+            _best_group=""
             printf -v _rate_cap_rank '%020.12f' 80
+            printf -v _weekly_cap_rank '%020.12f' 90
             printf -v _fable_cap_rank '%020.12f' 100
+            read -r -a _route_patterns <<< "${ACCOUNTS_ROUTE_ORDER:-}"
             while IFS='|' read -r em uuid tag ep pct pct_state seven_day_iso weekly_pct_ledger fbl_iso fable_pct_ledger last_seen_ts; do
                 [ -z "$em" ] && continue
                 # Match the active account on (email, org_uuid). Legacy ledger
@@ -3184,6 +3187,9 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
                 five_rank=""
                 if [ "$five_known" = "1" ]; then
                     printf -v five_rank '%020.12f' "$pct_disp"
+                elif [ "${last_seen_ts:-0}" != "0" ]; then
+                    # A poll that reports no five-hour figure means the plan has no such limit.
+                    printf -v five_rank '%020.12f' 0
                 fi
                 pct_int=$(printf "%.0f" "$pct_disp" 2>/dev/null || echo 0)
                 pct_color=$(color_for_pct "$pct_int")
@@ -3396,7 +3402,7 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
                 #   (blank)      — unremarkable
                 note=""
                 binding_rank="$five_rank"
-                if [ "$five_known" = "1" ] && [ "$weekly_known" = "1" ] &&
+                if [ -n "$five_rank" ] && [ "$weekly_known" = "1" ] &&
                    _account_rank_precedes "$binding_rank" "$weekly_rank"; then
                     binding_rank="$weekly_rank"
                 fi
@@ -3423,7 +3429,7 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
                            ! _account_rank_precedes "$fable_rank" "$_fable_cap_rank"; then
                             candidate_eligible=0
                         fi
-                    elif [ "$five_known" = "0" ] || [ "$weekly_known" = "0" ] ||
+                    elif [ -z "$five_rank" ] || [ "$weekly_known" = "0" ] ||
                          ! _account_rank_precedes "$five_rank" "$_rate_cap_rank" ||
                          ! _account_rank_precedes "$weekly_rank" "$_rate_cap_rank"; then
                         candidate_eligible=0
@@ -3431,10 +3437,27 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
                 fi
 
                 if [ "$is_current" = "0" ] && [ "$candidate_eligible" = "1" ]; then
+                    # The router's ACCOUNTS_ROUTE_ORDER group; one past its ceilings goes last.
+                    route_group=${#_route_patterns[@]}
+                    if [ -n "$five_rank" ] && [ "$weekly_known" = "1" ] &&
+                       _account_rank_precedes "$five_rank" "$_rate_cap_rank" &&
+                       _account_rank_precedes "$weekly_rank" "$_weekly_cap_rank"; then
+                        for _i in "${!_route_patterns[@]}"; do
+                            if [[ "$tag" == ${_route_patterns[$_i]} ]]; then
+                                route_group=$_i
+                                break
+                            fi
+                        done
+                    fi
                     candidate_is_better=0
                     compare_general_rank=1
                     if [ -z "$_best_key" ]; then
                         candidate_is_better=1
+                        compare_general_rank=0
+                    elif [ "$route_group" -lt "$_best_group" ]; then
+                        candidate_is_better=1
+                        compare_general_rank=0
+                    elif [ "$route_group" -gt "$_best_group" ]; then
                         compare_general_rank=0
                     elif [ "$_route_mode" = "fable" ] &&
                          _account_rank_precedes "$fable_rank" "$_best_fable"; then
@@ -3466,6 +3489,7 @@ if [ "${SHOW_ACCOUNT_RESETS:-0}" = "1" ]; then
                         _best_five="$five_rank"
                         _best_fable="${fable_rank:-}"
                         _best_label="$tag"
+                        _best_group="$route_group"
                     fi
                 fi
 

@@ -3228,6 +3228,48 @@ def test_fallback_model_env_override_reaches_the_flag(monkeypatch):
     assert claude_router.option_value(launches[0][0], "--fallback-model") == "sonnet"
 
 
+@pytest.mark.parametrize(
+    ("args", "rendered", "near_wall"),
+    [([], "Opus 5", True), (["--model", "fable"], "Fable 5", False)],
+)
+def test_a_handoff_lands_on_the_account_handoff_target_chose(
+    monkeypatch, args, rendered, near_wall
+):
+    # Under a route order the unforced pick can be a max account that buys too little
+    # runway; the move goes to the target or nowhere.
+    session_id = str(uuid.uuid4())
+    launches, handoffs, _polls = _fallback_harness(
+        monkeypatch, session_id, {"mode": "auto", "label": None}, ticks=3
+    )
+    team = {"profile": "/p/team", "label": "team", "email": "team@x", "org_uuid": "o3"}
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "select_profile",
+        lambda **kw: team if kw.get("force_label") == "team" else (
+            SECOND if kw.get("avoid_labels") else FIRST
+        ),
+    )
+    monkeypatch.setattr(
+        claude_router.accounts,
+        "handoff_target",
+        lambda label, **_kw: "team" if label == "first" else None,
+    )
+    monkeypatch.setattr(claude_router.accounts, "profile_near_wall", lambda label: near_wall)
+    monkeypatch.setattr(
+        claude_router,
+        "read_router_state",
+        lambda _p: {"session_id": session_id, "model": rendered},
+    )
+
+    assert claude_router.run_supervised("/real/claude", args) == 0
+
+    assert [launch[1]["env"]["ACCOUNTS_ROUTED_LABEL"] for launch in launches] == [
+        "first",
+        "team",
+    ]
+    assert len(handoffs) == 1
+
+
 def test_board_polled_fable_exhaustion_on_the_current_account_keeps_the_child_running(
     monkeypatch,
 ):

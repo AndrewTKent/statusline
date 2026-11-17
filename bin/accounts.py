@@ -521,6 +521,35 @@ def excluded_labels() -> set[str]:
     return set(raw.split())
 
 
+def route_order() -> list[str]:
+    """Label patterns from ACCOUNTS_ROUTE_ORDER, the group routed first leading; empty when unset."""
+    raw = _conf_var("ACCOUNTS_ROUTE_ORDER")
+    return raw.split()
+
+
+def route_group(row: dict, order: list[str]) -> int:
+    """Index of the first pattern the row's label matches. A label that matches none, or an
+    account past the ceilings for receiving work, goes after them all."""
+    if not _rate_eligible(row["five_hour"], row["seven_day"]):
+        return len(order)
+    return next(
+        (index for index, pattern in enumerate(order) if fnmatch.fnmatchcase(row["label"], pattern)),
+        len(order),
+    )
+
+
+def in_route_order(rows: list[dict], order: list[str] | None = None) -> list[dict]:
+    """ROWS grouped by the route order, keeping their order within a group."""
+    order = route_order() if order is None else order
+    return sorted(rows, key=lambda row: route_group(row, order))
+
+
+def describe_route_order(order: list[str]) -> str:
+    if not order:
+        return "most headroom first"
+    return f"{' → '.join([*order, 'rest'])}, most headroom first within each"
+
+
 def declared_labels(blobs: dict | None = None) -> set[str]:
     if blobs is None:
         blobs = load_blobs()
@@ -2385,6 +2414,7 @@ def rank_profile_rows(
     rows: list[dict],
     *,
     require_fable: bool = False,
+    order: list[str] | None = None,
 ) -> list[dict]:
     def score(row: dict) -> tuple:
         if require_fable:
@@ -2395,7 +2425,7 @@ def rank_profile_rows(
             row["label"],
         )
 
-    return sorted(rows, key=score)
+    return in_route_order(sorted(rows, key=score), order)
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -2941,10 +2971,12 @@ def cmd_tokens(_args) -> None:
         print(f"  {label:<12} minted {datetime.fromtimestamp(e.get('minted_at', 0)).date()}  {state}")
 
 
-def _fable_first(rows: list[dict]) -> list[dict]:
+def _fable_first(rows: list[dict], order: list[str] | None = None) -> list[dict]:
+    order = route_order() if order is None else order
+
     def key(r: dict) -> tuple:
         if fable_eligible(r["five_hour"], r["seven_day"], r["fable"]):
-            return (0, *_fable_rank(r))
+            return (0, route_group(r, order), *_fable_rank(r))
         return (1,)
 
     return sorted(rows, key=key)
@@ -3160,12 +3192,14 @@ def _select_profile_once(
                 not ignore_policy and mode.get("mode") == "fable"
             )
         leases = load_session_leases()
+        order = route_order()
         rows = rank_profile_rows(
             rows,
             require_fable=prefer_fable,
+            order=order,
         )
         if prefer_fable and not require_fable:
-            rows = _fable_first(rows)
+            rows = _fable_first(rows, order)
         excludes = excluded_labels() | avoid_labels
         accounts_map = blobs.get("accounts") or {}
         dirty = False
@@ -3362,10 +3396,12 @@ def handoff_target(
     try:
         blobs = load_blobs()
         mode, pin, force_pin = _route_preferences()
+        order = route_order()
         rows = route_rows(blobs, current_label, time.time())
         rows = rank_profile_rows(
             rows,
             require_fable=require_fable,
+            order=order,
         )
         excludes = excluded_labels()
         current = next(
@@ -3392,25 +3428,39 @@ def handoff_target(
             # and the walled row often ranks first, so it must not pick itself.
             margin_pct = max(margin_pct, HANDOFF_MARGIN_PCT)
             excludes = excludes | {current_label}
-        target = pick_profile_route(
-            rows,
-            excludes,
-            pin,
-            require_fable=require_fable,
-            force_pin=force_pin,
-        )
-        if target is None or target == current_label:
-            return None
-        if margin_pct > 0.0 and current is not None:
+
+        def buys_margin(target: str) -> bool:
+            if margin_pct <= 0.0 or current is None:
+                return True
             chosen = next((row for row in rows if row["label"] == target), None)
             if chosen is None:
-                return None
+                return False
             gain = binding_pct(current["five_hour"], current["seven_day"]) - binding_pct(
                 chosen["five_hour"], chosen["seven_day"]
             )
-            if gain < margin_pct:
+            return gain >= margin_pct
+
+        # The first group with an account that can take the session decides, unless that
+        # account buys too little runway; then a later group gets its turn.
+        groups = [rows] if pin is not None else [
+            [row for row in rows if route_group(row, order) == group]
+            for group in range(len(order) + 1)
+        ]
+        for group in groups:
+            target = pick_profile_route(
+                group,
+                excludes,
+                pin,
+                require_fable=require_fable,
+                force_pin=force_pin,
+            )
+            if target is None:
+                continue
+            if target == current_label:
                 return None
-        return target
+            if buys_margin(target):
+                return target
+        return None
     except Exception:
         return None
 
@@ -3543,7 +3593,7 @@ def cmd_auto(_args) -> None:
     rows = [
         row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels
     ]
-    pick = pick_profile_route(rows, excluded_labels(), None)
+    pick = pick_profile_route(in_route_order(rows), excluded_labels(), None)
     save_mode("auto", None)
     print("AUTO — supervised sessions use the freshest safe account")
     print(f"  next: {pick or '(none free)'}")
@@ -3557,6 +3607,8 @@ def cmd_fable(_args) -> None:
         row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels
     ]
     excludes = excluded_labels()
+    order = route_order()
+    rows = in_route_order(rows, order)
     usable = sorted(
         (
             r
@@ -3565,7 +3617,7 @@ def cmd_fable(_args) -> None:
             and not r["expired"]
             and fable_eligible(r["five_hour"], r["seven_day"], r["fable"])
         ),
-        key=_fable_rank,
+        key=lambda r: (route_group(r, order), *_fable_rank(r)),
     )
     save_mode("fable", None)
     print("FABLE — supervised sessions switch to Fable when headroom is available")
@@ -3710,9 +3762,11 @@ def cmd_status(_args) -> None:
         capture_live_to_blobs(blobs)
         blocked_labels = sync_profile_credentials(blobs, persist=True)
     mode = load_mode()
-    rows = [
-        row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels
-    ]
+    order = route_order()
+    rows = in_route_order(
+        [row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels],
+        order,
+    )
     excludes = excluded_labels()
     if mode["mode"] == "set":
         scope = "PANE" if mode.get("policy_scope") == "pane" else "SET"
@@ -3722,7 +3776,7 @@ def cmd_status(_args) -> None:
         force_pin = True
     elif mode["mode"] == "fable":
         tag = "FABLE"
-        ordered = _fable_first(rows)
+        ordered = _fable_first(rows, order)
         pin = None
         force_pin = False
     else:
@@ -3747,6 +3801,7 @@ def cmd_status(_args) -> None:
         f"mode: {tag}   general: {next_general or '(none free)'}"
         f"   fable: {next_fable or '(none free)'}"
     )
+    print(f"order: {describe_route_order(order)}")
     for r in rows:
         if not r.get("five_hour_limited", True):
             pct = "none"

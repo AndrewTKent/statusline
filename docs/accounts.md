@@ -74,7 +74,7 @@ count the status line shows.
 | `accounts pane clear` | Return the current pane to the global policy |
 | `accounts auto` | Clear global and pane pins, then route supervised sessions to the freshest account |
 | `accounts fable` | Switch live supervised sessions to Fable while headroom is available |
-| `accounts status` | Mode + per-account 5h/7d/Fable headroom + ⚠login flags |
+| `accounts status` | Mode, the route order, per-account 5h/7d/Fable headroom + ⚠login flags |
 | `accounts schedule` | List the board schedule's windows and what the board shows now |
 | `accounts schedule add <days> [HH:MM-HH:MM] [--show all\|<label,...>]` | Add a window: days such as `sat,sun` or `mon-fri`, hours in the board's zone (all day when omitted), and the local accounts it shows (`all` by default). The first window holding the current day and time decides the board; outside every window `ACCOUNTS_HIDE_OTHERS` and `ACCOUNTS_HIDE` apply |
 | `accounts schedule remove <n>` / `accounts schedule clear` | Remove one window, or all of them |
@@ -140,6 +140,51 @@ restarts the session.
 Minted long-lived tokens remain outside `~/.claude`
 (`~/.accounts/vault.json`); archival copies only session JSONLs from
 `~/.claude/projects`.
+
+## Which accounts take work first
+
+`ACCOUNTS_ROUTE_ORDER` in `~/.claude/statusline.conf` names the accounts the
+router spends first, as label patterns, the group routed first leading. It is
+read on this machine only, at every launch and handoff. Unset, every account is
+in one group and the router sends work to the account with the most headroom, as
+it always has.
+
+Andrew, 2026-11-16 3:28pm PST: "max accounts should be burned down first",
+"before team accounts". A machine with both kinds sets:
+
+```bash
+ACCOUNTS_ROUTE_ORDER="acme-max*"
+```
+
+- **Groups.** A label joins the group of the first pattern it matches
+  (shell-style `*`, `?` and `[...]`, case-sensitive). A label no pattern matches
+  goes in a last group, after them all.
+- **Only an account that can take the work is ranked by its group:** under 80%
+  of its five-hour window and under 90% of its week, the same ceilings a row
+  must clear to receive work without the order. A plan with no five-hour limit,
+  such as Max, counts as 0% there, so only its week limits it. An account past
+  either ceiling goes in the last group, so a nearly spent account is never
+  chosen for its group alone.
+- **A new session** goes to the first group with an account that can take the
+  work. Within a group, most headroom first.
+- **A handoff** off an account at its 90% departure wall goes to the first group
+  whose best account can take the work and buys the 15-point handoff margin. A
+  group whose best account can't falls through to the next.
+- **No account under those ceilings:** the last resort takes the most runway
+  under the 97% hard wall, as it does without the order.
+- **Fable.** A Fable session goes to the first group with Fable headroom, lowest
+  Fable use first within it, and Fable mode's preference ranks the same way.
+- **A running session is never moved because an earlier group has room.** It
+  moves only at its departure wall, its Fable wall or a pin, as before. Once the
+  first group is spent and work spills to the next, sessions there stay until
+  their own wall; new sessions go back to the first group as soon as one of its
+  accounts can take work again, such as after its weekly reset.
+- **A pin outranks the order** (`accounts set`, `accounts pane set`,
+  `ACCOUNTS_PIN`).
+- `accounts status` prints the order in force, for example
+  `order: acme-max* → rest, most headroom first within each`, and lists the
+  accounts in that order. The status line's `✓ best next` marker follows it
+  too.
 
 ## Naming this machine
 

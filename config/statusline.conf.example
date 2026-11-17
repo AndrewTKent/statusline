@@ -106,6 +106,16 @@
 # pin already stored, global or per pane, and ACCOUNTS_PIN. On by default.
 # ACCOUNTS_PINS=0
 
+# The accounts that take work first, as label patterns, the group routed first
+# leading; an account no pattern matches, or one past its ceilings (80%
+# five-hour, 90% weekly), goes last. A new session or a handoff goes to the first
+# group with an account that can take it, most headroom first within a group; a
+# running session is not moved because an earlier group has room. Unset, routing
+# goes by headroom alone.
+# Andrew, 2026-11-16 3:28pm PST: "max accounts should be burned down first",
+# "before team accounts".
+# ACCOUNTS_ROUTE_ORDER="acme-max*"
+
 # ─── Remote account boards ─────────────────────────────────────────────────
 # Show another machine's account board under this one's. That machine runs the
 # same router and polls its own accounts; `accounts poll` here copies the two
