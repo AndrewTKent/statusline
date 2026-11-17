@@ -1475,6 +1475,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                                 avoid_labels={selected["label"]},
                                 require_fable=True,
                                 lease_pid=plan_lease_pid,
+                                force_label=target,
                             )
                             if (
                                 next_profile is None
@@ -1538,6 +1539,7 @@ def run_supervised(binary: str, args: list[str]) -> int:
                             avoid_labels={selected["label"]},
                             require_fable=False,
                             lease_pid=plan_lease_pid,
+                            force_label=target,
                         )
                         if next_profile is None or next_profile["label"] != target:
                             continue

@@ -1107,6 +1107,182 @@ class TestHandoffTarget:
         ) == "barely"
 
 
+class TestRouteOrder:
+    """A route order that sends work to max-b before the team accounts."""
+
+    ORDER = ["max-b"]
+
+    def _board(self, tmp_path, monkeypatch, rows, *, mode="auto", from_conf=False, resets=None):
+        blobs = {
+            "accounts": {
+                row["label"]: {
+                    "blob": _live_blob(row["label"]),
+                    "email": f"{row['label']}@x",
+                    "org_uuid": f"org-{row['label']}",
+                }
+                for row in rows
+            }
+        }
+        if from_conf:
+            monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+            accounts.CONF_PATH.write_text('ACCOUNTS_ROUTE_ORDER="max-*"\n')
+        else:
+            monkeypatch.setattr(accounts, "route_order", lambda: list(self.ORDER))
+        monkeypatch.setattr(accounts, "locked", lambda blocking=True: nullcontext())
+        monkeypatch.setattr(accounts, "load_blobs", lambda: blobs)
+        monkeypatch.setattr(accounts, "capture_live_to_blobs", lambda _blobs: None)
+        monkeypatch.setattr(
+            accounts, "sync_profile_credentials", lambda *_args, **_kwargs: set()
+        )
+        monkeypatch.setattr(accounts, "load_mode", lambda: {"mode": mode, "label": None})
+        monkeypatch.setattr(accounts, "save_mode", lambda *_args: None)
+        if resets is None:
+            monkeypatch.setattr(accounts, "route_rows", lambda *_args: list(rows))
+        else:
+            monkeypatch.setattr(accounts, "load_resets", lambda: resets)
+            monkeypatch.setattr(accounts, "load_session_limits", lambda _now: {})
+        monkeypatch.setattr(accounts, "load_session_leases", lambda *_args: [])
+        monkeypatch.setattr(accounts, "verify_entry_auth", lambda *_args: "ok")
+        monkeypatch.setattr(
+            accounts, "ensure_native_profile", lambda label, _entry: tmp_path / label
+        )
+        monkeypatch.setattr(accounts, "excluded_labels", set)
+        monkeypatch.delenv("ACCOUNTS_PIN", raising=False)
+
+    def test_a_new_session_goes_to_a_week_only_max_account_with_less_headroom(
+        self, tmp_path, monkeypatch
+    ):
+        # A max plan reports no five-hour figure; only its week limits it.
+        polled = time.time()
+        self._board(
+            tmp_path,
+            monkeypatch,
+            [{"label": "team-a"}, {"label": "max-b"}],
+            from_conf=True,
+            resets={
+                "team-a@x|org-team-a": {
+                    "five_hour_pct": 5.0, "seven_day_pct": 60.0, "last_seen": polled,
+                },
+                "max-b@x|org-max-b": {
+                    "five_hour_pct": None, "seven_day_pct": 65.0, "last_seen": polled,
+                },
+            },
+        )
+
+        assert accounts.select_profile()["label"] == "max-b"
+
+    def test_a_max_account_at_its_weekly_ceiling_yields_to_a_team_account(self):
+        rows = accounts.rank_profile_rows(
+            [
+                accounts_row("team-a", 5.0, seven_day=60.0),
+                accounts_row("max-b", 0.0, seven_day=accounts.SEVEN_DAY_CAP_PCT),
+            ],
+            order=self.ORDER,
+        )
+
+        assert accounts.pick_profile_route(rows, set(), None) == "team-a"
+
+    def test_a_fable_session_takes_the_first_group_with_fable_headroom(self):
+        rows = accounts.rank_profile_rows(
+            [
+                accounts_row("team-a", 5.0, seven_day=10.0, fable=5.0),
+                accounts_row("max-b", 5.0, seven_day=10.0, fable=60.0),
+            ],
+            require_fable=True,
+            order=self.ORDER,
+        )
+
+        assert accounts.pick_profile_route(rows, set(), None, require_fable=True) == "max-b"
+
+    def test_a_fable_session_skips_a_max_account_past_its_rate_ceiling(self):
+        rows = accounts.rank_profile_rows(
+            [
+                accounts_row("team-a", 10.0, seven_day=10.0, fable=10.0),
+                accounts_row("max-b", 85.0, seven_day=10.0, fable=50.0),
+            ],
+            require_fable=True,
+            order=self.ORDER,
+        )
+
+        assert accounts.pick_profile_route(rows, set(), None, require_fable=True) == "team-a"
+
+    def test_fable_mode_prefers_fable_headroom_within_the_order(self):
+        rows = [
+            accounts_row("team-a", 5.0, seven_day=10.0, fable=5.0),
+            accounts_row("max-b", 5.0, seven_day=10.0, fable=60.0),
+        ]
+
+        assert accounts._fable_first(rows, self.ORDER)[0]["label"] == "max-b"
+
+    def test_a_walled_session_skips_a_max_account_that_buys_too_little_runway(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            [
+                accounts_row("team-a", 93.0, seven_day=10.0),
+                accounts_row("max-b", accounts.RATE_CAP_PCT - 1.0, seven_day=10.0),
+                accounts_row("team-c", 5.0, seven_day=5.0),
+            ],
+        )
+
+        assert accounts.handoff_target(
+            "team-a",
+            require_fable=False,
+            margin_pct=accounts.HANDOFF_MARGIN_PCT,
+        ) == "team-c"
+
+    def test_a_session_on_a_max_account_that_can_take_work_stays(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            [
+                accounts_row("max-b", 60.0, seven_day=10.0),
+                accounts_row("team-a", 5.0, seven_day=5.0),
+            ],
+        )
+
+        assert accounts.handoff_target("max-b", require_fable=False) is None
+
+    @pytest.mark.parametrize(
+        ("command", "mode", "fable", "shown"),
+        [
+            (accounts.cmd_status, "auto", (5.0, 60.0), "general: max-b"),
+            (accounts.cmd_auto, "auto", (5.0, 60.0), "next: max-b"),
+            (accounts.cmd_fable, "fable", (5.0, 60.0), "next: max-b"),
+            # No Fable headroom anywhere: `accounts fable` names the general pick.
+            (accounts.cmd_fable, "fable", (100.0, 100.0), "next max-b"),
+        ],
+    )
+    def test_the_commands_name_the_account_the_order_picks(
+        self, tmp_path, monkeypatch, capsys, command, mode, fable, shown
+    ):
+        team_fable, max_fable = fable
+        self._board(
+            tmp_path,
+            monkeypatch,
+            [
+                accounts_row("team-a", 5.0, seven_day=10.0, fable=team_fable),
+                accounts_row("max-b", 60.0, seven_day=10.0, fable=max_fable),
+            ],
+            mode=mode,
+        )
+
+        command(types.SimpleNamespace())
+
+        assert shown in capsys.readouterr().out
+
+    def test_status_shows_the_order_in_force(self, tmp_path, monkeypatch, capsys):
+        self._board(tmp_path, monkeypatch, [accounts_row("team-a", 5.0, seven_day=10.0)])
+
+        accounts.cmd_status(types.SimpleNamespace())
+
+        assert "order: max-b → rest, most headroom first within each" in capsys.readouterr().out
+
+
 class TestProfileNearWall:
     def _wire(self, monkeypatch, rows):
         monkeypatch.setattr(accounts, "load_blobs", lambda: {"accounts": {}})
@@ -4308,6 +4484,99 @@ class TestStatuslineAccountBoard:
         )
         rendered = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
         return next(line for line in rendered.splitlines() if "Forced" in line)
+
+    @pytest.mark.parametrize(
+        ("mode", "max_week", "best"),
+        [
+            ("auto", 65, "Maxed"),
+            # Past its weekly ceiling the max account loses its place, and Fable use decides.
+            ("fable", 92, "Team"),
+        ],
+    )
+    def test_best_next_follows_the_route_order_to_a_week_only_max_account(
+        self, tmp_path, mode, max_week, best
+    ):
+        repo = Path(__file__).resolve().parent.parent
+        home = tmp_path / "home"
+        claude_dir = home / ".claude"
+        claude_dir.mkdir(parents=True)
+        (home / ".accounts").mkdir()
+        (home / ".accounts" / "mode.json").write_text(json.dumps({"mode": mode}))
+        (claude_dir / "statusline.conf").write_text(
+            'SHOW_ACCOUNT_RESETS=1\n'
+            'MAX_COLS=200\n'
+            'ACCOUNT_LABELS="current:current@example.com|current-org '
+            'team:team@example.com|team-org maxed:maxed@example.com|maxed-org"\n'
+            'ACCOUNTS_ROUTE_ORDER="max*"\n'
+        )
+        now = int(time.time())
+        (claude_dir / "account-resets.json").write_text(
+            json.dumps(
+                {
+                    "current@example.com|current-org": {
+                        "email": "current@example.com",
+                        "org_uuid": "current-org",
+                        "five_hour_pct": 75,
+                        "seven_day_pct": 30,
+                        "last_seen": now,
+                    },
+                    "team@example.com|team-org": {
+                        "email": "team@example.com",
+                        "org_uuid": "team-org",
+                        "five_hour_pct": 10,
+                        "seven_day_pct": 60,
+                        "fable_pct": 10,
+                        "last_seen": now,
+                    },
+                    # A max plan reports no five-hour figure; only its week limits it.
+                    "maxed@example.com|maxed-org": {
+                        "email": "maxed@example.com",
+                        "org_uuid": "maxed-org",
+                        "five_hour_pct": None,
+                        "seven_day_pct": max_week,
+                        "fable_pct": 50,
+                        "last_seen": now,
+                    },
+                }
+            )
+        )
+        project = tmp_path / "project"
+        project.mkdir()
+        fixture = json.loads((repo / "test/fixtures/input.json").read_text())
+        fixture["workspace"]["current_dir"] = str(project)
+        fixture["rate_limits"] = {
+            "five_hour": {"used_percentage": 75, "resets_at": now + 3600},
+            "seven_day": {"used_percentage": 30, "resets_at": now + 86400},
+        }
+        script = tmp_path / "statusline.sh"
+        script.write_text(
+            (repo / "bin/statusline.sh")
+            .read_text()
+            .replace("/tmp/claude", str(tmp_path / "cache"))
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(home),
+                "TZ": "UTC",
+                "ACCOUNTS_ROUTED_LABEL": "current",
+                "ACCOUNTS_ROUTED_EMAIL": "current@example.com",
+                "ACCOUNTS_ROUTED_ORG_UUID": "current-org",
+            }
+        )
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        result = subprocess.run(
+            ["bash", str(script)],
+            input=json.dumps(fixture),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        rendered = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        marked = [line for line in rendered.splitlines() if "✓ best next" in line]
+
+        assert len(marked) == 1 and best in marked[0], rendered
 
     def test_unconfirmed_reset_keeps_last_confirmed_utilization(self, tmp_path):
         row = self._render_reset_row(tmp_path, int(time.time()) - 7200)

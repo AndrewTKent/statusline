@@ -35,6 +35,7 @@ Create `~/.claude/statusline.conf` (bash, sourced directly). Full annotated vers
 | `ACCOUNTS_STRICT_QUOTA` | `1` | Refuse to launch when no account has quota, and terminate at a hard limit when no replacement is available; by default Claude opens and stays open for session history and reset monitoring |
 | `ACCOUNTS_HOLD_FOR_RESET` | `1` | When no account can take the work, stop Claude, wait until a window resets and resume it, instead of keeping the interface open (off by default) |
 | `ACCOUNTS_PINS` | `0` | Turn pins off on this machine: `accounts set <label>` and `accounts pane set` refuse, and a stored pin, global or per pane, or an `ACCOUNTS_PIN` set for one launch, is ignored, so every launch and handoff routes by headroom (on by default) |
+| `ACCOUNTS_ROUTE_ORDER` | `"acme-max*"` | Label patterns whose accounts take work first, the first group leading; an account no pattern matches goes last, and headroom decides within a group. Unset, every launch and handoff goes by headroom alone ([accounts.md](accounts.md#which-accounts-take-work-first)) |
 | `ACCOUNTS_BOX` | `"my-host"` | The ssh host a bare `accounts login --box <label>` logs in (default: the first `ACCOUNTS_SYNC_HOSTS` entry) |
 
 Keys for remote boards, unattended jobs and the handoff notice are described in [accounts.md](accounts.md).
