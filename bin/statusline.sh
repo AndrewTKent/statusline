@@ -987,7 +987,7 @@ remote_job_pane_id() {
 # and one with no sender to every session.
 REMOTE_JOB_JQ_DEFS='
 def shown($cutoff): .value.state as $state
-    | (["running", "held", "queued", "waiting", "prompt", "blocked", "unknown"] | any(. == $state))
+    | (["starting", "running", "held", "queued", "waiting", "prompt", "blocked", "unknown"] | any(. == $state))
       or ((.value.updated_at // 0) >= $cutoff);
 def pr_key: [(.value.pr.url // "") | strings
     | capture("^https://github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)")

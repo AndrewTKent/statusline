@@ -195,7 +195,7 @@ class TestRefreshAll:
 
 
 class TestRunningJobs:
-    @pytest.mark.parametrize("state", ["running", "prompt"])
+    @pytest.mark.parametrize("state", ["running", "prompt", "starting"])
     def test_a_board_running_a_job_is_pulled_again_inside_the_board_interval(self, root, state):
         settings = conf({"REMOTE_ACCOUNT_BOARDS": "devbox:devbox-host", "REMOTE_BOARD_PULL_INTERVAL": "120"})
         jobs = {**JOBS, "jobs": {"demo": {"state": state}}}
