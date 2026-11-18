@@ -1283,6 +1283,371 @@ class TestRouteOrder:
         assert "order: max-b → rest, most headroom first within each" in capsys.readouterr().out
 
 
+DAY = 86400.0
+UTC_ZONE = accounts.ZoneInfo("UTC")
+MIDNIGHT = datetime(2026, 11, 18, tzinfo=timezone.utc).timestamp()
+
+
+def paced_row(label, seven_day, resets_at, five_hour=5.0, stale=False):
+    return {
+        **accounts_row(label, five_hour, seven_day=seven_day, stale=stale),
+        "seven_day_resets_at": resets_at,
+    }
+
+
+def advance(ledger, rows, now):
+    return accounts.advance_pacing(ledger, rows, now, UTC_ZONE)
+
+
+class TestPacingBudget:
+    """Today's pooled budget and burn, in points of weekly allowance, on a UTC day."""
+
+    def test_each_account_brings_what_it_has_left_spread_evenly_to_its_reset(self):
+        _, pace = advance(
+            None,
+            [
+                paced_row("team-1", 4.0, MIDNIGHT + 6.5 * DAY),
+                paced_row("team-2", 20.0, MIDNIGHT + 2 * DAY),
+            ],
+            MIDNIGHT,
+        )
+
+        assert pace.budget == pytest.approx(96.0 / 6.5 + 80.0 / 2)
+
+    def test_an_account_that_resets_during_the_day_brings_all_it_has_left(self):
+        _, pace = advance(None, [paced_row("team-2", 65.0, MIDNIGHT + 0.5 * DAY)], MIDNIGHT)
+
+        assert pace.budget == pytest.approx(35.0)
+
+    def test_a_reset_during_the_day_keeps_the_old_weeks_burn_and_adds_the_new_weeks_share(self):
+        reset = MIDNIGHT + 0.25 * DAY
+        ledger, _ = advance(None, [paced_row("team-2", 65.0, reset)], MIDNIGHT)
+        ledger, _ = advance(ledger, [paced_row("team-2", 70.0, reset)], MIDNIGHT + 0.2 * DAY)
+
+        ledger, pace = advance(ledger, [paced_row("team-2", 2.0, reset + 7 * DAY)], MIDNIGHT + 0.5 * DAY)
+
+        fresh_week = ledger["accounts"]["team-2"][-1]
+        assert (fresh_week["share"], pace.burned) == pytest.approx((100.0 * 0.75 / 7, 5.0 + 2.0))
+
+    def test_pacing_first_read_mid_day_budgets_only_the_rest_of_the_day(self):
+        _, pace = advance(
+            None, [paced_row("team-1", 30.0, MIDNIGHT + 7 * DAY)], MIDNIGHT + 0.75 * DAY
+        )
+
+        assert pace.budget == pytest.approx(70.0 * 0.25 / 6.25)
+
+    def test_burn_is_the_rise_in_weekly_use_since_the_day_was_first_read(self):
+        ledger, _ = advance(None, [paced_row("team-1", 30.0, MIDNIGHT + 7 * DAY)], MIDNIGHT)
+
+        _, pace = advance(
+            ledger, [paced_row("team-1", 37.5, MIDNIGHT + 7 * DAY)], MIDNIGHT + 0.5 * DAY
+        )
+
+        assert pace.burned == pytest.approx(7.5)
+
+    def test_a_ledger_from_another_day_starts_the_day_over(self):
+        ledger, _ = advance(None, [paced_row("team-1", 30.0, MIDNIGHT + 7 * DAY)], MIDNIGHT)
+        ledger, _ = advance(
+            ledger, [paced_row("team-1", 40.0, MIDNIGHT + 7 * DAY)], MIDNIGHT + 0.9 * DAY
+        )
+
+        _, pace = advance(ledger, [paced_row("team-1", 40.0, MIDNIGHT + 7 * DAY)], MIDNIGHT + DAY)
+
+        assert (pace.burned, pace.budget) == (0.0, pytest.approx(60.0 / 6))
+
+
+class TestPacedRouting:
+    """team-* paced on a UTC day; max-* is the machine's other account."""
+
+    def _board(self, tmp_path, monkeypatch, resets, *, conf='ACCOUNTS_PACED="team-*"\n', ledger=None):
+        labels = [key.split("@")[0] for key in resets]
+        blobs = {
+            "accounts": {
+                label: {
+                    "blob": _live_blob(label),
+                    "email": f"{label}@x",
+                    "org_uuid": f"org-{label}",
+                }
+                for label in labels
+            }
+        }
+        monkeypatch.setattr(accounts, "CONF_PATH", tmp_path / "statusline.conf")
+        accounts.CONF_PATH.write_text(conf)
+        monkeypatch.setattr(accounts, "PACING_PATH", tmp_path / "pacing.json")
+        monkeypatch.setattr(accounts, "PACING_LOCK_PATH", tmp_path / "pacing.lock")
+        monkeypatch.setenv("STATUSLINE_TZ", "UTC")
+        if ledger is not None:
+            accounts.PACING_PATH.write_text(json.dumps(ledger))
+        monkeypatch.setattr(accounts, "locked", lambda blocking=True: nullcontext())
+        monkeypatch.setattr(accounts, "load_blobs", lambda: blobs)
+        monkeypatch.setattr(accounts, "capture_live_to_blobs", lambda _blobs: None)
+        monkeypatch.setattr(accounts, "sync_profile_credentials", lambda *_args, **_kwargs: set())
+        monkeypatch.setattr(accounts, "load_mode", lambda: {"mode": "auto", "label": None})
+        monkeypatch.setattr(accounts, "load_resets", lambda: resets)
+        monkeypatch.setattr(accounts, "load_session_limits", lambda _now: {})
+        monkeypatch.setattr(accounts, "load_session_leases", lambda *_args: [])
+        monkeypatch.setattr(accounts, "verify_entry_auth", lambda *_args: "ok")
+        monkeypatch.setattr(accounts, "ensure_native_profile", lambda label, _entry: tmp_path / label)
+        monkeypatch.setattr(accounts, "excluded_labels", set)
+        monkeypatch.delenv("ACCOUNTS_PIN", raising=False)
+
+    @staticmethod
+    def _account(label, five_hour, seven_day, resets_in_days, *, seen_ago=0.0):
+        now = time.time()
+        reset = datetime.fromtimestamp(now + resets_in_days * DAY, tz=timezone.utc).isoformat()
+        return {
+            f"{label}@x|org-{label}": {
+                "five_hour_pct": five_hour,
+                "seven_day_pct": seven_day,
+                "seven_day_reset": reset,
+                "last_seen": now - seen_ago,
+            }
+        }
+
+    @staticmethod
+    def _spent_today(windows):
+        """A ledger for today: label -> (start_pct, share)."""
+        return {
+            "version": 1,
+            "day": datetime.now(timezone.utc).date().isoformat(),
+            "accounts": {
+                label: [
+                    {
+                        "from": time.time() - 60,
+                        "start_pct": start,
+                        "last_pct": start,
+                        "resets_at": time.time() + 3 * DAY,
+                        "share": share,
+                    }
+                ]
+                for label, (start, share) in windows.items()
+            },
+        }
+
+    def test_a_new_session_goes_to_the_paced_account_whose_week_resets_soonest(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {**self._account("team-1", 26.0, 4.0, 6.7), **self._account("team-2", 0.0, 65.0, 0.8)},
+        )
+
+        assert accounts.select_profile()["label"] == "team-2"
+
+    def test_paced_accounts_with_budget_left_come_before_the_route_order(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {**self._account("team-1", 30.0, 40.0, 3.0), **self._account("max-1", 0.0, 5.0, 3.0)},
+            conf='ACCOUNTS_PACED="team-*"\nACCOUNTS_ROUTE_ORDER="max-*"\n',
+        )
+
+        assert accounts.select_profile()["label"] == "team-1"
+
+    def test_a_paced_account_past_its_ceilings_never_leads_a_handoff(self, tmp_path, monkeypatch):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {
+                **self._account("max-1", 95.0, 10.0, 3.0),
+                **self._account("team-2", 5.0, accounts.SEVEN_DAY_CAP_PCT + 2.0, 0.5),
+                **self._account("max-2", 5.0, 10.0, 3.0),
+            },
+        )
+
+        assert accounts.handoff_target("max-1", require_fable=False) == "max-2"
+
+    def test_a_walled_session_hands_off_to_a_paced_account_ahead_of_the_route_order(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {
+                **self._account("max-1", 95.0, 10.0, 3.0),
+                **self._account("team-1", 30.0, 30.0, 3.0),
+                **self._account("max-2", 5.0, 5.0, 3.0),
+            },
+            conf='ACCOUNTS_PACED="team-*"\nACCOUNTS_ROUTE_ORDER="max-*"\n',
+        )
+
+        assert accounts.handoff_target(
+            "max-1", require_fable=False, margin_pct=accounts.HANDOFF_MARGIN_PCT
+        ) == "team-1"
+
+    def test_the_pool_closes_when_one_accounts_burn_reaches_the_pools_budget(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {
+                **self._account("team-1", 5.0, 4.0, 3.0),
+                **self._account("team-2", 5.0, 70.0, 3.0),
+                **self._account("max-1", 50.0, 50.0, 3.0),
+            },
+            ledger=self._spent_today({"team-1": (4.0, 3.0), "team-2": (60.0, 7.0)}),
+        )
+
+        assert accounts.select_profile()["label"] == "max-1"
+
+    def test_one_account_may_burn_past_its_own_share_while_the_pool_has_budget(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {
+                **self._account("team-1", 5.0, 4.0, 3.0),
+                **self._account("team-2", 5.0, 66.0, 1.0),
+                **self._account("max-1", 0.0, 5.0, 3.0),
+            },
+            ledger=self._spent_today({"team-1": (4.0, 8.0), "team-2": (60.0, 2.0)}),
+        )
+
+        assert accounts.select_profile()["label"] == "team-2"
+
+    def test_with_no_other_account_a_spent_pool_routes_nowhere(self, tmp_path, monkeypatch):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 40.0, 3.0),
+            ledger=self._spent_today({"team-1": (30.0, 10.0)}),
+        )
+
+        assert accounts.select_profile() is None
+
+    def test_a_walled_session_is_not_handed_to_a_paced_account_out_for_the_day(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {**self._account("max-1", 95.0, 10.0, 3.0), **self._account("team-1", 5.0, 40.0, 3.0)},
+            ledger=self._spent_today({"team-1": (30.0, 10.0)}),
+        )
+
+        assert accounts.handoff_target(
+            "max-1", require_fable=False, margin_pct=accounts.HANDOFF_MARGIN_PCT
+        ) is None
+
+    def test_a_session_held_for_a_spent_pool_wakes_at_local_midnight(self, tmp_path, monkeypatch):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 40.0, 3.0),
+            ledger=self._spent_today({"team-1": (30.0, 10.0)}),
+        )
+        midnight = datetime.combine(
+            datetime.now(timezone.utc).date() + timedelta(days=1), datetime.min.time(), timezone.utc
+        )
+
+        assert accounts.next_routable_at() == midnight.timestamp()
+
+    @pytest.mark.parametrize("bad", ["stale", "no reset"])
+    def test_a_paced_account_with_no_fresh_weekly_figure_leaves_routing_as_if_unpaced(
+        self, tmp_path, monkeypatch, bad
+    ):
+        team_2 = self._account("team-2", 5.0, 50.0, 3.0, seen_ago=4 * 3600 if bad == "stale" else 0)
+        if bad == "no reset":
+            team_2["team-2@x|org-team-2"]["seven_day_reset"] = None
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {**self._account("team-1", 5.0, 40.0, 3.0), **team_2, **self._account("max-1", 50.0, 50.0, 3.0)},
+            ledger=self._spent_today({"team-1": (30.0, 10.0)}),
+        )
+
+        assert accounts.select_profile()["label"] == "team-1"
+
+    def test_an_unreadable_ledger_is_kept_aside_and_the_day_counts_from_now(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(tmp_path, monkeypatch, self._account("team-1", 5.0, 40.0, 3.0))
+        accounts.PACING_PATH.write_text("{")
+
+        pace = accounts.pacing_today()
+
+        assert (pace.problem, pace.burned) == (None, 0.0)
+        assert [p.read_text() for p in tmp_path.glob("pacing.json.corrupt.*")] == ["{"]
+
+    def test_the_days_snapshot_is_read_back_from_disk(self, tmp_path, monkeypatch):
+        resets = self._account("team-1", 5.0, 40.0, 3.0)
+        self._board(tmp_path, monkeypatch, resets)
+        accounts.pacing_today()
+        resets["team-1@x|org-team-1"]["seven_day_pct"] = 43.0
+
+        assert accounts.pacing_today().burned == pytest.approx(3.0)
+
+    def test_status_says_todays_budget_and_burn(self, tmp_path, monkeypatch, capsys):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 33.0, 3.0),
+            ledger=self._spent_today({"team-1": (30.0, 10.0)}),
+        )
+
+        accounts.cmd_status(types.SimpleNamespace())
+
+        assert (
+            "paced: team-* — first, soonest weekly reset first; today's budget 10.0 points,"
+            " 3.0 burned, 7.0 left"
+        ) in capsys.readouterr().out
+
+    def test_status_says_when_a_spent_pool_takes_work_again(self, tmp_path, monkeypatch, capsys):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 40.0, 3.0),
+            ledger=self._spent_today({"team-1": (30.0, 10.0)}),
+        )
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%a")
+
+        accounts.cmd_status(types.SimpleNamespace())
+
+        out = capsys.readouterr().out
+        assert (
+            "paced: team-* — today's budget of 10.0 points is spent (10.0 burned);"
+            f" they take no work until {tomorrow} 12:00am UTC"
+        ) in out
+        assert "general: (none free)" in out
+
+    def test_status_says_loudly_when_it_is_not_pacing(self, tmp_path, monkeypatch, capsys):
+        self._board(tmp_path, monkeypatch, self._account("team-1", 5.0, 40.0, 3.0, seen_ago=4 * 3600))
+
+        accounts.cmd_status(types.SimpleNamespace())
+
+        assert (
+            "paced: team-* — NOT PACING, no fresh weekly figure for team-1; routing as if unpaced"
+        ) in capsys.readouterr().out
+
+    def test_with_pacing_unset_status_prints_what_it_always_printed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        resets = {**self._account("team-1", 26.0, 4.0, 6.7), **self._account("team-2", 0.0, 65.0, 0.8)}
+        self._board(tmp_path, monkeypatch, resets, conf='ACCOUNTS_ROUTE_ORDER="max-*"\n')
+
+        accounts.cmd_status(types.SimpleNamespace())
+
+        assert capsys.readouterr().out == (
+            "mode: AUTO   general: team-1   fable: (none free)\n"
+            "order: max-* → rest, most headroom first within each\n"
+            "   team-1       5h   26%  7d    4%  fable     —\n"
+            "   team-2       5h    0%  7d   65%  fable     —\n"
+        )
+
+    def test_with_pacing_unset_the_board_snapshot_carries_no_pacing(self, tmp_path, monkeypatch):
+        self._board(tmp_path, monkeypatch, self._account("team-1", 5.0, 40.0, 3.0), conf="")
+        monkeypatch.setattr(accounts, "SNAPSHOT_PATH", tmp_path / "snapshot.json")
+
+        snapshot = accounts.write_statusline_snapshot(accounts.load_blobs(), error=None)
+
+        assert "pacing" not in snapshot and not accounts.PACING_PATH.exists()
+
+
 class TestProfileNearWall:
     def _wire(self, monkeypatch, rows):
         monkeypatch.setattr(accounts, "load_blobs", lambda: {"accounts": {}})

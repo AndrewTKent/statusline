@@ -156,6 +156,36 @@ so it can chain after `scan-tokens.py` in the 60s launchd poll for free.
 }
 ```
 
+### Pacing ledger: `~/.accounts/pacing.json`
+
+Written by `accounts.pacing_today()` on a machine with `ACCOUNTS_PACED`, at every
+`accounts poll` and every router check, under `pacing.lock`, and replaced whole.
+It holds one local day: each paced account's weekly windows read that day, with
+when counting began (`from`), the weekly use then (`start_pct`), the highest use
+read since (`last_pct`), the window's reset, and the day's `share` it brings, in
+points of weekly allowance.
+
+```json
+{
+  "version": 1,
+  "day": "2026-11-18",
+  "accounts": {
+    "acme-team-2": [
+      {"from": 1795046400, "start_pct": 65.0, "last_pct": 80.0,
+       "resets_at": 1795114740, "share": 35.0}
+    ]
+  }
+}
+```
+
+The budget is the sum of the shares and the burn the sum of `last_pct − start_pct`.
+A ledger from another day starts over; a window whose reset passed and whose next
+reading names a later one gets a second window from that reset, at 0%. The
+snapshot carries the result as `pacing` (`patterns`, `budget`, `burned`, `closed`,
+`since`, `until`, `problem`), which the account boards render and
+`bin/remote_jobs.py` reads for when a paced account takes work again; with
+`ACCOUNTS_PACED` unset there is no `pacing` key and no ledger.
+
 ## Remote boards
 
 `accounts poll` publishes this machine's board to
@@ -204,7 +234,7 @@ session cooperating; the one read from off it is each lane PR's state on GitHub:
 | `state` | while a read it depends on fails, the last publish's (see below); otherwise `report.md` first (`status: blocked` → blocked, `status: stopped`, which `handoff.sh stop` writes, → stopped, otherwise done), else the tmux session and the router or Codex process under its panes (both → running; no session in a `tmux list-panes` that answered, or that said no server runs → gone; the session without either → gone, or waiting for a stacked lane or for a lane whose launcher is between runs, paused at the quota wall or short of one); either `gone` reads `starting` instead while the job is under `LAUNCH_WINDOW_S` (300s) past its `sent_at` and no earlier publish listed a tmux session for that send, since the sender writes `job.json` before it starts the session; `held` and `queued` come from the router state and the lane queue; a running job whose pane the pane reader agent-workflows installs (`~/handoffs/lane-pane.sh state <session>`) sees at a permission dialog → prompt, and with no reader installed the state is unchanged |
 | `started` | the `sent_at` of the send a publish has listed the job's tmux session for, kept from publish to publish; 0 until one has, so a lane sent again under its slug starts over |
 | `stale_since`, `reads_failed` | 0 and `[]` when every read the row needs answered; see below |
-| `quota` | the launcher's `quota-wait.json` (`since`, `next_poll`, and `walled`, the `claude` and `codex` it names, none until the launcher finds a wall), counted only while it is no more than 120s past its next poll and its pid is a process started before the file's last write, under one of the job's panes; `resumes_at` is when the first account in a walled pool frees, by this machine's own `~/.accounts/statusline-snapshot.json` and `~/.codex-accounts/usage.json` and each router's own pick rules: Claude walls at `accounts.HARD_WALL_PCT` on either window, with a polled null 5-hour window read as 0 and expired, canceled and stale rows skipped; Codex walls at 100% on either window, with errored, stale and flagged rows skipped (0 when they name no reset ahead); `{}` on every other job |
+| `quota` | the launcher's `quota-wait.json` (`since`, `next_poll`, and `walled`, the `claude` and `codex` it names, none until the launcher finds a wall), counted only while it is no more than 120s past its next poll and its pid is a process started before the file's last write, under one of the job's panes; `resumes_at` is when the first account in a walled pool frees, by this machine's own `~/.accounts/statusline-snapshot.json` and `~/.codex-accounts/usage.json` and each router's own pick rules: Claude walls at `accounts.HARD_WALL_PCT` on either window, with a polled null 5-hour window read as 0 and expired, canceled and stale rows skipped, and a paced account no earlier than the snapshot's `pacing.until` while `pacing.closed` holds; Codex walls at 100% on either window, with errored, stale and flagged rows skipped (0 when they name no reset ahead); `{}` on every other job |
 | `head` | `git rev-parse --short HEAD` in the job's worktree |
 | `unpushed` | `git rev-list --count HEAD --not --remotes` in the job's worktree: commits no remote-tracking ref holds |
 | `account`, `handoffs` | the live router state file whose pid descends from a pane of the job's tmux session |

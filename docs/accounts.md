@@ -186,6 +186,75 @@ ACCOUNTS_ROUTE_ORDER="acme-max*"
   accounts in that order. The status line's `✓ best next` marker follows it
   too.
 
+## Spending accounts evenly over their week
+
+`ACCOUNTS_PACED` in `~/.claude/statusline.conf` names accounts this machine
+spends a day's share of at a time, as label patterns, so their weekly allowance
+is used evenly and used up by each reset instead of burned early or left to
+expire. Unset, nothing is paced and routing is unchanged.
+
+Andrew, 2026-11-18 2:47pm PST: "we should burn through each of those accounts
+enough such that we use an squivalent each day", "after we burn an amount - out
+of the total token usage for all those accounts - be it on one or two etc of
+those three acounts", "we switch to max", "or dont allow them to be used"; and
+2:52pm PST: "the weekly amount could be all drained from one account that day".
+
+```bash
+ACCOUNTS_PACED="acme-team-*"
+```
+
+- **One budget a day for the paced accounts together.** The unit is points of
+  weekly allowance: one point is 1% of an account's week, read from its
+  `seven_day` usage, so the pool assumes the paced accounts have plans of the
+  same size. Each account brings what it has left, spread evenly over the time
+  to its weekly reset, today's part of it: `(100 − used) × length of today ÷
+  time to reset`, at most all it has left, which is what an account that resets
+  during the day brings. The pool is the sum.
+- **The budget is the pool's, not each account's.** There is no daily cap per
+  account: one account may burn the whole pool, all the way to its weekly
+  ceiling, and the router then moves to the next paced account.
+- **While the pool has budget left, the paced accounts take work first**, ahead
+  of `ACCOUNTS_ROUTE_ORDER`, the account whose week resets soonest first, among
+  those under the 80% five-hour and 90% weekly ceilings. A running session moves
+  only at its own wall, as before.
+- **Once the pool's burn reaches its budget the paced accounts take no work
+  until the next local midnight.** New sessions and handoffs go to the
+  machine's other accounts. A session running on a paced account moves at its
+  next handoff point, after any Workflow in flight finishes, however long that
+  takes. With no other account, the router does what it does when every account
+  is walled: it refuses a launch under `ACCOUNTS_STRICT_QUOTA=1` and stops a
+  running session once no Workflow is in flight, holds it under
+  `ACCOUNTS_HOLD_FOR_RESET=1` until midnight, and otherwise leaves it open.
+- **A day starts at local midnight** in the zone the status line shows times
+  in (`STATUSLINE_TZ`, `~/.claude/statusline-tz`, `TZ`, else Pacific), never a
+  server's UTC clock.
+- **A weekly reset during the day** adds the fresh week's share for the rest of
+  the day, counted from the reset; what the old week burned before it still
+  counts.
+- **Burn** is the rise in each account's weekly use since the day's first
+  reading, at every reading: each `accounts poll` and each router check. Work
+  done between two readings shows at the next one, so the cut-off can run past
+  the budget by that much. A day that runs over leaves less for the days after,
+  and their budgets shrink to match.
+- **The day's first reading is kept** in `~/.accounts/pacing.json`, so a
+  restart keeps the count. Pacing turned on, or the ledger lost, mid-day budgets
+  only the rest of that day. An unreadable ledger is kept aside as
+  `pacing.json.corrupt.<time>` and the day counts from then.
+- **Bad data never blocks an account.** A paced account that can take work but
+  has a stale weekly figure (no poll for 3 hours) or no weekly reset leaves the
+  machine routing as if unpaced until it reads again, and `accounts status`
+  says so. An account that needs a login, or is excluded, is left out of the
+  pool.
+- **A pin outranks pacing**, as it outranks the order.
+- `accounts status` prints the day's standing, for example
+  `paced: acme-team-* — first, soonest weekly reset first; today's budget 19.5 points, 3.2 burned, 16.3 left`,
+  or, once it is spent,
+  `paced: acme-team-* — today's budget of 19.5 points is spent (20.1 burned); they take no work until Thu 12:00am PST`.
+  The board's snapshot carries it, so the account board, here and on a machine
+  that shows this one as a remote board, prints one `paced` line under the
+  accounts. The `✓ best next` marker on the older account table, without
+  `SHARED_ACCOUNT_SNAPSHOT=1`, does not follow pacing.
+
 ## Naming this machine
 
 `LOCAL_MACHINE_NAME` labels the local table with a bold header line, the same

@@ -19,7 +19,11 @@ chmod 755 "$HOME/.local/share/claude/versions/2.0.0"
 ln -s "$HOME/.local/share/claude/versions/2.0.0" "$HOME/.local/bin/claude"
 
 "$repo_root/install-account-router.sh"
+touch -t 200001010000 "$HOME/.zshrc"
 "$repo_root/install-account-router.sh"
+# A reinstall over a zshrc that has both lines does not write it, not even its time.
+[ "$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$HOME/.zshrc")" = \
+  "$(python3 -c 'import datetime, sys; print(int(datetime.datetime(2000, 1, 1).timestamp()))')" ]
 
 [ "$(readlink "$HOME/.local/bin/accounts")" = "$HOME/.local/lib/statusline/accounts.py" ]
 [ "$(readlink "$HOME/.local/bin/claude-router")" = "$HOME/.local/lib/statusline/claude-router.py" ]

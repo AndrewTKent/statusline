@@ -963,6 +963,29 @@ remote_epoch_relative() {
     remote_age_text "$delta"
 }
 
+# The pacing a board's snapshot carries when its machine sets ACCOUNTS_PACED: today's pooled
+# budget for the paced accounts, the burn against it, and when a spent budget opens again.
+# Nothing prints for a snapshot without it.
+pacing_line() {
+    local file="$1" patterns budget burned closed until problem back
+    IFS=$'\037' read -r patterns budget burned closed until problem < <(jq -r '
+        .pacing // empty
+        | [(.patterns // [] | join(" ")), (.budget // 0), (.burned // 0), (.closed // false), (.until // 0), (.problem // "")]
+        | map(tostring) | join("\u001f")
+    ' "$file" 2>/dev/null)
+    [ -n "$patterns" ] || return 0
+    printf -v budget '%.1f' "$budget" 2>/dev/null
+    printf -v burned '%.1f' "$burned" 2>/dev/null
+    if [ -n "$problem" ]; then
+        printf '%b\n' "${dim}·${reset} ${yellow}paced ${patterns}: not pacing, ${problem}${reset}"
+    elif [ "$closed" = "true" ]; then
+        back=$(fmt_epoch "$until" "%a %l:%M%p %Z" | sed 's/  */ /g; s/AM/am/; s/PM/pm/')
+        printf '%b\n' "${dim}·${reset} ${yellow}paced ${patterns}: today's ${budget} pts spent, out until ${back}${reset}"
+    else
+        printf '%b\n' "${dim}·${reset} ${dim}paced ${patterns}: ${burned} of today's ${budget} pts burned${reset}"
+    fi
+}
+
 # Jobs shown: running, or finished recently enough to still be news.
 REMOTE_JOB_WINDOW_S=1800
 
@@ -1244,6 +1267,7 @@ remote_board_lines() {
             [ "$row_expired" = "canceled" ] && suffix=" ${red}⚠ plan canceled${reset}"
             printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$row_five" 4)${reset}  ${dim}$(_rb_ralign "$row_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$row_seven" 4)${reset}   ${fable_color}$(_rb_ralign "$row_fable" 5)${reset}  ${dim}$(_rb_ralign "$row_fable_reset" 6)${reset}${suffix}"
         done <<< "$rows"
+        pacing_line "$board_dir/statusline-snapshot.json"
         # The board shows the box's whole account set, Codex included. Codex has no
         # 5h window: its 5h columns stay dashes even if one is ever reported.
         codex_rows=$(jq -r '
@@ -1723,6 +1747,9 @@ render_shared_account_snapshot() {
                 "$(_shared_ralign "$row_five_reset" 6)" "$(_shared_ralign "$row_seven" 4)" \
                 "$(_shared_ralign "$row_scoped" 5)" "$(_shared_ralign "$row_scoped_reset" 6)" "$row_suffix"
         done <<< "$rows"
+        local pacing_row
+        pacing_row=$(pacing_line "$snapshot_file")
+        [ -n "$pacing_row" ] && _shared_emit '%b' "$pacing_row"
         while IFS= read -r remote_line; do
             [ -n "$remote_line" ] && _shared_emit '%b' "$remote_line"
         done <<< "$(remote_board_lines "$remote_root" "${REMOTE_BOARD_MAX_AGE:-900}" "$name_width")"

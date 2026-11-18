@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -4310,6 +4311,16 @@ _IN_FLIGHT_FAKE_CLAUDE = (
     "    (home / '.accounts' / 'mode.json').write_text(\n"
     "        json.dumps({'version': 2, 'mode': 'auto', 'global_generation': 2})\n"
     "    )\n"
+    "elif os.environ.get('ROUTER_TEST_PACED'):\n"
+    "    # The paced accounts' budget for the day is spent: 5 points shared, 5 burned.\n"
+    "    import fnmatch\n"
+    "    from datetime import datetime, timezone\n"
+    "    pattern = os.environ['ROUTER_TEST_PACED']\n"
+    "    (home / '.claude' / 'statusline.conf').write_text(f'ACCOUNTS_PACED=\"{pattern}\"\\n')\n"
+    "    window = {'from': time.time(), 'start_pct': 5.0, 'last_pct': 5.0, 'resets_at': time.time() + 3 * 86400, 'share': 5.0}\n"
+    "    (home / '.accounts' / 'pacing.json').write_text(json.dumps({'version': 1,\n"
+    "        'day': datetime.now(timezone.utc).date().isoformat(),\n"
+    "        'accounts': {l: [window] for l in ('first', 'second') if fnmatch.fnmatchcase(l, pattern)}}))\n"
     "elif os.environ.get('ROUTER_TEST_AUTO'):\n"
     "    # Busier than second, but short of the near-wall departure, so only the mode moves it.\n"
     "    resets = home / '.claude' / 'account-resets.json'\n"
@@ -4327,7 +4338,7 @@ _IN_FLIGHT_FAKE_CLAUDE = (
     "(session / 'workflows' / 'wf_one.json').write_text('{}')\n"
     "with log.open('a') as f:\n"
     "    f.write(json.dumps({'event': 'finished', 't': time.time()}) + '\\n')\n"
-    "time.sleep(20)\n"
+    "time.sleep(float(os.environ.get('ROUTER_TEST_LINGER', '20')))\n"
 )
 
 
@@ -4364,6 +4375,89 @@ def _run_router_with_in_flight_workflow(
     )
     process.wait(timeout=30)
     return [json.loads(line) for line in log_path.read_text().splitlines()]
+
+
+def _run_paced_router(tmp_path, pattern, *, strict=False, mode="auto"):
+    """An auto session on `first`, its account's day spent once launched, with a Workflow in
+    flight for 2s; grace 0, so only a paced move's own wait can keep it."""
+    home = _two_account_home(tmp_path)
+    (home / ".accounts" / "mode.json").write_text(
+        json.dumps({"version": 2, "mode": mode, "label": "first", "global_generation": 1})
+    )
+    reset = datetime.fromtimestamp(time.time() + 3 * 86400, tz=timezone.utc).isoformat()
+    (home / ".claude" / "account-resets.json").write_text(
+        json.dumps(
+            {
+                f"{label}@example.com|org-{label}": {
+                    "five_hour_pct": 10,
+                    "seven_day_pct": 10,
+                    "seven_day_reset": reset,
+                    "fable_pct": 10,
+                    "last_seen": time.time(),
+                }
+                for label in ("first", "second")
+            }
+        )
+    )
+    log_path = tmp_path / "launches.jsonl"
+    fake_claude = tmp_path / "fake-claude"
+    fake_claude.write_text(_IN_FLIGHT_FAKE_CLAUDE)
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("ACCOUNTS_PIN", None)
+    env.update(
+        {
+            "HOME": str(home),
+            "CLAUDE_REAL_BIN": str(fake_claude),
+            "ACCOUNTS_ROUTER_INTERVAL": "0.2",
+            "ACCOUNTS_HANDOFF_GRACE_S": "0",
+            "ACCOUNTS_HANDOFF_NOTICE": "1",
+            "ACCOUNTS_STRICT_QUOTA": "1" if strict else "0",
+            "STATUSLINE_TZ": "UTC",
+            "ROUTER_TEST_LOG": str(log_path),
+            "ROUTER_TEST_FINISH_AFTER": "2",
+            "ROUTER_TEST_PACED": pattern,
+            "ROUTER_TEST_LINGER": "3",
+            "PYTHONPATH": str(REPO / "bin"),
+        }
+    )
+    process = subprocess.run(
+        [sys.executable, str(REPO / "bin" / "claude-router.py")],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    return events, process
+
+
+def test_a_paced_session_moves_off_after_its_workflow_finishes_however_long_it_runs(tmp_path):
+    events, _ = _run_paced_router(tmp_path, "first")
+
+    launches = [e for e in events if e["event"] == "launch"]
+    finished = next(e for e in events if e["event"] == "finished")
+
+    assert [l["label"] for l in launches] == ["first", "second"]
+    assert launches[1]["t"] > finished["t"]
+    assert "today's budget for the paced accounts is spent" in launches[1]["last"]
+
+
+def test_a_strict_paced_session_with_nowhere_to_go_stops_after_its_workflow(tmp_path):
+    events, process = _run_paced_router(tmp_path, "*", strict=True)
+
+    assert [e["event"] for e in events] == ["launch", "finished"]
+    assert process.returncode == 1
+    assert "the paced accounts have spent today's budget" in process.stderr
+
+
+def test_a_session_pinned_to_a_paced_account_stays_on_it_when_the_pool_is_spent(tmp_path):
+    events, process = _run_paced_router(tmp_path, "first", strict=True, mode="set")
+
+    assert [e["event"] for e in events] == ["launch", "finished"]
+    assert process.returncode == 0
 
 
 def test_a_planned_move_waits_for_the_workflow_in_flight(tmp_path):

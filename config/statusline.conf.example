@@ -116,6 +116,15 @@
 # "before team accounts".
 # ACCOUNTS_ROUTE_ORDER="acme-max*"
 
+# The accounts spent a day's share at a time, as label patterns. Each local day
+# they share one budget, in points of weekly allowance: what each has left,
+# spread evenly to its weekly reset. The pool's alone: one account may burn all
+# of it. While it lasts they take work first, soonest reset first; once it is
+# burned they take none until local midnight. Unset, nothing is paced.
+# Andrew, 2026-11-18 2:47pm PST: "we should burn through each of those accounts
+# enough such that we use an squivalent each day".
+# ACCOUNTS_PACED="acme-team-*"
+
 # ─── Remote account boards ─────────────────────────────────────────────────
 # Show another machine's account board under this one's. That machine runs the
 # same router and polls its own accounts; `accounts poll` here copies the two

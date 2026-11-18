@@ -247,6 +247,26 @@ remote_ultra_line=$(awk '/^■ devbox ·/{on=1; next} on && /^· Ultra /{$1 = $1
 codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")
 [ "$codex_line" = "· Seat-1-codex — — 37% — 3d" ] || { printf 'the Codex row is not its label, dashed 5h, week and weekly reset: %s\n' "$codex_line" >&2; exit 1; }
 
+# A board whose machine paces accounts says how today's pooled budget stands; one that does not says nothing.
+[[ "$board_output" != *"paced "* ]] || { printf 'a board without pacing rendered a pacing line\n' >&2; exit 1; }
+set_pacing() {  # $1: snapshot file; $2: a jq object for .pacing, or "null" to remove it
+    jq --argjson pacing "$2" 'if $pacing == null then del(.pacing) else .pacing = $pacing end' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+paced_until=$(( NOW + 3600 ))
+set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" \
+    "{\"patterns\":[\"team-*\"],\"budget\":19.5,\"burned\":20.1,\"closed\":true,\"since\":0,\"until\":$paced_until,\"problem\":null}"
+set_pacing "$TEST_HOME/.accounts/statusline-snapshot.json" \
+    '{"patterns":["work"],"budget":12.4,"burned":3.2,"closed":false,"since":0,"until":0,"problem":null}'
+paced_output=$(render_with_boards)
+paced_zone="${STATUSLINE_TZ:-${TZ:-America/Los_Angeles}}"
+paced_day=$({ TZ="$paced_zone" date -d "@$paced_until" +%a 2>/dev/null || TZ="$paced_zone" date -r "$paced_until" +%a; })
+grep -qxF "· paced team-*: today's 19.5 pts spent, out until $paced_day $(clock_text "$paced_until")" <<< "$paced_output" ||
+    { printf 'a board with its paced accounts out for the day did not say until when:\n%s\n' "$paced_output" >&2; exit 1; }
+grep -qxF "· paced work: 3.2 of today's 12.4 pts burned" <<< "$paced_output" ||
+    { printf 'the local board did not say how much of its pooled budget is burned:\n%s\n' "$paced_output" >&2; exit 1; }
+set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" null
+set_pacing "$TEST_HOME/.accounts/statusline-snapshot.json" null
+
 # Boards render in REMOTE_ACCOUNT_BOARDS order, not in directory-name order: "alpha" sorts before "devbox".
 mkdir -p "$REMOTE_ROOT_DIR/alpha"
 printf '{"version":1,"generated_at":%s,"health":{"last_success_at":%s,"error":null},"accounts":{}}\n' "$NOW" "$NOW" > "$REMOTE_ROOT_DIR/alpha/statusline-snapshot.json"

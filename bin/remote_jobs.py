@@ -14,6 +14,7 @@ replaced atomically: a reader sees one version or the next.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import math
 import os
@@ -662,8 +663,16 @@ def frees_at(windows: list[tuple[object, object]], wall: float, now: float) -> f
 def claude_frees(now: float) -> list[float]:
     snapshot = read_json(home() / CLAUDE_SNAPSHOT, {})
     rows = snapshot.get("accounts") if isinstance(snapshot, dict) else None
+    pacing = snapshot.get("pacing") if isinstance(snapshot, dict) else None
+    # Paced accounts whose day's budget is spent take work again at the next local midnight.
+    paced_until = (
+        as_epoch(pacing.get("until"))
+        if isinstance(pacing, dict) and pacing.get("closed") is True
+        else None
+    )
+    paced = pacing.get("patterns") if paced_until else None
     frees = []
-    for account in rows.values() if isinstance(rows, dict) else []:
+    for label, account in rows.items() if isinstance(rows, dict) else []:
         if not isinstance(account, dict) or account.get("expired") or account.get("canceled"):
             continue
         five_hour, seven_day = (account.get(key) or {} for key in ("five_hour", "seven_day"))
@@ -677,6 +686,8 @@ def claude_frees(now: float) -> list[float]:
             five_hour_used = 0.0
         windows = [(five_hour_used, five_hour.get("resets_at")), (seven_day.get("used_pct"), seven_day.get("resets_at"))]
         free = frees_at(windows, accounts.HARD_WALL_PCT, now)
+        if isinstance(paced, list) and any(fnmatch.fnmatchcase(label, str(p)) for p in paced):
+            free = paced_until if free is None else max(free, paced_until)
         if free is not None:
             frees.append(free)
     return frees

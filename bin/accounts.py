@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import copy
 import fcntl
 import fnmatch
 import getpass
@@ -46,7 +47,8 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -2077,6 +2079,7 @@ def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dic
             effs["fable"] = 100.0
         last_seen = row.get("last_seen")
         canceled = bool(e.get("plan_canceled_at"))
+        seven_day_reset = parse_iso(row.get("seven_day_reset"))
         rows.append(
             {
                 "label": label,
@@ -2084,6 +2087,7 @@ def route_rows(blobs: dict, active_label: str | None, now_ts: float) -> list[dic
                 "five_hour": effs["five_hour"],
                 "five_hour_limited": five_hour_limited,
                 "seven_day": effs["seven_day"],
+                "seven_day_resets_at": None if seven_day_reset is None else seven_day_reset.timestamp(),
                 "fable": effs["fable"],
                 # A canceled plan routes like a dead login; renderers name it apart.
                 "expired": canceled or entry_needs_login(e, now_ts),
@@ -2265,6 +2269,17 @@ def write_statusline_snapshot(blobs: dict, *, error: str | None) -> dict:
         },
         "accounts": accounts_snapshot,
     }
+    pace = pacing_today(route_rows(blobs, None, now_ts), now_ts)
+    if pace is not None:
+        snapshot["pacing"] = {
+            "patterns": paced_patterns(),
+            "budget": round(pace.budget, 2),
+            "burned": round(pace.burned, 2),
+            "closed": pace.closed,
+            "since": int(pace.since),
+            "until": int(pace.day_end),
+            "problem": pace.problem,
+        }
     _write_0600(SNAPSHOT_PATH, json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     return snapshot
 
@@ -2415,6 +2430,7 @@ def rank_profile_rows(
     *,
     require_fable: bool = False,
     order: list[str] | None = None,
+    pace: Pace | None = None,
 ) -> list[dict]:
     def score(row: dict) -> tuple:
         if require_fable:
@@ -2425,7 +2441,212 @@ def rank_profile_rows(
             row["label"],
         )
 
-    return in_route_order(sorted(rows, key=score), order)
+    ranked = in_route_order(sorted(rows, key=score), order)
+    if require_fable or pace is None:
+        return ranked
+    return paced_first(ranked, pace)
+
+
+# ── pacing ────────────────────────────────────────────────────────────────
+# ACCOUNTS_PACED names accounts a machine spends evenly over their weeks. Each local day they
+# share one budget, in points of weekly allowance (one point is 1% of an account's week): for
+# each, what it has left spread evenly over the time to its weekly reset, today's part of it.
+# The budget is the pool's alone, so one account may burn all of it. While some is left the
+# paced accounts lead routing, soonest reset first; once the pool's burn reaches it they take
+# no work until the next local midnight. Bad data leaves routing as if unpaced.
+
+PACING_PATH = HOME / ".accounts" / "pacing.json"
+PACING_LOCK_PATH = HOME / ".accounts" / "pacing.lock"
+HOME_ZONE = "America/Los_Angeles"
+
+
+@dataclass(frozen=True)
+class Pace:
+    labels: frozenset[str]
+    budget: float
+    burned: float
+    since: float
+    day_end: float
+    problem: str | None = None
+
+    @property
+    def closed(self) -> bool:
+        return self.problem is None and self.burned >= self.budget
+
+    def leads(self, row: dict) -> bool:
+        return (
+            self.problem is None
+            and not self.closed
+            and row["label"] in self.labels
+            and _rate_eligible(row["five_hour"], row["seven_day"])
+        )
+
+
+def paced_patterns() -> list[str]:
+    """Label patterns from ACCOUNTS_PACED; empty, and pacing off, when unset."""
+    return _conf_var("ACCOUNTS_PACED").split()
+
+
+def pacing_excludes(pace: Pace | None) -> set[str]:
+    """The paced accounts once today's budget is spent."""
+    return set(pace.labels) if pace is not None and pace.closed else set()
+
+
+def paced_first(rows: list[dict], pace: Pace) -> list[dict]:
+    """ROWS with the paced accounts that can take work in front, soonest weekly reset first."""
+
+    def key(row: dict) -> tuple:
+        if pace.leads(row):
+            return (0, row.get("seven_day_resets_at") or math.inf)
+        return (1, 0.0)
+
+    return sorted(rows, key=key)
+
+
+def pacing_zone():
+    """The zone the status line shows times in, never a box's UTC clock: STATUSLINE_TZ,
+    ~/.claude/statusline-tz, TZ, else HOME_ZONE, as statusline.sh reads it."""
+    name = os.environ.get("STATUSLINE_TZ", "").strip()
+    tz_file = HOME / ".claude" / "statusline-tz"
+    if not name and tz_file.exists():
+        name = "".join(tz_file.read_text().split())
+    return ZoneInfo(name or os.environ.get("TZ", "").strip() or HOME_ZONE)
+
+
+def local_day(now: float, zone) -> tuple[str, float, float]:
+    """The local date holding NOW, and the epochs of its midnight and the next one."""
+    today = datetime.fromtimestamp(now, zone).date()
+    start = datetime.combine(today, datetime.min.time(), tzinfo=zone)
+    end = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=zone)
+    return today.isoformat(), start.timestamp(), end.timestamp()
+
+
+def _paced_window(start: float, start_pct: float, pct: float, resets_at: float, day_end: float) -> dict:
+    """Today's share of one weekly window: what it has left at START, spread evenly to its reset."""
+    covered = min(1.0, (day_end - start) / (resets_at - start))
+    return {
+        "from": start,
+        "start_pct": start_pct,
+        "last_pct": pct,
+        "resets_at": resets_at,
+        "share": max(0.0, 100.0 - start_pct) * covered,
+    }
+
+
+def advance_pacing(ledger: dict | None, rows: list[dict], now: float, zone) -> tuple[dict, Pace]:
+    """Today's ledger once ROWS, the paced accounts that can take work, are read into it, and
+    the pace it gives. A ledger from another day starts over."""
+    day, _, day_end = local_day(now, zone)
+    if ledger is not None and ledger.get("day") == day:
+        ledger = copy.deepcopy(ledger)
+    else:
+        ledger = {"version": 1, "day": day, "accounts": {}}
+    windows_by_label = ledger["accounts"]
+    counted: list[str] = []
+    unknown: list[str] = []
+    for row in rows:
+        label, pct, resets_at = row["label"], row["seven_day"], row.get("seven_day_resets_at")
+        windows = windows_by_label.get(label)
+        if row.get("stale") or pct is None or resets_at is None or (not windows and resets_at <= now):
+            unknown.append(label)
+            continue
+        if not windows:
+            windows_by_label[label] = [_paced_window(now, pct, pct, resets_at, day_end)]
+        elif windows[-1]["resets_at"] <= now < resets_at:
+            # The week turned over today: a fresh allowance, counted from the moment it began.
+            windows.append(_paced_window(windows[-1]["resets_at"], 0.0, pct, resets_at, day_end))
+        elif now < windows[-1]["resets_at"]:
+            windows[-1]["last_pct"] = max(windows[-1]["last_pct"], pct)
+        counted.append(label)
+    windows = [window for label in counted for window in windows_by_label[label]]
+    problem = None
+    if unknown:
+        problem = f"no fresh weekly figure for {', '.join(sorted(unknown))}"
+    elif not rows:
+        problem = "no paced account can take work"
+    pace = Pace(
+        labels=frozenset(row["label"] for row in rows),
+        budget=sum(window["share"] for window in windows),
+        burned=sum(max(0.0, window["last_pct"] - window["start_pct"]) for window in windows),
+        since=min((window["from"] for window in windows), default=now),
+        day_end=day_end,
+        problem=problem,
+    )
+    return ledger, pace
+
+
+def _load_pacing() -> dict | None:
+    try:
+        ledger = json.loads(PACING_PATH.read_text())
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        _preserve_corrupt(PACING_PATH)
+        return None
+    return ledger if isinstance(ledger, dict) else None
+
+
+def pacing_today(rows: list[dict] | None = None, now: float | None = None) -> Pace | None:
+    """Today's pace for this machine's paced accounts, with the ledger brought up to date; None
+    with pacing off. A failure to read the board or the ledger gives a pace with a problem."""
+    patterns = paced_patterns()
+    if not patterns:
+        return None
+    now = time.time() if now is None else now
+    try:
+        if rows is None:
+            rows = route_rows(load_blobs(), None, now)
+        excludes = excluded_labels()
+        paced = [
+            row
+            for row in rows
+            if any(fnmatch.fnmatchcase(row["label"], pattern) for pattern in patterns)
+            and not row["expired"]
+            and row["label"] not in excludes
+        ]
+        PACING_LOCK_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(PACING_LOCK_PATH, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = _load_pacing()
+            updated, pace = advance_pacing(ledger, paced, now, pacing_zone())
+            if updated != ledger:
+                _write_0600(PACING_PATH, json.dumps(updated, indent=2, sort_keys=True) + "\n")
+        return pace
+    except Exception as exc:
+        return Pace(frozenset(), 0.0, 0.0, now, now, problem=f"pacing could not run ({exc})")
+
+
+def profile_paced_out(label: str) -> bool:
+    """True when LABEL is paced and today's budget is spent, so its session should move."""
+    try:
+        return label in pacing_excludes(pacing_today())
+    except Exception:
+        return False
+
+
+def _clock(epoch: float, zone, today: str) -> str:
+    moment = datetime.fromtimestamp(epoch, zone)
+    hour = moment.hour % 12 or 12
+    text = f"{hour}:{moment.minute:02d}{'am' if moment.hour < 12 else 'pm'} {moment.tzname()}"
+    return text if moment.date().isoformat() == today else f"{moment.strftime('%a')} {text}"
+
+
+def describe_pace(pace: Pace, patterns: list[str]) -> str:
+    head = f"paced: {' '.join(patterns)}"
+    if pace.problem is not None:
+        return f"{head} — NOT PACING, {pace.problem}; routing as if unpaced"
+    zone = pacing_zone()
+    today, day_start, _ = local_day(time.time(), zone)
+    if pace.closed:
+        return (
+            f"{head} — today's budget of {pace.budget:.1f} points is spent ({pace.burned:.1f} burned);"
+            f" they take no work until {_clock(pace.day_end, zone, today)}"
+        )
+    counted = f", counted from {_clock(pace.since, zone, today)}" if pace.since > day_start else ""
+    return (
+        f"{head} — first, soonest weekly reset first; today's budget {pace.budget:.1f} points,"
+        f" {pace.burned:.1f} burned, {pace.budget - pace.burned:.1f} left{counted}"
+    )
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -3193,14 +3414,16 @@ def _select_profile_once(
             )
         leases = load_session_leases()
         order = route_order()
+        pace = pacing_today(rows)
         rows = rank_profile_rows(
             rows,
             require_fable=prefer_fable,
             order=order,
+            pace=pace,
         )
         if prefer_fable and not require_fable:
             rows = _fable_first(rows, order)
-        excludes = excluded_labels() | avoid_labels
+        excludes = excluded_labels() | avoid_labels | pacing_excludes(pace)
         accounts_map = blobs.get("accounts") or {}
         dirty = False
         while True:
@@ -3363,6 +3586,9 @@ def next_routable_at(*, require_fable: bool = False, now_ts: float | None = None
             for marker in marker_keys
             if marker in limits
         ]
+    pace = pacing_today(now=now_ts)
+    if pace is not None and pace.closed:
+        moments.append(pace.day_end)
     ahead = [moment for moment in moments if moment > now_ts]
     return min(ahead) if ahead else None
 
@@ -3398,12 +3624,14 @@ def handoff_target(
         mode, pin, force_pin = _route_preferences()
         order = route_order()
         rows = route_rows(blobs, current_label, time.time())
+        pace = pacing_today(rows)
         rows = rank_profile_rows(
             rows,
             require_fable=require_fable,
             order=order,
+            pace=pace,
         )
-        excludes = excluded_labels()
+        excludes = excluded_labels() | pacing_excludes(pace)
         current = next(
             (row for row in rows if row["label"] == current_label),
             None,
@@ -3441,10 +3669,17 @@ def handoff_target(
             return gain >= margin_pct
 
         # The first group with an account that can take the session decides, unless that
-        # account buys too little runway; then a later group gets its turn.
+        # account buys too little runway; then a later group gets its turn. Paced accounts
+        # with today's budget left come before every group.
+        lead = {
+            row["label"] for row in rows if pace is not None and not require_fable and pace.leads(row)
+        }
         groups = [rows] if pin is not None else [
-            [row for row in rows if route_group(row, order) == group]
-            for group in range(len(order) + 1)
+            [row for row in rows if row["label"] in lead],
+            *(
+                [row for row in rows if row["label"] not in lead and route_group(row, order) == group]
+                for group in range(len(order) + 1)
+            ),
         ]
         for group in groups:
             target = pick_profile_route(
@@ -3593,7 +3828,10 @@ def cmd_auto(_args) -> None:
     rows = [
         row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels
     ]
-    pick = pick_profile_route(in_route_order(rows), excluded_labels(), None)
+    pace = pacing_today(rows)
+    pick = pick_profile_route(
+        rank_profile_rows(rows, pace=pace), excluded_labels() | pacing_excludes(pace), None
+    )
     save_mode("auto", None)
     print("AUTO — supervised sessions use the freshest safe account")
     print(f"  next: {pick or '(none free)'}")
@@ -3606,9 +3844,12 @@ def cmd_fable(_args) -> None:
     rows = [
         row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels
     ]
-    excludes = excluded_labels()
+    pace = pacing_today(rows)
+    excludes = excluded_labels() | pacing_excludes(pace)
     order = route_order()
     rows = in_route_order(rows, order)
+    if pace is not None:
+        rows = paced_first(rows, pace)
     usable = sorted(
         (
             r
@@ -3767,7 +4008,11 @@ def cmd_status(_args) -> None:
         [row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels],
         order,
     )
-    excludes = excluded_labels()
+    pace = pacing_today(rows)
+    if pace is not None:
+        rows = paced_first(rows, pace)
+    paced_out = pacing_excludes(pace)
+    excludes = excluded_labels() | paced_out
     if mode["mode"] == "set":
         scope = "PANE" if mode.get("policy_scope") == "pane" else "SET"
         tag = f"{scope} → {mode['label']}"
@@ -3802,6 +4047,8 @@ def cmd_status(_args) -> None:
         f"   fable: {next_fable or '(none free)'}"
     )
     print(f"order: {describe_route_order(order)}")
+    if pace is not None:
+        print(describe_pace(pace, paced_patterns()))
     for r in rows:
         if not r.get("five_hour_limited", True):
             pct = "none"
@@ -3813,6 +4060,8 @@ def cmd_status(_args) -> None:
             flag = "  ⚠canceled"
         elif r["expired"]:
             flag = "  ⚠login"
+        elif r["label"] in paced_out:
+            flag = "  [paced, out for today]"
         elif r["label"] in excludes:
             flag = "  [excluded]"
         else:
