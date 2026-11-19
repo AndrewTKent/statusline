@@ -963,26 +963,36 @@ remote_epoch_relative() {
     remote_age_text "$delta"
 }
 
-# The pacing a board's snapshot carries when its machine sets ACCOUNTS_PACED: today's pooled
-# budget for the paced accounts, the burn against it, and when a spent budget opens again.
+# The pacing a board's snapshot carries when its machine sets ACCOUNTS_PACED, as a suffix for the
+# board's dim header: today's pooled burn against its budget, or when a spent budget opens again.
+# The paced set reads as one short name (sol-team-* → team) when every pattern reduces to it.
 # Nothing prints for a snapshot without it.
-pacing_line() {
-    local file="$1" patterns budget burned closed until problem back
+pacing_state() {
+    local file="$1" patterns budget burned closed until problem name="" pattern short
+    local -a pattern_list
     IFS=$'\037' read -r patterns budget burned closed until problem < <(jq -r '
         .pacing // empty
         | [(.patterns // [] | join(" ")), (.budget // 0), (.burned // 0), (.closed // false), (.until // 0), (.problem // "")]
         | map(tostring) | join("\u001f")
     ' "$file" 2>/dev/null)
     [ -n "$patterns" ] || return 0
-    printf -v budget '%.1f' "$budget" 2>/dev/null
-    printf -v burned '%.1f' "$burned" 2>/dev/null
     if [ -n "$problem" ]; then
-        printf '%b\n' "${dim}·${reset} ${yellow}paced ${patterns}: not pacing, ${problem}${reset}"
-    elif [ "$closed" = "true" ]; then
-        back=$(fmt_epoch "$until" "%a %l:%M%p %Z" | sed 's/  */ /g; s/AM/am/; s/PM/pm/')
-        printf '%b\n' "${dim}·${reset} ${yellow}paced ${patterns}: today's ${budget} pts spent, out until ${back}${reset}"
+        printf '%s' " · ${yellow}not pacing: ${problem}${reset}${dim}"
+        return 0
+    fi
+    read -ra pattern_list <<< "$patterns"
+    for pattern in "${pattern_list[@]}"; do
+        short="${pattern#sol-}"; short="${short%-\*}"
+        case "$short" in ''|*[*?[]*) name="$patterns"; break ;; esac
+        [ -z "$name" ] || [ "$name" = "$short" ] || { name="$patterns"; break; }
+        name="$short"
+    done
+    if [ "$closed" = "true" ]; then
+        printf '%s' " · ${yellow}${name} budget spent, back $(fmt_epoch "$until" "%l:%M%p %Z" | sed 's/^ //; s/AM/am/; s/PM/pm/')${reset}${dim}"
     else
-        printf '%b\n' "${dim}·${reset} ${dim}paced ${patterns}: ${burned} of today's ${budget} pts burned${reset}"
+        printf -v budget '%.1f' "$budget" 2>/dev/null
+        printf -v burned '%.1f' "$burned" 2>/dev/null
+        printf '%s' " · ${name} ${burned}/${budget} today"
     fi
 }
 
@@ -1232,7 +1242,7 @@ remote_board_lines() {
         { [ -n "$board_error" ] || [ "$age" -gt "$max_age" ]; } && fresh=false
         suffix=""
         [ -n "$board_error" ] && suffix=" · ${board_error}"
-        printf '%b\n' "${bold}${white}■ ${board_name}${reset} ${dim}· ${board_state}$(remote_age_text "$age") ago${suffix}${reset}"
+        printf '%b\n' "${bold}${white}■ ${board_name}${reset} ${dim}· ${board_state}$(remote_age_text "$age") ago$(pacing_state "$board_dir/statusline-snapshot.json")${suffix}${reset}"
         rows=$(jq -r '
             (.accounts // {}) | to_entries
             | sort_by(.key | ascii_downcase | [scan("[0-9]+|[^0-9]+") | tonumber? // .]) | .[] |
@@ -1267,7 +1277,6 @@ remote_board_lines() {
             [ "$row_expired" = "canceled" ] && suffix=" ${red}⚠ plan canceled${reset}"
             printf '%b\n' "${dim}·${reset} ${dim}${pad_name}${reset} ${five_color}$(_rb_ralign "$row_five" 4)${reset}  ${dim}$(_rb_ralign "$row_five_reset" 6)${reset}   ${seven_color}$(_rb_ralign "$row_seven" 4)${reset}   ${fable_color}$(_rb_ralign "$row_fable" 5)${reset}  ${dim}$(_rb_ralign "$row_fable_reset" 6)${reset}${suffix}"
         done <<< "$rows"
-        pacing_line "$board_dir/statusline-snapshot.json"
         # The board shows the box's whole account set, Codex included. Codex has no
         # 5h window: its 5h columns stay dashes even if one is ever reported.
         codex_rows=$(jq -r '
@@ -1712,11 +1721,14 @@ render_shared_account_snapshot() {
             [ "$padding" -lt 0 ] && padding=0
             printf '%*s%s' "$padding" '' "$value"
         }
-        local header_account board_header
+        local header_account board_header local_pacing header_pacing=""
         printf -v header_account '%-*s' "$name_width" "acct"
         board_header="  ${header_account} $(_shared_ralign "5h" 4)  $(_shared_ralign "reset" 6)   $(_shared_ralign "week" 4)   $(_shared_ralign "$board_scoped_label" 5)  $(_shared_ralign "reset" 6)"
-        _shared_emit "${dim}%s${reset}" "$board_header"
-        [ -n "${LOCAL_MACHINE_NAME:-}" ] && _shared_emit "${bold}${white}■ %s${reset}" "$LOCAL_MACHINE_NAME"
+        # This machine's pacing reads on its own header; with no machine name, on the column header above its rows.
+        local_pacing=$(pacing_state "$snapshot_file")
+        [ -z "${LOCAL_MACHINE_NAME:-}" ] && header_pacing="$local_pacing"
+        _shared_emit "${dim}%s%b${reset}" "$board_header" "$header_pacing"
+        [ -n "${LOCAL_MACHINE_NAME:-}" ] && _shared_emit "${bold}${white}■ %s${reset}%b" "$LOCAL_MACHINE_NAME" "${local_pacing:+${dim}${local_pacing}${reset}}"
         while IFS=$'\037' read -r row_label row_five row_five_reset row_five_stale row_five_pending \
             row_seven row_seven_reset row_seven_stale row_seven_pending row_scoped row_scoped_label \
             row_scoped_reset row_scoped_stale row_scoped_pending row_expired row_leases; do
@@ -1747,9 +1759,6 @@ render_shared_account_snapshot() {
                 "$(_shared_ralign "$row_five_reset" 6)" "$(_shared_ralign "$row_seven" 4)" \
                 "$(_shared_ralign "$row_scoped" 5)" "$(_shared_ralign "$row_scoped_reset" 6)" "$row_suffix"
         done <<< "$rows"
-        local pacing_row
-        pacing_row=$(pacing_line "$snapshot_file")
-        [ -n "$pacing_row" ] && _shared_emit '%b' "$pacing_row"
         while IFS= read -r remote_line; do
             [ -n "$remote_line" ] && _shared_emit '%b' "$remote_line"
         done <<< "$(remote_board_lines "$remote_root" "${REMOTE_BOARD_MAX_AGE:-900}" "$name_width")"
