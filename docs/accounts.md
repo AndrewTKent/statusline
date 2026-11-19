@@ -251,8 +251,14 @@ ACCOUNTS_PACED="acme-team-*"
   or, once it is spent,
   `paced: acme-team-* — today's budget of 19.5 points is spent (20.1 burned); they take no work until Thu 12:00am PST`.
   The board's snapshot carries it, so the account board, here and on a machine
-  that shows this one as a remote board, prints one `paced` line under the
-  accounts. The `✓ best next` marker on the older account table, without
+  that shows this one as a remote board, ends that board's header line with it:
+  `■ devbox · 12s ago · team 9.0/15.2 today`, then
+  `team budget spent, back 12:00am PST` once it is spent, or
+  `not pacing: <why>` on bad data. The paced set reads by a short name, its
+  patterns without a trailing `-*` or a leading `sol-` (`sol-team-*` reads
+  `team`), and as written when they do not come to one name. A local table with
+  no `LOCAL_MACHINE_NAME` header carries it on the column header above its
+  rows. The `✓ best next` marker on the older account table, without
   `SHARED_ACCOUNT_SNAPSHOT=1`, does not follow pacing.
 
 ## Naming this machine

@@ -247,23 +247,43 @@ remote_ultra_line=$(awk '/^■ devbox ·/{on=1; next} on && /^· Ultra /{$1 = $1
 codex_line=$(awk '/-codex/{$1 = $1; print}' <<< "$board_output")
 [ "$codex_line" = "· Seat-1-codex — — 37% — 3d" ] || { printf 'the Codex row is not its label, dashed 5h, week and weekly reset: %s\n' "$codex_line" >&2; exit 1; }
 
-# A board whose machine paces accounts says how today's pooled budget stands; one that does not says nothing.
-[[ "$board_output" != *"paced "* ]] || { printf 'a board without pacing rendered a pacing line\n' >&2; exit 1; }
+# A board whose machine paces accounts says how today's pooled budget stands on its header line, never
+# as a row of its table; a board that does not pace renders its headers exactly as before.
+colored_board=$(KEEP_COLORS=1 render_with_boards)
+grep -qxF $'\033[1m\033[38;2;220;220;220m■ devbox\033[0m \033[38;2;220;220;220m· 0s ago\033[0m' <<< "$(sed 's/^ *//' <<< "$colored_board")" ||
+    { printf 'a board without pacing changed its header:\n%s\n' "$colored_board" >&2; exit 1; }
+grep -qE $'^ *\033\\[38;2;220;220;220m  acct[ a-z0-9]*reset\033\\[0m$' <<< "$colored_board" ||
+    { printf 'a local board without pacing changed its column header:\n%s\n' "$colored_board" >&2; exit 1; }
 set_pacing() {  # $1: snapshot file; $2: a jq object for .pacing, or "null" to remove it
     jq --argjson pacing "$2" 'if $pacing == null then del(.pacing) else .pacing = $pacing end' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 paced_until=$(( NOW + 3600 ))
 set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" \
-    "{\"patterns\":[\"team-*\"],\"budget\":19.5,\"burned\":20.1,\"closed\":true,\"since\":0,\"until\":$paced_until,\"problem\":null}"
+    '{"patterns":["sol-team-*"],"budget":15.17,"burned":9,"closed":false,"since":0,"until":0,"problem":null}'
 set_pacing "$TEST_HOME/.accounts/statusline-snapshot.json" \
-    '{"patterns":["work"],"budget":12.4,"burned":3.2,"closed":false,"since":0,"until":0,"problem":null}'
+    "{\"patterns\":[\"work\"],\"budget\":19.5,\"burned\":20.1,\"closed\":true,\"since\":0,\"until\":$paced_until,\"problem\":null}"
 paced_output=$(render_with_boards)
-paced_zone="${STATUSLINE_TZ:-${TZ:-America/Los_Angeles}}"
-paced_day=$({ TZ="$paced_zone" date -d "@$paced_until" +%a 2>/dev/null || TZ="$paced_zone" date -r "$paced_until" +%a; })
-grep -qxF "· paced team-*: today's 19.5 pts spent, out until $paced_day $(clock_text "$paced_until")" <<< "$paced_output" ||
-    { printf 'a board with its paced accounts out for the day did not say until when:\n%s\n' "$paced_output" >&2; exit 1; }
-grep -qxF "· paced work: 3.2 of today's 12.4 pts burned" <<< "$paced_output" ||
-    { printf 'the local board did not say how much of its pooled budget is burned:\n%s\n' "$paced_output" >&2; exit 1; }
+grep -qxF "■ devbox · 0s ago · team 9.0/15.2 today" <<< "$paced_output" ||
+    { printf 'a board with budget left did not say its burn against it, by the short name, on its header:\n%s\n' "$paced_output" >&2; exit 1; }
+[ "$(wc -l <<< "$paced_output")" -eq "$(wc -l <<< "$board_output")" ] ||
+    { printf 'pacing added a line to the boards:\n%s\n' "$paced_output" >&2; exit 1; }
+grep -qE "^ +acct .*reset · work budget spent, back $(clock_text "$paced_until")\$" <<< "$paced_output" ||
+    { printf 'an unnamed local board with its budget spent did not say when it is back on its column header:\n%s\n' "$paced_output" >&2; exit 1; }
+set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" \
+    '{"patterns":["team-*"],"budget":0,"burned":0,"closed":false,"since":0,"until":0,"problem":"no fresh weekly figure for team-1"}'
+grep -qxF "■ devbox · 0s ago · not pacing: no fresh weekly figure for team-1" <<< "$(render_with_boards)" ||
+    { printf 'a board that cannot pace did not say why on its header\n' >&2; exit 1; }
+for written in '"team-*","max-*"' '"sol-team-?-*"'; do
+    set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" \
+        "{\"patterns\":[$written],\"budget\":2,\"burned\":1,\"closed\":false,\"since\":0,\"until\":0,\"problem\":null}"
+    grep -qF "■ devbox · 0s ago · $(tr -d '"' <<< "${written/,/ }") " <<< "$(render_with_boards)" ||
+        { printf 'paced patterns with no one clean short name did not read as written: %s\n' "$written" >&2; exit 1; }
+done
+printf 'LOCAL_MACHINE_NAME="laptop"\n' >> "$TEST_HOME/.claude/statusline.conf"
+named_paced_output=$(render_with_boards)
+[[ "$named_paced_output" == *$'\n■ laptop · work '* && "$named_paced_output" != *"reset · work"* ]] ||
+    { printf 'a named local board did not carry its pacing on its own header:\n%s\n' "$named_paced_output" >&2; exit 1; }
+sed -i.bak '/^LOCAL_MACHINE_NAME=/d' "$TEST_HOME/.claude/statusline.conf" && rm -f "$TEST_HOME/.claude/statusline.conf.bak"
 set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" null
 set_pacing "$TEST_HOME/.accounts/statusline-snapshot.json" null
 
