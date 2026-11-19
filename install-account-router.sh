@@ -45,8 +45,8 @@ cp "$repo_root/shell/claude-supervised" "$temp"
 chmod 755 "$temp"
 mv -f "$temp" "$native_claude"
 
-touch "$zshrc"
-if ! grep -Fqx "$path_line" "$zshrc"; then
+# A zshrc that already has both lines is left alone, so a reinstall writes no shell rc file.
+if ! grep -Fqx "$path_line" "$zshrc" 2>/dev/null; then
     printf '\n%s\n' "$path_line" >> "$zshrc"
 fi
 if ! grep -Fqx "$codex_path_line" "$zshrc"; then

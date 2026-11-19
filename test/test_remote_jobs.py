@@ -329,6 +329,26 @@ class TestState:
             {"since": 1900, "next_poll": 2100, "walled": walled, "resumes_at": resumes_at},
         )
 
+    def test_a_lane_walled_while_the_paced_accounts_are_out_for_the_day_resumes_at_their_midnight(
+        self, box, monkeypatch
+    ):
+        write_job(box)
+        write_quota_wait(box, walled=["claude"])
+        write_process(box, LAUNCHER, PANE)
+        live(monkeypatch, "demo")
+        under_the_wall = {"used_pct": 10.0, "resets_at": iso(9000), "stale": False}
+        (box / ".accounts").mkdir(parents=True, exist_ok=True)
+        (box / ".accounts" / "statusline-snapshot.json").write_text(
+            json.dumps(
+                {
+                    "accounts": {"team-1": {"five_hour": under_the_wall, "seven_day": under_the_wall}},
+                    "pacing": {"patterns": ["team-*"], "closed": True, "until": 3600},
+                }
+            )
+        )
+
+        assert only_job(remote_jobs.build(2000.0))["quota"]["resumes_at"] == 3600
+
     @pytest.mark.parametrize("walled,published", [(None, []), (["gpu", "claude"], ["claude"])])
     def test_a_marker_names_only_the_pools_it_knows(self, box, walled, published):
         directory = write_job(box)

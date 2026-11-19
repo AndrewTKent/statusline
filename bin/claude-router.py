@@ -61,6 +61,7 @@ HANDOFF_REASONS = {
     "session": "session limit",
     "fable": "fable limit",
     "removed": "account removed from this machine",
+    "paced": "today's budget for the paced accounts is spent",
 }
 HOLD_NOTICE = (
     "The account router held this session from {start} to {end} because no"
@@ -1273,6 +1274,25 @@ def run_supervised(binary: str, args: list[str]) -> int:
                         limit_rejected,
                         router_pid,
                     )
+                paced_route = None
+                if (
+                    session_id
+                    and not hard_limit_reached
+                    and not limit_rejected
+                    and not directory_removed
+                    and mode.get("mode") != "set"
+                    and accounts.profile_paced_out(selected["label"])
+                ):
+                    paced_route = session_limit_route(
+                        selected,
+                        limit_family,
+                        "paced",
+                        router_pid,
+                    )
+                    if paced_route is None and not in_flight_workflows(session_id):
+                        # With nowhere to go, the account is as good as walled until local midnight.
+                        hard_limit_kind = "paced"
+                        hard_limit_reached = True
                 now = time.monotonic()
                 if now - last_heartbeat >= LEASE_HEARTBEAT_S:
                     accounts.upsert_session_lease(
@@ -1328,6 +1348,14 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if directory_removed:
                         print(removed_directory_notice(session_id), file=sys.stderr)
                         return 1
+                    if hard_limit_kind == "paced":
+                        print(
+                            "accounts: the paced accounts have spent today's budget and no other"
+                            " account can take this session. The session is saved — resume it after"
+                            " local midnight, when they take work again.",
+                            file=sys.stderr,
+                        )
+                        return 1
                     # The stop is a cost guard, not a routing failure: continuing
                     # past a plan wall bills overage, which is the user's call.
                     print(
@@ -1349,6 +1377,9 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     if limit_route is None:
                         continue
                     next_profile, next_override = limit_route
+                    next_model = next_override or current_model
+                elif paced_route is not None:
+                    next_profile, next_override = paced_route
                     next_model = next_override or current_model
                 else:
                     mode, mode_generation = accounts.load_mode_snapshot()
@@ -1571,7 +1602,8 @@ def run_supervised(binary: str, args: list[str]) -> int:
                 if moved_by is None and in_flight:
                     # A planned move can wait for the work the stop would kill.
                     pending_since = pending_since or time.time()
-                    if time.time() - pending_since < handoff_grace_s():
+                    # No wall stands behind a paced move, so it waits out the Workflow whatever its length.
+                    if paced_route is not None or time.time() - pending_since < handoff_grace_s():
                         waiting_mode_generation = move_generation
                         write_router_state(
                             state_path,
@@ -1599,7 +1631,11 @@ def run_supervised(binary: str, args: list[str]) -> int:
                     next_model,
                     current_effort,
                     relaunch_message(
-                        handoff_notice(selected["label"], next_profile["label"], moved_by)
+                        handoff_notice(
+                            selected["label"],
+                            next_profile["label"],
+                            "paced" if paced_route is not None else moved_by,
+                        )
                         if accounts.handoff_notice_enabled()
                         else None,
                         brief_prompt,
