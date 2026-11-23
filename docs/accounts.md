@@ -75,6 +75,7 @@ count the status line shows.
 | `accounts auto` | Clear global and pane pins, then route supervised sessions to the freshest account |
 | `accounts fable` | Switch live supervised sessions to Fable while headroom is available |
 | `accounts status` | Mode, the route order, per-account 5h/7d/Fable headroom + ⚠login flags |
+| `accounts lead` | One line naming where new work on this machine goes now, Claude or Codex: `claude <label>`, `codex <label>` or `none` |
 | `accounts schedule` | List the board schedule's windows and what the board shows now |
 | `accounts schedule add <days> [HH:MM-HH:MM] [--show all\|<label,...>]` | Add a window: days such as `sat,sun` or `mon-fri`, hours in the board's zone (all day when omitted), and the local accounts it shows (`all` by default). The first window holding the current day and time decides the board; outside every window `ACCOUNTS_HIDE_OTHERS` and `ACCOUNTS_HIDE` apply |
 | `accounts schedule remove <n>` / `accounts schedule clear` | Remove one window, or all of them |
@@ -191,13 +192,18 @@ ACCOUNTS_ROUTE_ORDER="acme-max*"
 `ACCOUNTS_PACED` in `~/.claude/statusline.conf` names accounts this machine
 spends a day's share of at a time, as label patterns, so their weekly allowance
 is used evenly and used up by each reset instead of burned early or left to
-expire. Unset, nothing is paced and routing is unchanged.
+expire. The patterns name Claude accounts and, by the same labels, the
+machine's Codex accounts (`codex-accounts status`). Unset, nothing is paced and
+routing is unchanged.
 
 Andrew, 2026-11-18 2:47pm PST: "we should burn through each of those accounts
 enough such that we use an squivalent each day", "after we burn an amount - out
 of the total token usage for all those accounts - be it on one or two etc of
 those three acounts", "we switch to max", "or dont allow them to be used"; and
 2:52pm PST: "the weekly amount could be all drained from one account that day".
+2026-11-23 1:02pm PST: "make sure that it is drawing from the two claude team
+and the codex team"; 1:14pm PST: "we need codex in there too", "it needs to be
+used".
 
 ```bash
 ACCOUNTS_PACED="acme-team-*"
@@ -205,8 +211,10 @@ ACCOUNTS_PACED="acme-team-*"
 
 - **One budget a day for the paced accounts together.** The unit is points of
   weekly allowance: one point is 1% of an account's week, read from its
-  `seven_day` usage, so the pool assumes the paced accounts have plans of the
-  same size. Each account brings what it has left, spread evenly over the time
+  `seven_day` usage, or for a Codex account from the usage window that spans a
+  week (10080 minutes, `primary` or `secondary` depending on the plan), so the
+  pool assumes the paced accounts have plans of the same size. A Codex account
+  counts apart from a Claude account of the same label. Each account brings what it has left, spread evenly over the time
   to its weekly reset, today's part of it: `(100 − used) × length of today ÷
   time to reset`, at most all it has left, which is what an account that resets
   during the day brings. The pool is the sum.
@@ -215,11 +223,16 @@ ACCOUNTS_PACED="acme-team-*"
   ceiling, and the router then moves to the next paced account.
 - **While the pool has budget left, the paced accounts take work first**, ahead
   of `ACCOUNTS_ROUTE_ORDER`, the account whose week resets soonest first, among
-  those under the 80% five-hour and 90% weekly ceilings. A running session moves
+  those under the 80% five-hour and 90% weekly ceilings, and among Codex
+  accounts those the Codex router would route to. A Codex week not yet started
+  reads as resetting a full week out, so it comes last. A Claude launch picks
+  among the Claude accounts; `accounts lead` names the one account, Claude or
+  Codex, a launcher that can run either should use. A running session moves
   only at its own wall, as before.
 - **Once the pool's burn reaches its budget the paced accounts take no work
   until the next local midnight.** New sessions and handoffs go to the
-  machine's other accounts. A session running on a paced account moves at its
+  machine's other accounts, and `accounts lead` names a Codex account only if it
+  is not paced. A session running on a paced account moves at its
   next handoff point, after any Workflow in flight finishes, however long that
   takes. With no other account, the router does what it does when every account
   is walled: it refuses a launch under `ACCOUNTS_STRICT_QUOTA=1` and stops a
@@ -241,15 +254,26 @@ ACCOUNTS_PACED="acme-team-*"
   only the rest of that day. An unreadable ledger is kept aside as
   `pacing.json.corrupt.<time>` and the day counts from then.
 - **Bad data never blocks an account.** A paced account that can take work but
-  has a stale weekly figure (no poll for 3 hours) or no weekly reset leaves the
-  machine routing as if unpaced until it reads again, and `accounts status`
-  says so. An account that needs a login, or is excluded, is left out of the
-  pool.
+  has a stale weekly figure (no poll for 3 hours; for a Codex account, a
+  failed poll or none for the Codex router's 5 minutes) or no weekly reset
+  leaves the machine routing as if unpaced until it reads again, and
+  `accounts status` says so. An account that needs a login, or is excluded, is
+  left out of the pool.
 - **A pin outranks pacing**, as it outranks the order.
 - `accounts status` prints the day's standing, for example
   `paced: acme-team-* — first, soonest weekly reset first; today's budget 19.5 points, 3.2 burned, 16.3 left`,
   or, once it is spent,
   `paced: acme-team-* — today's budget of 19.5 points is spent (20.1 burned); they take no work until Thu 12:00am PST`.
+  Each account in the pool is flagged `[paced]`, or `[paced, out for today]`
+  once the budget is spent, and a paced Codex account is listed below the
+  Claude ones as the board names it, `acme-team-1-codex`.
+- `accounts lead` prints `claude <label>` or `codex <label>` for the paced
+  account that leads while the pool has budget; otherwise `claude <label>` for
+  the account `accounts status` names under `general:` if it is short of 100%
+  on both windows; otherwise `codex <label>` for the account the Codex router
+  would pick, leaving out a paced-out one; otherwise `none`. With
+  `ACCOUNTS_PACED` unset that is: Claude when it has room, else Codex when it
+  has room.
   The board's snapshot carries it, so the account board, here and on a machine
   that shows this one as a remote board, ends that board's header line with it:
   `■ devbox · 12s ago · team 9.0/15.2 today`, then

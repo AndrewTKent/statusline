@@ -190,17 +190,9 @@ def handoff_target(current: str) -> str | None:
     if mode.get("mode") == "set":
         return selected if selected != current else None
     current_row = usage.get(current, {})
-    if current_row.get("error"):
+    if not codex_accounts.is_fresh(current_row, time.time()):
         return None
-    if time.time() - float(current_row.get("fetched_at", 0)) > codex_accounts.USAGE_MAX_AGE_S:
-        return None
-    limits = current_row.get("rate_limits") or {}
-    weekly = None
-    for key in ("primary", "secondary"):
-        limit = limits.get(key)
-        if isinstance(limit, dict) and limit.get("window_duration_mins") == 10080:
-            weekly = limit
-            break
+    weekly = codex_accounts.weekly_window(current_row)
     if weekly is None or weekly.get("used_percent") is None:
         return None
     current_usage = float(weekly["used_percent"])

@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import accounts  # noqa: E402
+import codex_accounts  # noqa: E402
 
 NOW = datetime(2026, 7, 16, 20, 0, 0, tzinfo=timezone.utc)
 
@@ -1359,7 +1360,13 @@ class TestPacingBudget:
 class TestPacedRouting:
     """team-* paced on a UTC day; max-* is the machine's other account."""
 
-    def _board(self, tmp_path, monkeypatch, resets, *, conf='ACCOUNTS_PACED="team-*"\n', ledger=None):
+    def _board(
+        self, tmp_path, monkeypatch, resets, *, conf='ACCOUNTS_PACED="team-*"\n', ledger=None, codex=None
+    ):
+        codex = codex or {}
+        monkeypatch.setattr(codex_accounts, "load_registry", lambda: {label: {} for label in codex})
+        monkeypatch.setattr(codex_accounts, "load_usage", lambda: codex)
+        monkeypatch.setattr(codex_accounts, "load_mode", lambda: {"mode": "auto"})
         labels = [key.split("@")[0] for key in resets]
         blobs = {
             "accounts": {
@@ -1403,6 +1410,27 @@ class TestPacedRouting:
                 "last_seen": now - seen_ago,
             }
         }
+
+    @staticmethod
+    def _codex(week, resets_in_days, *, seen_ago=0.0, error=None):
+        """A Codex usage reading whose weekly window is the secondary one, under a 5-hour primary."""
+        now = time.time()
+        return {
+            "fetched_at": now - seen_ago,
+            **({"error": error} if error else {}),
+            "rate_limits": {
+                "primary": {"used_percent": 50.0, "window_duration_mins": 300, "resets_at": now + 3600},
+                "secondary": {
+                    "used_percent": week,
+                    "window_duration_mins": codex_accounts.WEEK_MINUTES,
+                    "resets_at": now + resets_in_days * DAY,
+                },
+            },
+        }
+
+    def _lead(self, capsys):
+        accounts.cmd_lead(types.SimpleNamespace())
+        return capsys.readouterr().out.strip()
 
     @staticmethod
     def _spent_today(windows):
@@ -1563,6 +1591,132 @@ class TestPacedRouting:
 
         assert accounts.select_profile()["label"] == "team-1"
 
+    def test_a_claude_and_a_codex_account_of_one_label_are_two_members_of_one_pool(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 40.0, 3.0),
+            codex={"team-1": self._codex(20.0, 5.0), "solo": self._codex(0.0, 1.0)},
+        )
+        day_left = 1.0 - (time.time() % DAY) / DAY
+
+        pace = accounts.pacing_today()
+
+        assert pace.budget == pytest.approx(60.0 * day_left / 3.0 + 80.0 * day_left / 5.0, rel=1e-3)
+
+    @pytest.mark.parametrize(
+        "reading",
+        [
+            {"seen_ago": codex_accounts.USAGE_MAX_AGE_S + 60},
+            {"error": "Codex app-server did not return rate limits"},
+        ],
+        ids=["stale", "poll-failed"],
+    )
+    def test_a_paced_codex_account_with_no_fresh_reading_leaves_routing_as_if_unpaced(
+        self, tmp_path, monkeypatch, reading
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 40.0, 3.0),
+            codex={"team-1": self._codex(20.0, 4.0, **reading)},
+        )
+
+        assert accounts.pacing_today().problem == "no fresh weekly figure for team-1-codex"
+
+    def test_a_paced_codex_account_that_needs_a_login_is_left_out_of_the_pool(
+        self, tmp_path, monkeypatch
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 40.0, 3.0),
+            codex={"team-1": {"fetched_at": time.time(), "error": codex_accounts.LOGIN_REQUIRED}},
+        )
+
+        assert accounts.pacing_today().labels == {"team-1"}
+
+    @pytest.mark.parametrize(
+        ("team_1", "codex", "lead"),
+        [
+            ((5.0, 40.0, 3.0), (0.0, 6.0), "claude team-1"),
+            ((5.0, 40.0, 3.0), (0.0, 1.0), "codex team-1"),
+            ((95.0, 40.0, 3.0), (0.0, 6.0), "codex team-1"),
+            ((95.0, 40.0, 3.0), (100.0, 6.0), "claude max-1"),
+        ],
+        ids=["claude-resets-sooner", "codex-resets-sooner", "claude-walled", "both-walled"],
+    )
+    def test_lead_names_the_paced_account_whose_week_resets_soonest_claude_or_codex(
+        self, tmp_path, monkeypatch, capsys, team_1, codex, lead
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {**self._account("team-1", *team_1), **self._account("max-1", 0.0, 5.0, 3.0)},
+            codex={"team-1": self._codex(*codex)},
+        )
+
+        assert self._lead(capsys) == lead
+
+    @pytest.mark.parametrize(
+        ("max_1", "lead"),
+        [((10.0, 10.0), "claude max-1"), ((100.0, 10.0), "none")],
+        ids=["other-claude-free", "other-claude-walled"],
+    )
+    def test_a_spent_pool_sends_new_work_past_every_paced_account(
+        self, tmp_path, monkeypatch, capsys, max_1, lead
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            {**self._account("team-1", 5.0, 40.0, 3.0), **self._account("max-1", *max_1, 3.0)},
+            ledger=self._spent_today({"team-1": (30.0, 10.0), "codex:team-1": (0.0, 0.0)}),
+            codex={"team-1": self._codex(0.0, 1.0)},
+        )
+
+        assert self._lead(capsys) == lead
+
+    @pytest.mark.parametrize(
+        ("max_1", "lead"),
+        [((10.0, 10.0), "claude max-1"), ((100.0, 10.0), "codex solo")],
+        ids=["claude-free", "claude-walled"],
+    )
+    def test_unpaced_lead_is_claude_with_room_else_codex_with_room(
+        self, tmp_path, monkeypatch, capsys, max_1, lead
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("max-1", *max_1, 3.0),
+            conf="",
+            codex={"solo": self._codex(0.0, 6.0)},
+        )
+        monkeypatch.setattr(accounts, "load_mode", lambda: {"mode": "set", "label": "max-1"})
+
+        assert self._lead(capsys) == lead
+
+    @pytest.mark.parametrize(
+        ("ledger", "flag"),
+        [(None, "  [paced]"), ({"team-1": (30.0, 10.0), "codex:team-1": (20.0, 0.0)}, "  [paced, out for today]")],
+        ids=["open", "spent"],
+    )
+    def test_status_lists_a_paced_codex_account_by_its_board_name(
+        self, tmp_path, monkeypatch, capsys, ledger, flag
+    ):
+        self._board(
+            tmp_path,
+            monkeypatch,
+            self._account("team-1", 5.0, 40.0, 3.0),
+            ledger=ledger and self._spent_today(ledger),
+            codex={"team-1": self._codex(20.0, 4.0)},
+        )
+
+        accounts.cmd_status(types.SimpleNamespace())
+
+        assert f"   team-1-codex 5h     —  7d   20%  fable     —{flag}\n" in capsys.readouterr().out
+
     def test_an_unreadable_ledger_is_kept_aside_and_the_day_counts_from_now(
         self, tmp_path, monkeypatch
     ):
@@ -1628,7 +1782,13 @@ class TestPacedRouting:
         self, tmp_path, monkeypatch, capsys
     ):
         resets = {**self._account("team-1", 26.0, 4.0, 6.7), **self._account("team-2", 0.0, 65.0, 0.8)}
-        self._board(tmp_path, monkeypatch, resets, conf='ACCOUNTS_ROUTE_ORDER="max-*"\n')
+        self._board(
+            tmp_path,
+            monkeypatch,
+            resets,
+            conf='ACCOUNTS_ROUTE_ORDER="max-*"\n',
+            codex={"team-1": self._codex(20.0, 4.0)},
+        )
 
         accounts.cmd_status(types.SimpleNamespace())
 

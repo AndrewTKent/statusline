@@ -17,6 +17,7 @@ Router commands:
   mint / tokens   mint a long-lived token for an account / list minted tokens
   sync            converge the minted-token vault with the sync host
   pick-env        emit env exports for the best routable account
+  lead            where new work goes now: claude LABEL, codex LABEL or none
   move LABEL      move an account to (--to HOST) or from (--from HOST) another machine
   login --box HOST LABEL     log a box in to LABEL on its own, with a fresh /login there
   register LABEL  record the login in LABEL's profile as that account (login --box runs it)
@@ -52,6 +53,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import codex_accounts
 import lane_ownership
 import remote_boards
 
@@ -2448,16 +2450,18 @@ def rank_profile_rows(
 
 
 # ── pacing ────────────────────────────────────────────────────────────────
-# ACCOUNTS_PACED names accounts a machine spends evenly over their weeks. Each local day they
-# share one budget, in points of weekly allowance (one point is 1% of an account's week): for
-# each, what it has left spread evenly over the time to its weekly reset, today's part of it.
-# The budget is the pool's alone, so one account may burn all of it. While some is left the
-# paced accounts lead routing, soonest reset first; once the pool's burn reaches it they take
-# no work until the next local midnight. Bad data leaves routing as if unpaced.
+# ACCOUNTS_PACED names accounts a machine spends evenly over their weeks, Claude and Codex alike.
+# Each local day they share one budget, in points of weekly allowance (one point is 1% of an
+# account's week): for each, what it has left spread evenly over the time to its weekly reset,
+# today's part of it. The budget is the pool's alone, so one account may burn all of it. While
+# some is left the paced accounts lead routing, soonest reset first; once the pool's burn
+# reaches it they take no work until the next local midnight. Bad data leaves routing as if unpaced.
 
 PACING_PATH = HOME / ".accounts" / "pacing.json"
 PACING_LOCK_PATH = HOME / ".accounts" / "pacing.lock"
 HOME_ZONE = "America/Los_Angeles"
+# A Codex account's key in the pool: a Claude label holds no colon, so the two never collide.
+CODEX_POOL_PREFIX = "codex:"
 
 
 @dataclass(frozen=True)
@@ -2473,10 +2477,13 @@ class Pace:
     def closed(self) -> bool:
         return self.problem is None and self.burned >= self.budget
 
+    @property
+    def open(self) -> bool:
+        return self.problem is None and not self.closed
+
     def leads(self, row: dict) -> bool:
         return (
-            self.problem is None
-            and not self.closed
+            self.open
             and row["label"] in self.labels
             and _rate_eligible(row["five_hour"], row["seven_day"])
         )
@@ -2490,6 +2497,67 @@ def paced_patterns() -> list[str]:
 def pacing_excludes(pace: Pace | None) -> set[str]:
     """The paced accounts once today's budget is spent."""
     return set(pace.labels) if pace is not None and pace.closed else set()
+
+
+def paced_out_codex(pace: Pace | None) -> set[str]:
+    """The Codex labels of the paced accounts once today's budget is spent."""
+    return {
+        key.removeprefix(CODEX_POOL_PREFIX)
+        for key in pacing_excludes(pace)
+        if key.startswith(CODEX_POOL_PREFIX)
+    }
+
+
+def pool_name(key: str) -> str:
+    """A pool member as the board names it: a Codex account reads `<label>-codex`."""
+    if key.startswith(CODEX_POOL_PREFIX):
+        return f"{key.removeprefix(CODEX_POOL_PREFIX)}-codex"
+    return key
+
+
+def codex_paced_rows(patterns: list[str], now: float) -> list[dict]:
+    """This machine's Codex accounts the patterns name, as pool rows. Their week is the usage
+    window that spans one, stale as the Codex router reads it; one that needs a login is left out."""
+    usage = codex_accounts.load_usage()
+    rows = []
+    for label in sorted(codex_accounts.load_registry()):
+        reading = usage.get(label) or {}
+        if not any(fnmatch.fnmatchcase(label, pattern) for pattern in patterns):
+            continue
+        if reading.get("error") == codex_accounts.LOGIN_REQUIRED:
+            continue
+        week = codex_accounts.weekly_window(reading) or {}
+        rows.append(
+            {
+                "label": CODEX_POOL_PREFIX + label,
+                "seven_day": week.get("used_percent"),
+                "seven_day_resets_at": week.get("resets_at"),
+                "stale": not codex_accounts.is_fresh(reading, now),
+                "takes_work": codex_accounts.has_headroom(reading),
+            }
+        )
+    return rows
+
+
+def paced_lead(claude_rows: list[dict], codex_rows: list[dict], pace: Pace | None) -> str | None:
+    """`claude <label>` or `codex <label>`: of the paced accounts that can take work, the one
+    whose week resets soonest; None while the pool is spent or not pacing."""
+    if pace is None or not pace.open:
+        return None
+    candidates = [
+        (row.get("seven_day_resets_at") or math.inf, "claude", row["label"])
+        for row in claude_rows
+        if pace.leads(row)
+    ]
+    candidates += [
+        (row["seven_day_resets_at"] or math.inf, "codex", row["label"].removeprefix(CODEX_POOL_PREFIX))
+        for row in codex_rows
+        if row["label"] in pace.labels and row["takes_work"]
+    ]
+    if not candidates:
+        return None
+    _, kind, label = min(candidates)
+    return f"{kind} {label}"
 
 
 def paced_first(rows: list[dict], pace: Pace) -> list[dict]:
@@ -2561,7 +2629,7 @@ def advance_pacing(ledger: dict | None, rows: list[dict], now: float, zone) -> t
     windows = [window for label in counted for window in windows_by_label[label]]
     problem = None
     if unknown:
-        problem = f"no fresh weekly figure for {', '.join(sorted(unknown))}"
+        problem = f"no fresh weekly figure for {', '.join(sorted(map(pool_name, unknown)))}"
     elif not rows:
         problem = "no paced account can take work"
     pace = Pace(
@@ -2603,7 +2671,7 @@ def pacing_today(rows: list[dict] | None = None, now: float | None = None) -> Pa
             if any(fnmatch.fnmatchcase(row["label"], pattern) for pattern in patterns)
             and not row["expired"]
             and row["label"] not in excludes
-        ]
+        ] + codex_paced_rows(patterns, now)
         PACING_LOCK_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with open(PACING_LOCK_PATH, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -3997,12 +4065,13 @@ def cmd_schedule(args) -> None:
     print(f"now {now.strftime('%a %H:%M %Z')}: {shown}")
 
 
-def cmd_status(_args) -> None:
+def _status_board() -> tuple[list[dict], Pace | None, list[str]]:
+    """The board `accounts status` reads, in route order with the paced accounts that lead in
+    front; today's pace; and the route order."""
     with locked():
         blobs = load_blobs()
         capture_live_to_blobs(blobs)
         blocked_labels = sync_profile_credentials(blobs, persist=True)
-    mode = load_mode()
     order = route_order()
     rows = in_route_order(
         [row for row in route_rows(blobs, None, time.time()) if row["label"] not in blocked_labels],
@@ -4011,44 +4080,52 @@ def cmd_status(_args) -> None:
     pace = pacing_today(rows)
     if pace is not None:
         rows = paced_first(rows, pace)
-    paced_out = pacing_excludes(pace)
-    excludes = excluded_labels() | paced_out
+    return rows, pace, order
+
+
+def _next_routes(rows: list[dict], pace: Pace | None, order: list[str]) -> tuple[str, str | None, str | None]:
+    """The routing mode as status names it, and the accounts it gives general and Fable work next."""
+    mode = load_mode()
+    excludes = excluded_labels() | pacing_excludes(pace)
+    ordered = rows
+    pin = None
+    force_pin = False
     if mode["mode"] == "set":
         scope = "PANE" if mode.get("policy_scope") == "pane" else "SET"
         tag = f"{scope} → {mode['label']}"
-        ordered = rows
         pin = mode["label"]
         force_pin = True
     elif mode["mode"] == "fable":
         tag = "FABLE"
         ordered = _fable_first(rows, order)
-        pin = None
-        force_pin = False
     else:
         tag = "AUTO"
-        ordered = rows
-        pin = None
-        force_pin = False
-    next_general = pick_profile_route(
-        ordered,
-        excludes,
-        pin,
-        force_pin=force_pin,
-    )
-    next_fable = pick_profile_route(
-        ordered,
-        excludes,
-        pin,
-        require_fable=True,
-        force_pin=force_pin,
-    )
+    general = pick_profile_route(ordered, excludes, pin, force_pin=force_pin)
+    fable = pick_profile_route(ordered, excludes, pin, require_fable=True, force_pin=force_pin)
+    return tag, general, fable
+
+
+def pool_flag(key: str, pace: Pace | None) -> str:
+    """How status marks a member of today's pool: taking work, or out for the day."""
+    if pace is None or pace.problem is not None or key not in pace.labels:
+        return ""
+    return "  [paced, out for today]" if pace.closed else "  [paced]"
+
+
+def cmd_status(_args) -> None:
+    rows, pace, order = _status_board()
+    tag, next_general, next_fable = _next_routes(rows, pace, order)
     print(
         f"mode: {tag}   general: {next_general or '(none free)'}"
         f"   fable: {next_fable or '(none free)'}"
     )
     print(f"order: {describe_route_order(order)}")
+    codex_rows = []
     if pace is not None:
         print(describe_pace(pace, paced_patterns()))
+        codex_rows = codex_paced_rows(paced_patterns(), time.time())
+    width = max([12, *(len(pool_name(row["label"])) for row in codex_rows)])
+    excludes = excluded_labels()
     for r in rows:
         if not r.get("five_hour_limited", True):
             pct = "none"
@@ -4056,17 +4133,48 @@ def cmd_status(_args) -> None:
             pct = "—" if r["five_hour"] is None else f"{r['five_hour']:.0f}%"
         spct = "—" if r["seven_day"] is None else f"{r['seven_day']:.0f}%"
         fpct = "—" if r["fable"] is None else f"{r['fable']:.0f}%"
+        flag = pool_flag(r["label"], pace)
         if r.get("canceled"):
             flag = "  ⚠canceled"
         elif r["expired"]:
             flag = "  ⚠login"
-        elif r["label"] in paced_out:
-            flag = "  [paced, out for today]"
-        elif r["label"] in excludes:
+        elif not flag and r["label"] in excludes:
             flag = "  [excluded]"
-        else:
-            flag = ""
-        print(f"   {r['label']:<12} 5h {pct:>5}  7d {spct:>5}  fable {fpct:>5}{flag}")
+        print(f"   {r['label']:<{width}} 5h {pct:>5}  7d {spct:>5}  fable {fpct:>5}{flag}")
+    # Codex has no 5-hour or Fable window here, as on the board.
+    for r in codex_rows:
+        spct = "—" if r["seven_day"] is None else f"{r['seven_day']:.0f}%"
+        flag = pool_flag(r["label"], pace)
+        print(f"   {pool_name(r['label']):<{width}} 5h {'—':>5}  7d {spct:>5}  fable {'—':>5}{flag}")
+
+
+def _short_of_walls(row: dict) -> bool:
+    # The bar the lane launcher read off status before lead existed; an unknown reading passed it.
+    return all(pct is None or pct < 100 for pct in (row["five_hour"], row["seven_day"]))
+
+
+def new_work_lead(rows: list[dict], pace: Pace | None, order: list[str]) -> str:
+    """Where new work on this machine goes now: the paced lead while the pool has budget, else
+    the general route if it has room, else a Codex account with room that is not paced out."""
+    codex_rows = [] if pace is None else codex_paced_rows(paced_patterns(), time.time())
+    lead = paced_lead(rows, codex_rows, pace)
+    if lead is not None:
+        return lead
+    _, general, _ = _next_routes(rows, pace, order)
+    row = next((row for row in rows if row["label"] == general), None)
+    if row is not None and _short_of_walls(row):
+        return f"claude {general}"
+    codex = codex_accounts.pick_account(
+        codex_accounts.load_registry(),
+        codex_accounts.load_usage(),
+        codex_accounts.load_mode(),
+        avoid=paced_out_codex(pace),
+    )
+    return "none" if codex is None else f"codex {codex}"
+
+
+def cmd_lead(_args) -> None:
+    print(new_work_lead(*_status_board()))
 
 
 def _fmt_pct(value: float | None, stale: bool) -> str:
@@ -4163,6 +4271,10 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="mode + per-account 5h/7d/fable headroom + ⚠login flags",
     ).set_defaults(fn=cmd_status)
+    sub.add_parser(
+        "lead",
+        help="where new work on this machine goes now: claude <label>, codex <label> or none",
+    ).set_defaults(fn=cmd_lead)
 
     p_schedule = sub.add_parser(
         "schedule", help="view or change when the board shows which local accounts"
