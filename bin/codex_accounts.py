@@ -345,9 +345,27 @@ def poll_all(accounts: dict[str, dict[str, str]], binary: str | None = None) -> 
             rows[futures[future]] = future.result()
     with locked():
         current = load_usage()
-        current.update(rows)
+        for label, row in rows.items():
+            current[label] = keep_last_good(row, current.get(label))
         write_json(USAGE_PATH, current)
     return rows
+
+
+def last_good(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The newest reading with quota windows: the row itself, or the one a failed poll kept."""
+    if not row.get("error") and isinstance(row.get("rate_limits"), dict):
+        return row
+    kept = row.get("last_good")
+    return kept if isinstance(kept, dict) else None
+
+
+def keep_last_good(row: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+    """A failed poll keeps the last good reading beside its error, for readers that can use an
+    older figure; the router reads only the error."""
+    kept = last_good(previous or {})
+    if not row.get("error") or kept is None:
+        return row
+    return {**row, "last_good": {"fetched_at": kept["fetched_at"], "rate_limits": kept["rate_limits"]}}
 
 
 def binding_usage(row: dict[str, Any]) -> float:

@@ -48,7 +48,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -2454,8 +2454,9 @@ def rank_profile_rows(
 # Each local day they share one budget, in points of weekly allowance (one point is 1% of an
 # account's week): for each, what it has left spread evenly over the time to its weekly reset,
 # today's part of it. The budget is the pool's alone, so one account may burn all of it. While
-# some is left the paced accounts lead routing, soonest reset first; once the pool's burn
-# reaches it they take no work until the next local midnight. Bad data leaves routing as if unpaced.
+# some is left the paced accounts lead routing, the one furthest behind its own share first;
+# once the pool's burn reaches it they take no work until the next local midnight. Bad data
+# leaves routing as if unpaced.
 
 PACING_PATH = HOME / ".accounts" / "pacing.json"
 PACING_LOCK_PATH = HOME / ".accounts" / "pacing.lock"
@@ -2472,6 +2473,8 @@ class Pace:
     since: float
     day_end: float
     problem: str | None = None
+    # Each counted account's burn today, its share of today, and when its week resets.
+    standing: dict[str, tuple[float, float, float]] = field(default_factory=dict)
 
     @property
     def closed(self) -> bool:
@@ -2487,6 +2490,15 @@ class Pace:
             and row["label"] in self.labels
             and _rate_eligible(row["five_hour"], row["seven_day"])
         )
+
+    def lead_order(self, key: str) -> tuple:
+        """Where a paced account that can take work stands in line: one whose week ends today
+        first, until it has burned its share, since what it leaves is lost; then the one furthest
+        behind its own share of today. Ties, and an account with no share, go by soonest reset."""
+        burned, share, resets_at = self.standing[key]
+        if resets_at <= self.day_end and burned < share:
+            return (0, 0.0, resets_at)
+        return (1, burned / share if share > 0 else math.inf, resets_at)
 
 
 def paced_patterns() -> list[str]:
@@ -2517,7 +2529,9 @@ def pool_name(key: str) -> str:
 
 def codex_paced_rows(patterns: list[str], now: float) -> list[dict]:
     """This machine's Codex accounts the patterns name, as pool rows. Their week is the usage
-    window that spans one, stale as the Codex router reads it; one that needs a login is left out."""
+    window that spans one, from the last good reading, which counts as long as a Claude account's
+    does; they take work only as the Codex router would route to them. One that needs a login is
+    left out."""
     usage = codex_accounts.load_usage()
     rows = []
     for label in sorted(codex_accounts.load_registry()):
@@ -2526,33 +2540,34 @@ def codex_paced_rows(patterns: list[str], now: float) -> list[dict]:
             continue
         if reading.get("error") == codex_accounts.LOGIN_REQUIRED:
             continue
-        week = codex_accounts.weekly_window(reading) or {}
+        figure = codex_accounts.last_good(reading)
+        week = codex_accounts.weekly_window(figure or {}) or {}
         rows.append(
             {
                 "label": CODEX_POOL_PREFIX + label,
                 "seven_day": week.get("used_percent"),
                 "seven_day_resets_at": week.get("resets_at"),
-                "stale": not codex_accounts.is_fresh(reading, now),
-                "takes_work": codex_accounts.has_headroom(reading),
+                "stale": figure is None or now - float(figure["fetched_at"]) > STALE_AFTER_S,
+                "takes_work": codex_accounts.is_fresh(reading, now) and codex_accounts.has_headroom(reading),
             }
         )
     return rows
 
 
 def paced_lead(claude_rows: list[dict], codex_rows: list[dict], pace: Pace | None) -> str | None:
-    """`claude <label>` or `codex <label>`: of the paced accounts that can take work, the one
-    whose week resets soonest; None while the pool is spent or not pacing."""
+    """`claude <label>` or `codex <label>`: the paced account that can take work and stands first
+    in the pace's order; None while the pool is spent or not pacing."""
     if pace is None or not pace.open:
         return None
     candidates = [
-        (row.get("seven_day_resets_at") or math.inf, "claude", row["label"])
+        (pace.lead_order(row["label"]), "claude", row["label"])
         for row in claude_rows
         if pace.leads(row)
     ]
     candidates += [
-        (row["seven_day_resets_at"] or math.inf, "codex", row["label"].removeprefix(CODEX_POOL_PREFIX))
+        (pace.lead_order(row["label"]), "codex", row["label"].removeprefix(CODEX_POOL_PREFIX))
         for row in codex_rows
-        if row["label"] in pace.labels and row["takes_work"]
+        if row["takes_work"]
     ]
     if not candidates:
         return None
@@ -2561,12 +2576,12 @@ def paced_lead(claude_rows: list[dict], codex_rows: list[dict], pace: Pace | Non
 
 
 def paced_first(rows: list[dict], pace: Pace) -> list[dict]:
-    """ROWS with the paced accounts that can take work in front, soonest weekly reset first."""
+    """ROWS with the paced accounts that can take work in front, in the pace's order."""
 
     def key(row: dict) -> tuple:
         if pace.leads(row):
-            return (0, row.get("seven_day_resets_at") or math.inf)
-        return (1, 0.0)
+            return (0, *pace.lead_order(row["label"]))
+        return (1,)
 
     return sorted(rows, key=key)
 
@@ -2626,7 +2641,14 @@ def advance_pacing(ledger: dict | None, rows: list[dict], now: float, zone) -> t
         elif now < windows[-1]["resets_at"]:
             windows[-1]["last_pct"] = max(windows[-1]["last_pct"], pct)
         counted.append(label)
-    windows = [window for label in counted for window in windows_by_label[label]]
+    standing = {
+        label: (
+            sum(max(0.0, window["last_pct"] - window["start_pct"]) for window in windows_by_label[label]),
+            sum(window["share"] for window in windows_by_label[label]),
+            windows_by_label[label][-1]["resets_at"],
+        )
+        for label in counted
+    }
     problem = None
     if unknown:
         problem = f"no fresh weekly figure for {', '.join(sorted(map(pool_name, unknown)))}"
@@ -2634,11 +2656,12 @@ def advance_pacing(ledger: dict | None, rows: list[dict], now: float, zone) -> t
         problem = "no paced account can take work"
     pace = Pace(
         labels=frozenset(row["label"] for row in rows),
-        budget=sum(window["share"] for window in windows),
-        burned=sum(max(0.0, window["last_pct"] - window["start_pct"]) for window in windows),
-        since=min((window["from"] for window in windows), default=now),
+        budget=sum(share for _, share, _ in standing.values()),
+        burned=sum(burned for burned, _, _ in standing.values()),
+        since=min((window["from"] for label in counted for window in windows_by_label[label]), default=now),
         day_end=day_end,
         problem=problem,
+        standing=standing,
     )
     return ledger, pace
 
@@ -2712,7 +2735,8 @@ def describe_pace(pace: Pace, patterns: list[str]) -> str:
         )
     counted = f", counted from {_clock(pace.since, zone, today)}" if pace.since > day_start else ""
     return (
-        f"{head} — first, soonest weekly reset first; today's budget {pace.budget:.1f} points,"
+        f"{head} — first (a week ending today, then the furthest behind its share);"
+        f" today's budget {pace.budget:.1f} points,"
         f" {pace.burned:.1f} burned, {pace.budget - pace.burned:.1f} left{counted}"
     )
 

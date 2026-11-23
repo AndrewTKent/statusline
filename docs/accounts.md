@@ -214,21 +214,29 @@ ACCOUNTS_PACED="acme-team-*"
   `seven_day` usage, or for a Codex account from the usage window that spans a
   week (10080 minutes, `primary` or `secondary` depending on the plan), so the
   pool assumes the paced accounts have plans of the same size. A Codex account
-  counts apart from a Claude account of the same label. Each account brings what it has left, spread evenly over the time
-  to its weekly reset, today's part of it: `(100 − used) × length of today ÷
-  time to reset`, at most all it has left, which is what an account that resets
-  during the day brings. The pool is the sum.
+  counts apart from a Claude account of the same label. Each account brings
+  what it has left, spread evenly over the time to its weekly reset, today's
+  part of it: `(100 − used) × length of today ÷ time to reset`, at most all it
+  has left, which is what an account that resets during the day brings. The
+  pool is the sum.
+- **A Codex week not yet started** reports a reset a full week out on every
+  poll. Its share is taken from the day's first reading, `100 × time left today
+  ÷ 7 days`, about 14.3 points for a whole day, and later polls that push the
+  reset out do not change it.
 - **The budget is the pool's, not each account's.** There is no daily cap per
   account: one account may burn the whole pool, all the way to its weekly
   ceiling, and the router then moves to the next paced account.
 - **While the pool has budget left, the paced accounts take work first**, ahead
-  of `ACCOUNTS_ROUTE_ORDER`, the account whose week resets soonest first, among
-  those under the 80% five-hour and 90% weekly ceilings, and among Codex
-  accounts those the Codex router would route to. A Codex week not yet started
-  reads as resetting a full week out, so it comes last. A Claude launch picks
-  among the Claude accounts; `accounts lead` names the one account, Claude or
-  Codex, a launcher that can run either should use. A running session moves
-  only at its own wall, as before.
+  of `ACCOUNTS_ROUTE_ORDER`, among those that can take it: a Claude account
+  under the 80% five-hour and 90% weekly ceilings, a Codex account the Codex
+  router would route to. First in line is an account whose week ends today,
+  until it has burned its share, since what it leaves is lost at the reset;
+  then the one furthest behind its own share of today, the lowest burn ÷ share,
+  so an account the day has not used yet, a Codex one included, takes the work
+  next. Ties, and an account with no share, go by soonest weekly reset. A Claude
+  launch picks among the Claude accounts; `accounts lead` names the one
+  account, Claude or Codex, a launcher that can run either should use. A
+  running session moves only at its own wall, as before.
 - **Once the pool's burn reaches its budget the paced accounts take no work
   until the next local midnight.** New sessions and handoffs go to the
   machine's other accounts, and `accounts lead` names a Codex account only if it
@@ -254,26 +262,19 @@ ACCOUNTS_PACED="acme-team-*"
   only the rest of that day. An unreadable ledger is kept aside as
   `pacing.json.corrupt.<time>` and the day counts from then.
 - **Bad data never blocks an account.** A paced account that can take work but
-  has a stale weekly figure (no poll for 3 hours; for a Codex account, a
-  failed poll or none for the Codex router's 5 minutes) or no weekly reset
+  has a stale weekly figure (no good poll for 3 hours, Claude or Codex; a failed
+  Codex poll keeps the last good figure beside its error) or no weekly reset
   leaves the machine routing as if unpaced until it reads again, and
   `accounts status` says so. An account that needs a login, or is excluded, is
   left out of the pool.
 - **A pin outranks pacing**, as it outranks the order.
 - `accounts status` prints the day's standing, for example
-  `paced: acme-team-* — first, soonest weekly reset first; today's budget 19.5 points, 3.2 burned, 16.3 left`,
+  `paced: acme-team-* — first (a week ending today, then the furthest behind its share); today's budget 19.5 points, 3.2 burned, 16.3 left`,
   or, once it is spent,
   `paced: acme-team-* — today's budget of 19.5 points is spent (20.1 burned); they take no work until Thu 12:00am PST`.
   Each account in the pool is flagged `[paced]`, or `[paced, out for today]`
   once the budget is spent, and a paced Codex account is listed below the
   Claude ones as the board names it, `acme-team-1-codex`.
-- `accounts lead` prints `claude <label>` or `codex <label>` for the paced
-  account that leads while the pool has budget; otherwise `claude <label>` for
-  the account `accounts status` names under `general:` if it is short of 100%
-  on both windows; otherwise `codex <label>` for the account the Codex router
-  would pick, leaving out a paced-out one; otherwise `none`. With
-  `ACCOUNTS_PACED` unset that is: Claude when it has room, else Codex when it
-  has room.
   The board's snapshot carries it, so the account board, here and on a machine
   that shows this one as a remote board, ends that board's header line with it:
   `■ devbox · 12s ago · team 9.0/15.2 today`, then
@@ -284,6 +285,13 @@ ACCOUNTS_PACED="acme-team-*"
   no `LOCAL_MACHINE_NAME` header carries it on the column header above its
   rows. The `✓ best next` marker on the older account table, without
   `SHARED_ACCOUNT_SNAPSHOT=1`, does not follow pacing.
+- `accounts lead` prints `claude <label>` or `codex <label>` for the paced
+  account first in line while the pool has budget; otherwise `claude <label>`
+  for the account `accounts status` names under `general:` if it is short of
+  100% on both windows; otherwise `codex <label>` for the account the Codex
+  router would pick, leaving out a paced-out one; otherwise `none`. With
+  `ACCOUNTS_PACED` unset that is: Claude when it has room, else Codex when it
+  has room.
 
 ## Naming this machine
 

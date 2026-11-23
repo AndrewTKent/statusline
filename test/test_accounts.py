@@ -1525,11 +1525,12 @@ class TestPacedRouting:
     def test_one_account_may_burn_past_its_own_share_while_the_pool_has_budget(
         self, tmp_path, monkeypatch
     ):
+        # team-1 is furthest behind its share but past its five-hour ceiling, so team-2 takes the work.
         self._board(
             tmp_path,
             monkeypatch,
             {
-                **self._account("team-1", 5.0, 4.0, 3.0),
+                **self._account("team-1", 95.0, 4.0, 3.0),
                 **self._account("team-2", 5.0, 66.0, 1.0),
                 **self._account("max-1", 0.0, 5.0, 3.0),
             },
@@ -1591,6 +1592,14 @@ class TestPacedRouting:
 
         assert accounts.select_profile()["label"] == "team-1"
 
+    @staticmethod
+    def _pace(standing, *, closed=False):
+        """A pace on today's UTC day over STANDING (key -> burned, share, resets_at), open or spent."""
+        day_end = (time.time() // DAY + 1) * DAY
+        budget = sum(share for _, share, _ in standing.values())
+        burned = budget if closed else 0.0
+        return accounts.Pace(frozenset(standing), budget, burned, day_end - DAY, day_end, standing=standing)
+
     def test_a_claude_and_a_codex_account_of_one_label_are_two_members_of_one_pool(
         self, tmp_path, monkeypatch
     ):
@@ -1606,112 +1615,161 @@ class TestPacedRouting:
 
         assert pace.budget == pytest.approx(60.0 * day_left / 3.0 + 80.0 * day_left / 5.0, rel=1e-3)
 
-    @pytest.mark.parametrize(
-        "reading",
-        [
-            {"seen_ago": codex_accounts.USAGE_MAX_AGE_S + 60},
-            {"error": "Codex app-server did not return rate limits"},
-        ],
-        ids=["stale", "poll-failed"],
-    )
-    def test_a_paced_codex_account_with_no_fresh_reading_leaves_routing_as_if_unpaced(
-        self, tmp_path, monkeypatch, reading
-    ):
-        self._board(
-            tmp_path,
-            monkeypatch,
-            self._account("team-1", 5.0, 40.0, 3.0),
-            codex={"team-1": self._codex(20.0, 4.0, **reading)},
-        )
+    def test_an_unstarted_codex_week_brings_todays_part_of_a_full_week_from_its_first_reading(self):
+        first = MIDNIGHT + 0.25 * DAY
+        later = first + 3600
+        row = {"label": "codex:team-1", "seven_day": 0.0, "stale": False}
+        ledger, _ = advance(None, [{**row, "seven_day_resets_at": first + 7 * DAY}], first)
 
-        assert accounts.pacing_today().problem == "no fresh weekly figure for team-1-codex"
+        ledger, pace = advance(ledger, [{**row, "seven_day_resets_at": later + 7 * DAY}], later)
+
+        assert pace.budget == pytest.approx(100.0 * 0.75 / 7)
+
+    @pytest.mark.parametrize(
+        ("reading", "stale"),
+        [
+            ({"seen_ago": 600}, False),
+            ({"seen_ago": accounts.STALE_AFTER_S + 60}, True),
+            ({"error": "Codex app-server did not return rate limits", "kept_ago": 600}, False),
+            ({"error": "Codex app-server did not return rate limits"}, True),
+        ],
+        ids=["ten-minutes-old", "past-the-bound", "failed-poll-with-a-kept-figure", "failed-poll-with-none"],
+    )
+    def test_a_paced_codex_figure_counts_for_as_long_as_a_claude_ones_does(
+        self, tmp_path, monkeypatch, reading, stale
+    ):
+        kept_ago = reading.pop("kept_ago", None)
+        usage = self._codex(20.0, 4.0, **reading)
+        if "error" in usage:
+            del usage["rate_limits"]
+        if kept_ago is not None:
+            usage["last_good"] = {**self._codex(20.0, 4.0), "fetched_at": time.time() - kept_ago}
+        self._board(tmp_path, monkeypatch, {}, codex={"team-1": usage})
+
+        assert accounts.codex_paced_rows(["team-*"], time.time())[0]["stale"] is stale
+
+    @pytest.mark.parametrize(
+        ("week", "seen_ago", "takes_work"),
+        [(20.0, 0.0, True), (20.0, 600, False), (100.0, 0.0, False)],
+        ids=["fresh-with-room", "older-than-the-codex-router-reads", "at-its-wall"],
+    )
+    def test_a_paced_codex_account_takes_work_only_where_the_codex_router_would_route(
+        self, tmp_path, monkeypatch, week, seen_ago, takes_work
+    ):
+        self._board(tmp_path, monkeypatch, {}, codex={"team-1": self._codex(week, 4.0, seen_ago=seen_ago)})
+
+        assert accounts.codex_paced_rows(["team-*"], time.time())[0]["takes_work"] is takes_work
+
+    def test_a_paced_codex_account_with_no_fresh_figure_is_named_as_the_board_names_it(self):
+        row = {"label": "codex:team-1", "seven_day": 20.0, "seven_day_resets_at": MIDNIGHT + 3 * DAY, "stale": True}
+
+        _, pace = advance(None, [row], MIDNIGHT)
+
+        assert pace.problem == "no fresh weekly figure for team-1-codex"
 
     def test_a_paced_codex_account_that_needs_a_login_is_left_out_of_the_pool(
         self, tmp_path, monkeypatch
     ):
-        self._board(
-            tmp_path,
-            monkeypatch,
-            self._account("team-1", 5.0, 40.0, 3.0),
-            codex={"team-1": {"fetched_at": time.time(), "error": codex_accounts.LOGIN_REQUIRED}},
-        )
+        login = {"fetched_at": time.time(), "error": codex_accounts.LOGIN_REQUIRED}
+        self._board(tmp_path, monkeypatch, {}, codex={"team-1": login})
 
-        assert accounts.pacing_today().labels == {"team-1"}
+        assert accounts.codex_paced_rows(["team-*"], time.time()) == []
 
     @pytest.mark.parametrize(
-        ("team_1", "codex", "lead"),
+        ("standing", "first"),
         [
-            ((5.0, 40.0, 3.0), (0.0, 6.0), "claude team-1"),
-            ((5.0, 40.0, 3.0), (0.0, 1.0), "codex team-1"),
-            ((95.0, 40.0, 3.0), (0.0, 6.0), "codex team-1"),
-            ((95.0, 40.0, 3.0), (100.0, 6.0), "claude max-1"),
+            ({"team-1": (2.0, 4.0, 3), "codex:team-1": (0.0, 4.0, 7)}, "codex:team-1"),
+            ({"team-1": (0.0, 4.0, 3), "codex:team-1": (0.0, 4.0, 7)}, "team-1"),
+            ({"team-1": (5.0, 30.0, -1), "codex:team-1": (0.0, 4.0, 7)}, "team-1"),
+            ({"team-1": (30.0, 30.0, -1), "codex:team-1": (1.0, 4.0, 7)}, "codex:team-1"),
+            ({"team-1": (0.0, 0.0, 3), "codex:team-1": (3.0, 4.0, 7)}, "codex:team-1"),
         ],
-        ids=["claude-resets-sooner", "codex-resets-sooner", "claude-walled", "both-walled"],
+        ids=[
+            "furthest-behind-its-share",
+            "a-tie-goes-to-the-soonest-reset",
+            "a-week-ending-today-leads-until-its-share-is-burned",
+            "then-the-furthest-behind-again",
+            "no-share-goes-last",
+        ],
     )
-    def test_lead_names_the_paced_account_whose_week_resets_soonest_claude_or_codex(
-        self, tmp_path, monkeypatch, capsys, team_1, codex, lead
+    def test_the_paced_account_first_in_line_is_the_one_furthest_behind_its_share(self, standing, first):
+        day_end = (time.time() // DAY + 1) * DAY
+        # Resets are in days from now, or -1 for an hour before the day ends.
+        standing = {
+            key: (burned, share, day_end - 3600 if days < 0 else time.time() + days * DAY)
+            for key, (burned, share, days) in standing.items()
+        }
+
+        assert min(standing, key=self._pace(standing).lead_order) == first
+
+    @pytest.mark.parametrize(
+        ("five_hour", "takes_work", "first", "lead"),
+        [
+            (5.0, True, "codex:team-1", "codex team-1"),
+            (5.0, True, "team-1", "claude team-1"),
+            (95.0, True, "team-1", "codex team-1"),
+            (5.0, False, "codex:team-1", "claude team-1"),
+            (95.0, False, "team-1", None),
+        ],
+        ids=["codex-in-line", "claude-in-line", "claude-walled", "codex-cannot-take-work", "neither-can"],
+    )
+    def test_lead_takes_the_first_in_line_of_the_paced_accounts_that_can_take_work(
+        self, monkeypatch, five_hour, takes_work, first, lead
     ):
+        reset = time.time() + 3 * DAY
+        pace = self._pace({"team-1": (0.0, 4.0, reset), "codex:team-1": (0.0, 4.0, reset)})
+        monkeypatch.setattr(accounts.Pace, "lead_order", lambda _pace, key: (key != first,))
+        claude_rows = [accounts_row("team-1", five_hour, seven_day=40.0)]
+        codex_rows = [{"label": "codex:team-1", "takes_work": takes_work}]
+
+        assert accounts.paced_lead(claude_rows, codex_rows, pace) == lead
+
+    def test_a_spent_pool_has_no_paced_lead(self):
+        pace = self._pace({"codex:team-1": (4.0, 4.0, time.time() + 3 * DAY)}, closed=True)
+
+        assert accounts.paced_lead([], [{"label": "codex:team-1", "takes_work": True}], pace) is None
+
+    def test_a_new_session_goes_to_the_paced_account_first_in_the_paces_line(self, tmp_path, monkeypatch):
         self._board(
             tmp_path,
             monkeypatch,
-            {**self._account("team-1", *team_1), **self._account("max-1", 0.0, 5.0, 3.0)},
-            codex={"team-1": self._codex(*codex)},
+            {**self._account("team-1", 5.0, 33.0, 1.0), **self._account("team-2", 5.0, 61.0, 3.0)},
         )
+        monkeypatch.setattr(accounts.Pace, "lead_order", lambda _pace, key: (key != "team-2",))
 
-        assert self._lead(capsys) == lead
+        assert accounts.select_profile()["label"] == "team-2"
 
     @pytest.mark.parametrize(
-        ("max_1", "lead"),
-        [((10.0, 10.0), "claude max-1"), ((100.0, 10.0), "none")],
-        ids=["other-claude-free", "other-claude-walled"],
+        ("paced", "max_1", "mode", "pool", "lead"),
+        [
+            ("codex team-1", (10.0, 10.0), "auto", None, "codex team-1"),
+            (None, (10.0, 10.0), "auto", None, "claude max-1"),
+            (None, (100.0, 10.0), "set", None, "codex team-1"),
+            (None, (100.0, 10.0), "auto", "spent", "none"),
+        ],
+        ids=["the-paced-lead", "else-claude-with-room", "else-codex-with-room", "never-a-paced-out-codex"],
     )
-    def test_a_spent_pool_sends_new_work_past_every_paced_account(
-        self, tmp_path, monkeypatch, capsys, max_1, lead
+    def test_lead_falls_from_the_paced_lead_to_claude_to_codex(
+        self, tmp_path, monkeypatch, capsys, paced, max_1, mode, pool, lead
     ):
-        self._board(
-            tmp_path,
-            monkeypatch,
-            {**self._account("team-1", 5.0, 40.0, 3.0), **self._account("max-1", *max_1, 3.0)},
-            ledger=self._spent_today({"team-1": (30.0, 10.0), "codex:team-1": (0.0, 0.0)}),
-            codex={"team-1": self._codex(0.0, 1.0)},
-        )
+        self._board(tmp_path, monkeypatch, self._account("max-1", *max_1, 3.0), conf="", codex={"team-1": self._codex(0.0, 6.0)})
+        pace = pool and self._pace({"codex:team-1": (4.0, 4.0, time.time() + 3 * DAY)}, closed=True)
+        monkeypatch.setattr(accounts, "pacing_today", lambda rows=None, now=None: pace)
+        monkeypatch.setattr(accounts, "paced_lead", lambda *_args: paced)
+        monkeypatch.setattr(accounts, "load_mode", lambda: {"mode": mode, "label": "max-1" if mode == "set" else None})
 
         assert self._lead(capsys) == lead
 
-    @pytest.mark.parametrize(
-        ("max_1", "lead"),
-        [((10.0, 10.0), "claude max-1"), ((100.0, 10.0), "codex solo")],
-        ids=["claude-free", "claude-walled"],
-    )
-    def test_unpaced_lead_is_claude_with_room_else_codex_with_room(
-        self, tmp_path, monkeypatch, capsys, max_1, lead
-    ):
-        self._board(
-            tmp_path,
-            monkeypatch,
-            self._account("max-1", *max_1, 3.0),
-            conf="",
-            codex={"solo": self._codex(0.0, 6.0)},
-        )
-        monkeypatch.setattr(accounts, "load_mode", lambda: {"mode": "set", "label": "max-1"})
-
-        assert self._lead(capsys) == lead
-
-    @pytest.mark.parametrize(
-        ("ledger", "flag"),
-        [(None, "  [paced]"), ({"team-1": (30.0, 10.0), "codex:team-1": (20.0, 0.0)}, "  [paced, out for today]")],
-        ids=["open", "spent"],
-    )
+    @pytest.mark.parametrize(("closed", "flag"), [(False, "  [paced]"), (True, "  [paced, out for today]")], ids=["open", "spent"])
     def test_status_lists_a_paced_codex_account_by_its_board_name(
-        self, tmp_path, monkeypatch, capsys, ledger, flag
+        self, tmp_path, monkeypatch, capsys, closed, flag
     ):
-        self._board(
-            tmp_path,
-            monkeypatch,
-            self._account("team-1", 5.0, 40.0, 3.0),
-            ledger=ledger and self._spent_today(ledger),
-            codex={"team-1": self._codex(20.0, 4.0)},
-        )
+        self._board(tmp_path, monkeypatch, self._account("team-1", 5.0, 40.0, 3.0))
+        reset = time.time() + 3 * DAY
+        pace = self._pace({"team-1": (0.0, 4.0, reset), "codex:team-1": (0.0, 4.0, reset)}, closed=closed)
+        codex_row = {"label": "codex:team-1", "seven_day": 20.0, "seven_day_resets_at": reset, "stale": False, "takes_work": True}
+        monkeypatch.setattr(accounts, "pacing_today", lambda rows=None, now=None: pace)
+        monkeypatch.setattr(accounts, "codex_paced_rows", lambda *_args: [codex_row])
 
         accounts.cmd_status(types.SimpleNamespace())
 
@@ -1747,7 +1805,8 @@ class TestPacedRouting:
         accounts.cmd_status(types.SimpleNamespace())
 
         assert (
-            "paced: team-* — first, soonest weekly reset first; today's budget 10.0 points,"
+            "paced: team-* — first (a week ending today, then the furthest behind its share);"
+            " today's budget 10.0 points,"
             " 3.0 burned, 7.0 left"
         ) in capsys.readouterr().out
 
