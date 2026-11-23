@@ -964,7 +964,7 @@ remote_epoch_relative() {
 }
 
 # The pacing a board's snapshot carries when its machine sets ACCOUNTS_PACED, as a suffix for the
-# board's dim header: today's pooled burn against its budget, or when a spent budget opens again.
+# board's dim header: today's pooled burn against its budget, or the day a spent budget was spent.
 # The paced set reads as one short name (sol-team-* → team) when every pattern reduces to it.
 # Nothing prints for a snapshot without it.
 pacing_state() {
@@ -988,7 +988,8 @@ pacing_state() {
         name="$short"
     done
     if [ "$closed" = "true" ]; then
-        printf '%s' " · ${yellow}${name} budget spent, back $(fmt_epoch "$until" "%l:%M%p %Z" | sed 's/^ //; s/AM/am/; s/PM/pm/')${reset}${dim}"
+        # until is the local midnight the budget opens again, so the second before it is the day it was spent.
+        printf '%s' " · ${yellow}${name} spent $(fmt_epoch "$(( until - 1 ))" "%b %-d")${reset}${dim}"
     else
         printf -v budget '%.1f' "$budget" 2>/dev/null
         printf -v burned '%.1f' "$burned" 2>/dev/null

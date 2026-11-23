@@ -257,7 +257,10 @@ grep -qE $'^ *\033\\[38;2;220;220;220m  acct[ a-z0-9]*reset\033\\[0m$' <<< "$col
 set_pacing() {  # $1: snapshot file; $2: a jq object for .pacing, or "null" to remove it
     jq --argjson pacing "$2" 'if $pacing == null then del(.pacing) else .pacing = $pacing end' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
-paced_until=$(( NOW + 3600 ))
+# A spent budget opens again at the next local midnight; the header names the day it was spent, the day before that.
+paced_zone="${STATUSLINE_TZ:-${TZ:-America/Los_Angeles}}"
+paced_day=$(TZ="$paced_zone" date -d "@$NOW" '+%b %-d' 2>/dev/null || TZ="$paced_zone" date -r "$NOW" '+%b %-d')
+paced_until=$(python3 -c 'import sys; from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; zone = ZoneInfo(sys.argv[2]); day = datetime.fromtimestamp(int(sys.argv[1]), zone).date() + timedelta(days=1); print(int(datetime(day.year, day.month, day.day, tzinfo=zone).timestamp()))' "$NOW" "$paced_zone")
 set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" \
     '{"patterns":["sol-team-*"],"budget":15.17,"burned":9,"closed":false,"since":0,"until":0,"problem":null}'
 set_pacing "$TEST_HOME/.accounts/statusline-snapshot.json" \
@@ -267,8 +270,8 @@ grep -qxF "■ devbox · 0s ago · team 9.0/15.2 today" <<< "$paced_output" ||
     { printf 'a board with budget left did not say its burn against it, by the short name, on its header:\n%s\n' "$paced_output" >&2; exit 1; }
 [ "$(wc -l <<< "$paced_output")" -eq "$(wc -l <<< "$board_output")" ] ||
     { printf 'pacing added a line to the boards:\n%s\n' "$paced_output" >&2; exit 1; }
-grep -qE "^ +acct .*reset · work budget spent, back $(clock_text "$paced_until")\$" <<< "$paced_output" ||
-    { printf 'an unnamed local board with its budget spent did not say when it is back on its column header:\n%s\n' "$paced_output" >&2; exit 1; }
+grep -qE "^ +acct .*reset · work spent ${paced_day}\$" <<< "$paced_output" ||
+    { printf 'an unnamed local board with its budget spent did not name the day it was spent on its column header:\n%s\n' "$paced_output" >&2; exit 1; }
 set_pacing "$REMOTE_ROOT_DIR/devbox/statusline-snapshot.json" \
     '{"patterns":["team-*"],"budget":0,"burned":0,"closed":false,"since":0,"until":0,"problem":"no fresh weekly figure for team-1"}'
 grep -qxF "■ devbox · 0s ago · not pacing: no fresh weekly figure for team-1" <<< "$(render_with_boards)" ||

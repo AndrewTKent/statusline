@@ -253,7 +253,7 @@ ACCOUNTS_PACED="acme-team-*"
   The board's snapshot carries it, so the account board, here and on a machine
   that shows this one as a remote board, ends that board's header line with it:
   `■ devbox · 12s ago · team 9.0/15.2 today`, then
-  `team budget spent, back 12:00am PST` once it is spent, or
+  `team spent Nov 23`, the day it was spent, once it is spent, or
   `not pacing: <why>` on bad data. The paced set reads by a short name, its
   patterns without a trailing `-*` or a leading `sol-` (`sol-team-*` reads
   `team`), and as written when they do not come to one name. A local table with
