@@ -1913,16 +1913,21 @@ def test_statusline_publishes_the_live_session_identity_and_effort(
     (home / ".claude").mkdir(parents=True)
     project = tmp_path / "project"
     project.mkdir()
-    state_path = Path(
-        f"/tmp/claude/account-router-{os.getpid()}-{uuid.uuid4().hex}.json"
-    )
+    # The script hardcodes /tmp/claude; a copy pointed at the test's own directory leaves the machine's alone.
+    claude_tmp = tmp_path / "claude"
+    claude_tmp.mkdir()
+    script = tmp_path / "statusline.sh"
+    script.write_text((REPO / "bin" / "statusline.sh").read_text().replace("/tmp/claude", str(claude_tmp)))
+    state_path = claude_tmp / f"account-router-{os.getpid()}-{uuid.uuid4().hex}.json"
     fixture = json.loads((REPO / "test" / "fixtures" / "input.json").read_text())
     fixture["workspace"]["current_dir"] = str(project)
     fixture["effort"] = {"level": reported_effort}
-    env = os.environ.copy()
+    # A login the test did not make, from the caller's profile or its keychain, would replace the routed label.
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("ACCOUNTS_", "CLAUDE_"))}
     env.update(
         {
             "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
             "TZ": "America/Los_Angeles",
             "ACCOUNTS_ROUTER_STATE": str(state_path),
             "ACCOUNTS_ROUTED_LABEL": "first",
@@ -1930,13 +1935,11 @@ def test_statusline_publishes_the_live_session_identity_and_effort(
             "ACCOUNTS_ROUTED_ORG_UUID": "org-first",
         }
     )
-    if router_marker is None:
-        env.pop("CLAUDE_ROUTER_ULTRACODE", None)
-    else:
+    if router_marker is not None:
         env["CLAUDE_ROUTER_ULTRACODE"] = router_marker
 
     subprocess.run(
-        ["bash", str(REPO / "bin" / "statusline.sh")],
+        ["bash", str(script)],
         input=json.dumps(fixture),
         text=True,
         capture_output=True,
@@ -1944,14 +1947,11 @@ def test_statusline_publishes_the_live_session_identity_and_effort(
         check=True,
     )
 
-    try:
-        state = json.loads(state_path.read_text())
-        assert state["session_id"] == fixture["session_id"]
-        assert state["model"] == fixture["model"]["display_name"]
-        assert state["effort"] == expected_effort
-        assert state["label"] == "first"
-    finally:
-        state_path.unlink(missing_ok=True)
+    state = json.loads(state_path.read_text())
+    assert state["session_id"] == fixture["session_id"]
+    assert state["model"] == fixture["model"]["display_name"]
+    assert state["effort"] == expected_effort
+    assert state["label"] == "first"
 
 
 def test_a_statusline_render_keeps_the_routers_move_record(tmp_path):

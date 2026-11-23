@@ -222,6 +222,23 @@ class CodexAccountsTest(unittest.TestCase):
         self.assertEqual(row["reset_credits"], {"count": 2, "expires_at": [2_090_000_000, 2_100_000_000]})
         self.assertNotIn("home", row)
 
+    def test_a_failed_poll_keeps_the_last_good_reading_beside_its_error(self) -> None:
+        good = {"fetched_at": 100.0, "rate_limits": {"primary": {"used_percent": 20}}}
+        failed = {"fetched_at": 200.0, "error": "Codex app-server did not return rate limits"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with (
+                mock.patch.object(codex_accounts, "ROOT", root),
+                mock.patch.object(codex_accounts, "LOCK_PATH", root / "accounts.lock"),
+                mock.patch.object(codex_accounts, "USAGE_PATH", root / "usage.json"),
+                mock.patch.object(codex_accounts, "poll_account", side_effect=[good, failed, failed]),
+            ):
+                for _ in range(3):
+                    codex_accounts.poll_all({"work": {}}, binary="/usr/bin/codex")
+                row = codex_accounts.load_usage()["work"]
+
+        self.assertEqual(row, {**failed, "last_good": good})
+
     def test_poll_account_refuses_a_home_holding_another_account(self) -> None:
         auth = {"tokens": {"id_token": jwt({"email": "other@example.invalid"}), "account_id": "other"}}
         with tempfile.TemporaryDirectory() as tmpdir:

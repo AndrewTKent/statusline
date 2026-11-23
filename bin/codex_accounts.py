@@ -29,6 +29,8 @@ LOCK_PATH = ROOT / "accounts.lock"
 PROFILE_ROOT = ROOT / "profiles"
 THREAD_DIR = ROOT / "thread-accounts"
 USAGE_MAX_AGE_S = 300
+WEEK_MINUTES = 10080
+LOGIN_REQUIRED = "login required"
 LABEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
 PRIVATE_HOME_NAMES = {
     "auth.json",
@@ -297,7 +299,7 @@ def normalize_keys(value: Any) -> Any:
 def poll_account(label: str, account: dict[str, str], binary: str) -> dict[str, Any]:
     home = Path(account["home"])
     if not (home / "auth.json").is_file():
-        return {"fetched_at": time.time(), "error": "login required"}
+        return {"fetched_at": time.time(), "error": LOGIN_REQUIRED}
     try:
         # A home re-logged as another account would publish that account's limits under this label.
         if account.get("account_id"):
@@ -343,9 +345,27 @@ def poll_all(accounts: dict[str, dict[str, str]], binary: str | None = None) -> 
             rows[futures[future]] = future.result()
     with locked():
         current = load_usage()
-        current.update(rows)
+        for label, row in rows.items():
+            current[label] = keep_last_good(row, current.get(label))
         write_json(USAGE_PATH, current)
     return rows
+
+
+def last_good(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The newest reading with quota windows: the row itself, or the one a failed poll kept."""
+    if not row.get("error") and isinstance(row.get("rate_limits"), dict):
+        return row
+    kept = row.get("last_good")
+    return kept if isinstance(kept, dict) else None
+
+
+def keep_last_good(row: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+    """A failed poll keeps the last good reading beside its error, for readers that can use an
+    older figure; the router reads only the error."""
+    kept = last_good(previous or {})
+    if not row.get("error") or kept is None:
+        return row
+    return {**row, "last_good": {"fetched_at": kept["fetched_at"], "rate_limits": kept["rate_limits"]}}
 
 
 def binding_usage(row: dict[str, Any]) -> float:
@@ -358,6 +378,24 @@ def binding_usage(row: dict[str, Any]) -> float:
     if limits.get("rate_limit_reached_type") or limits.get("spend_control_reached"):
         values.append(100.0)
     return max(values, default=101.0)
+
+
+def weekly_window(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The usage window that spans a week: primary on some plans, secondary on others."""
+    limits = row.get("rate_limits") if isinstance(row.get("rate_limits"), dict) else {}
+    for key in ("primary", "secondary"):
+        limit = limits.get(key)
+        if isinstance(limit, dict) and limit.get("window_duration_mins") == WEEK_MINUTES:
+            return limit
+    return None
+
+
+def is_fresh(row: dict[str, Any], now: float) -> bool:
+    return not row.get("error") and now - float(row.get("fetched_at", 0)) <= USAGE_MAX_AGE_S
+
+
+def has_headroom(row: dict[str, Any]) -> bool:
+    return binding_usage(row) < 100 or has_credit_headroom(row)
 
 
 def has_credit_headroom(row: dict[str, Any]) -> bool:
@@ -391,9 +429,8 @@ def pick_account(
         for label in accounts
         if label not in avoid
         and label in usage
-        and not usage[label].get("error")
-        and now - float(usage[label].get("fetched_at", 0)) <= USAGE_MAX_AGE_S
-        and (binding_usage(usage[label]) < 100 or has_credit_headroom(usage[label]))
+        and is_fresh(usage[label], now)
+        and has_headroom(usage[label])
     ]
     return min(fresh, key=lambda label: (binding_usage(usage[label]), label), default=None)
 
